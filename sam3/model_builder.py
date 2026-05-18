@@ -644,6 +644,7 @@ def build_sam3_image_model(
     )
     if load_from_HF and checkpoint_path is None:
         checkpoint_path = download_ckpt_from_hf(version="sam3")
+    print(checkpoint_path if checkpoint_path is not None else "No checkpoint path provided.")
     # Load checkpoint if provided
     if checkpoint_path is not None:
         _load_checkpoint(model, checkpoint_path)
