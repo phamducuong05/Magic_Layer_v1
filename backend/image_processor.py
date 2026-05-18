@@ -1,320 +1,324 @@
-import io
-import base64
-import logging
+import io, base64, logging
 from dataclasses import dataclass, field
 from typing import List, Tuple
+from collections import defaultdict
 
 import cv2
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image
 import torch
 from models import get_sam3_processor, get_lama_model, get_matting_model
-from helpers import estimate_fg_color, refine_background, expand_mask
+from helpers import (
+    estimate_fg_color, estimate_fg_alpha,
+    refine_background, expand_mask,
+    find_flat_color_region_ccs, shrink_mask_ratio, expand_mask_ratio,
+    divide_mask_to_connected_components,
+)
 
 logger = logging.getLogger(__name__)
 
+# ── Hyperparams (mirror LayerD) ──────────────────────────────
+_TH_ALPHA            = 0.005
+_KERNEL_SCALE        = 0.015
+_UNBLEND_ALPHA_CLIP  = [0, 0.95]
+_PALETTE_PERCENTILE  = 0.99
+_FG_REFINE_NUM_COLORS   = 2
+_BG_REFINE_NUM_COLORS   = 10
+_FG_REFINE_N_INNER_RATIO = 0.1
+_BG_REFINE_N_OUTER_RATIO = 0.2
+
+
 @dataclass
 class ObjectLayer:
-    """Một đối tượng đã tách, kèm tọa độ gốc."""
     keyword: str
-    png_base64: str          # ảnh RGBA, base64 encoded
-    x: int                   # tọa độ góc trên-trái trong ảnh gốc
+    png_base64: str
+    x: int
     y: int
     width: int
     height: int
 
+
 @dataclass
 class ProcessResult:
-    """Kết quả trả về cho frontend."""
-    background_base64: str       # ảnh nền đã inpaint (JPEG/PNG), base64
+    background_base64: str
     original_width: int
     original_height: int
     layers: List[ObjectLayer] = field(default_factory=list)
 
+
+# ── Helpers ───────────────────────────────────────────────────
+
 def _image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
     buf = io.BytesIO()
     img.save(buf, format=fmt)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    return base64.b64encode(buf.getvalue()).decode()
 
-def _bbox_from_mask(mask: np.ndarray) -> Tuple[int, int, int, int] | None:
-    """Tính bounding box (x, y, w, h) từ mask nhị phân."""
+
+def _bbox_from_mask(mask: np.ndarray) -> Tuple[int,int,int,int] | None:
     rows = np.any(mask > 0, axis=1)
     cols = np.any(mask > 0, axis=0)
     if not rows.any():
         return None
-    y_min, y_max = np.where(rows)[0][[0, -1]]
-    x_min, x_max = np.where(cols)[0][[0, -1]]
-    return int(x_min), int(y_min), int(x_max - x_min + 1), int(y_max - y_min + 1)
+    y0, y1 = np.where(rows)[0][[0, -1]]
+    x0, x1 = np.where(cols)[0][[0, -1]]
+    return int(x0), int(y0), int(x1-x0+1), int(y1-y0+1)
 
-def _extract_rgba_layer(
-    image_rgb: Image.Image,
-    mask: np.ndarray,
-    bbox: Tuple[int, int, int, int],
-) -> Image.Image:
+
+def _calc_kernel_size(image_np: np.ndarray) -> tuple[int,int]:
+    h, w = image_np.shape[:2]
+    return (round(h * _KERNEL_SCALE), round(w * _KERNEL_SCALE))
+
+
+def _build_inpaint_mask(
+    image_rgb: np.ndarray,
+    hard_mask: np.ndarray,           # bool (H,W)
+    kernel_size: tuple[int,int],
+) -> np.ndarray:
     """
-    Cắt đối tượng theo bbox, áp mask làm alpha channel.
-    Trả về ảnh RGBA với nền trong suốt.
+    Tạo inpaint_mask theo chiến lược FG-refine của LayerD:
+    shrink CC → expand(shrinked ∪ color_masks).
+    Nếu không tìm được flat color region, fallback về expand(hard_mask).
     """
-    x, y, w, h = bbox
-    # Crop ảnh gốc và mask theo bbox
-    crop_rgb = image_rgb.crop((x, y, x + w, y + h))
-    mask_crop = Image.fromarray(mask[y:y+h, x:x+w])
+    color_masks, _, ccs = find_flat_color_region_ccs(
+        image_rgb, hard_mask,
+        max_num_colors=_FG_REFINE_NUM_COLORS,
+        percentile=_PALETTE_PERCENTILE,
+    )
+    if len(ccs) == 0:
+        return expand_mask(hard_mask, kernel_size)
 
-    # Chuyển sang RGBA và gán alpha = mask
-    rgba = crop_rgb.convert("RGBA")
-    r, g, b, _ = rgba.split()
-    rgba = Image.merge("RGBA", (r, g, b, mask_crop))
-    return rgba
+    shrinked_ccs = [
+        ccs[i] if len(color_masks[i]) == 0
+        else shrink_mask_ratio(ccs[i], _FG_REFINE_N_INNER_RATIO)
+        for i in range(len(ccs))
+    ]
+    combined = np.any(shrinked_ccs + sum(color_masks, []), axis=0)
+    return expand_mask(combined, kernel_size)
 
 
-# ──────────────────────────────────────────────
-# Pipeline chính
-# ──────────────────────────────────────────────
+def _refine_alpha_with_colors(
+    image_rgb: np.ndarray,
+    bg_np:     np.ndarray,
+    alpha:     np.ndarray,           # float64 (H,W) in [0,1]
+    hard_mask: np.ndarray,           # bool
+    kernel_size: tuple[int,int],
+) -> tuple[np.ndarray, np.ndarray]:  # refined alpha, refined fg_rgb
+    """
+    Per-color alpha refinement (port trực tiếp từ LayerD._decompose_step).
+    """
+    image_uint8 = (image_rgb).astype(np.uint8)
+    alpha = alpha.astype(np.float64)
+    fg_rgb = estimate_fg_color(image_uint8, bg_np.astype(np.uint8),
+                               alpha, _UNBLEND_ALPHA_CLIP)
 
-# def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
-#     orig_w, orig_h = image.size
-#     processor = get_sam3_processor()
-#     matting_processor = get_matting_model()
-#     lama = get_lama_model()
+    color_masks, colors, ccs = find_flat_color_region_ccs(
+        image_uint8, hard_mask,
+        max_num_colors=_FG_REFINE_NUM_COLORS,
+        percentile=_PALETTE_PERCENTILE,
+    )
 
-#     all_masks = []
-#     object_layers = []
+    for colors_cc, color_masks_cc, cc in zip(colors, color_masks, ccs):
+        _ref_alpha  = np.zeros_like(alpha)
+        _ref_color  = np.zeros_like(fg_rgb)
+        _nonzero    = np.zeros_like(alpha)
 
-#     device_type = "cuda" if torch.cuda.is_available() else "cpu"
-#     mixed_precision_dtype = torch.bfloat16 if (device_type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+        for color, cmask in zip(colors_cc, color_masks_cc):
+            cmask_exp = expand_mask(cmask, kernel_size)
+            ra = estimate_fg_alpha(cmask_exp, color, bg_np.astype(np.uint8), image_uint8)
+            if ra is not None:
+                _ref_alpha = np.maximum(_ref_alpha, ra)
+                _ref_color[ra > 0] = color
+                _nonzero += (ra > 0).astype(int)
 
-#     # Wrap trong no_grad + tắt autocast hoàn toàn
-#     with torch.no_grad(), torch.autocast(device_type=device_type, dtype=mixed_precision_dtype):
+        boundary = _nonzero > 1
+        if _ref_alpha.sum() > 0:
+            inner_cc  = (~shrink_mask_ratio(cc, _FG_REFINE_N_INNER_RATIO)) & cc
+            target    = ((alpha == 0) | inner_cc) & (~boundary)
+            alpha[target]    = np.maximum(alpha[target], _ref_alpha[target])
+            upd = target & (_ref_alpha > 0)
+            fg_rgb[upd] = _ref_color[upd]
 
-#         # Đảm bảo ảnh PIL là RGB uint8 sạch
-#         image = image.convert("RGB")
+    return alpha, fg_rgb
 
-#         for keyword in keywords:
-#             keyword = keyword.strip()
-#             if not keyword:
-#                 continue
 
-#             print(f"[SAM3] Keyword: '{keyword}'")
-#             processor.reset_all_prompts(inference_state)
-#             inference_state = processor.set_text_prompt(
-#                 state=inference_state,
-#                 prompt=keyword,
-#             )
+# ── Overlap helpers ───────────────────────────────────────────
 
-#             masks  = inference_state.get("masks")   # [N, 1, H, W]
-#             boxes  = inference_state.get("boxes")   # [N, 4] XYXY
-#             scores = inference_state.get("scores")  # [N]
+def _build_cumulative_inpaint_mask(
+    masks:        List[np.ndarray],  # list of (H,W) uint8 0/255
+    target_idx:   int,
+    overlap_only: bool = True,
+) -> np.ndarray:
+    """
+    Tạo mask inpaint cho vật thể `target_idx`:
+    - mask của chính nó
+    - union với các mask của vật thể khác ĐÈ LÊN nó
+      (overlap_only=True → chỉ lấy phần giao; False → toàn bộ mask kia)
+    Trả về mask uint8 0/255.
+    """
+    target = masks[target_idx].astype(bool)
+    combined = target.copy()
 
-#             if masks is None or len(masks) == 0:
-#                 logger.warning(f"[SAM3] Không tìm thấy object cho '{keyword}'")
-#                 continue
+    for i, m in enumerate(masks):
+        if i == target_idx:
+            continue
+        other = m.astype(bool)
+        if not np.any(other & target):   # không đè lên target → bỏ qua
+            continue
+        combined |= (other & target) if overlap_only else other
 
-#             nb_objects = len(masks)
-#             print(f"[SAM3] Tìm thấy {nb_objects} object(s) cho '{keyword}'")
+    return combined.astype(np.uint8) * 255
 
-#             # Xử lý từng object detect được
-#             for i in range(nb_objects):
-#                 mask_tensor = masks[i]                          # [1, H, W]
-#                 if hasattr(mask_tensor, "cpu"):
-#                     mask_np = mask_tensor.squeeze(0).cpu().numpy()
-#                 else:
-#                     mask_np = np.squeeze(mask_tensor)
 
-#                 mask_binary = (mask_np > 0).astype(np.uint8) * 255
-
-#                 bbox = _bbox_from_mask(mask_binary)
-#                 if bbox is None:
-#                     continue
-
-#                 score = scores[i].item() if scores is not None else 1.0
-#                 label = f"{keyword}_{i}" if nb_objects > 1 else keyword
-
-#                 rgba_layer = _extract_rgba_layer(image, mask_binary, bbox)
-#                 all_masks.append(mask_binary)
-
-#                 object_layers.append(ObjectLayer(
-#                     keyword=label,
-#                     png_base64=_image_to_base64(rgba_layer, fmt="PNG"),
-#                     x=bbox[0], y=bbox[1],
-#                     width=bbox[2], height=bbox[3],
-#                 ))
-#                 print(f"[SAM3] Layer '{label}' score={score:.2f} bbox={bbox}")
-
-#     lama = get_lama_model()
-
-#     if all_masks:
-#         print(f"[LaMa] Found {len(all_masks)} masks. Starting sequential inpainting...")
-        
-#         # Đảm bảo ảnh đầu vào là RGB (LaMa không nhận ảnh có kênh Alpha/RGBA trực tiếp)
-#         current_background = image.convert("RGB")
-#         with torch.no_grad(), torch.autocast(device_type=device_type, enabled=False):
-#             for i, m in enumerate(all_masks):
-#                 print(f"[LaMa] Inpainting mask {i+1}/{len(all_masks)}...")
-#                 kernel = np.ones((10, 10), np.uint8)
-#                 m = cv2.dilate(m, kernel, iterations=1)
-                
-#                 # 1. Chuyển mask hiện tại từ numpy array sang PIL Image mode "L"
-#                 mask_pil = Image.fromarray(m).convert("L")
-
-#                 # 2. Chạy LaMa inpainting
-#                 # LaMa (SimpleLama) nhận vào (PIL Image, PIL Mask) và trả về trực tiếp PIL Image
-#                 current_background = lama(current_background, mask_pil)
-                
-#                 # 3. Resize lại để đảm bảo kích thước luôn khớp tuyệt đối với ảnh gốc
-#                 if current_background.size != (orig_w, orig_h):
-#                     current_background = current_background.resize((orig_w, orig_h), Image.LANCZOS)
-
-#         background = current_background
-#         print("[LaMa] All masks processed.")
-#     else:
-#         logger.warning("Không detect được object nào, dùng ảnh gốc làm background.")
-#         background = image.copy()
-
-#     # Giữ nguyên phần log và trả về kết quả
-#     print(f"Original image size: {image.size}")           # (W, H)
-#     print(f"Background size: {background.size}")          # Khớp với original
-    
-#     for layer in object_layers:
-#         print(f"Layer '{layer.keyword}': x={layer.x}, y={layer.y}, w={layer.width}, h={layer.height}")
-
-#     return ProcessResult(
-#         background_base64=_image_to_base64(background, fmt="PNG"),
-#         original_width=orig_w,
-#         original_height=orig_h,
-#         layers=object_layers,
-#     )
+# ── Pipeline chính ────────────────────────────────────────────
 
 def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
-    from models import get_sam3_processor, get_lama_model, get_matting_model
-
     orig_w, orig_h = image.size
-    processor = get_sam3_processor()
-    matting_processor = get_matting_model()
-    lama = get_lama_model()
+    image = image.convert("RGB")
+    image_np = np.array(image, dtype=np.uint8)   # (H,W,3) uint8, dùng xuyên suốt
 
-    image_rgb = image.convert("RGB")
-    image_np = np.array(image_rgb)
-    
+    processor       = get_sam3_processor()
+    matting_model   = get_matting_model()
+    lama            = get_lama_model()
+    kernel_size     = _calc_kernel_size(image_np)
+
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
-    mixed_precision_dtype = torch.bfloat16 if (device_type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+    mixed_dtype = (torch.bfloat16
+                   if device_type == "cuda" and torch.cuda.is_bf16_supported()
+                   else torch.float16)
 
-    # Lưu trữ thông tin object để xử lý sau
-    detected_objects = [] 
-    all_inpaint_masks = []
+    # ── 1. SAM3: thu thập tất cả mask ──────────────────────────
+    raw_masks: List[np.ndarray] = []   # uint8 0/255, (H,W)
+    labels:    List[str]        = []
 
-    # --- BƯỚC 1: DETECTION VỚI SAM3 ---
-    with torch.no_grad(), torch.autocast(device_type=device_type, dtype=mixed_precision_dtype):
-        print(f"[SAM3] Processing image ({orig_w}x{orig_h})...")
-        inference_state = processor.set_image(image_rgb)
-
+    with torch.no_grad(), torch.autocast(device_type, dtype=mixed_dtype):
+        inference_state = processor.set_image(image)
         for keyword in keywords:
             keyword = keyword.strip()
-            if not keyword: continue
+            if not keyword:
+                continue
 
             processor.reset_all_prompts(inference_state)
             inference_state = processor.set_text_prompt(state=inference_state, prompt=keyword)
 
-            masks = inference_state.get("masks")
+            masks  = inference_state.get("masks")
             scores = inference_state.get("scores")
-
             if masks is None or len(masks) == 0:
+                logger.warning(f"[SAM3] Không tìm thấy object cho '{keyword}'")
                 continue
 
-            for i in range(len(masks)):
-                mask_tensor = masks[i]
-                mask_np = mask_tensor.squeeze(0).cpu().numpy() if hasattr(mask_tensor, "cpu") else np.squeeze(mask_tensor)
-                mask_binary = (mask_np > 0).astype(np.uint8) * 255
-                
-                bbox = _bbox_from_mask(mask_binary)
-                if bbox is None: continue
+            for i, mt in enumerate(masks):
+                mn = mt.squeeze(0)
+                if hasattr(mn, "cpu"):
+                    mn = mn.cpu().numpy()
+                raw_masks.append((mn > 0).astype(np.uint8) * 255)
+                lbl = f"{keyword}_{i}" if len(masks) > 1 else keyword
+                labels.append(lbl)
+                score = scores[i].item() if scores is not None else 1.0
+                logger.info(f"[SAM3] '{lbl}' score={score:.2f}")
 
-                label = f"{keyword}_{i}" if len(masks) > 1 else keyword
-                
-                # Lưu mask thô để inpaint và metadata để trích xuất layer sau
-                detected_objects.append({
-                    "label": label,
-                    "sam_mask": mask_binary,
-                    "bbox": bbox,
-                    "score": scores[i].item() if scores is not None else 1.0
-                })
-                
-                # Tạo mask mở rộng để LaMa xóa sạch chân vật thể (Dilation)
-                kernel_size = max(3, int(min(orig_w, orig_h) * 0.015)) # 1.5% kích thước ảnh
-                dilated_mask = expand_mask(mask_binary > 0, kernel_size)
-                all_inpaint_masks.append(dilated_mask)
+    if not raw_masks:
+        logger.warning("Không detect được object nào.")
+        return ProcessResult(
+            background_base64=_image_to_base64(image),
+            original_width=orig_w, original_height=orig_h,
+        )
 
-    # --- BƯỚC 2: TẠO BACKGROUND (INPAINT + PALETTE REFINE) ---
-    if all_inpaint_masks:
-        print(f"[LaMa] Sequential inpainting {len(all_inpaint_masks)} masks...")
-        current_bg_np = image_np.copy()
-        
-        # Tắt autocast cho LaMa để tránh lỗi BFloat16
-        with torch.no_grad(), torch.autocast(device_type=device_type, enabled=False):
-            for i, m in enumerate(all_inpaint_masks):
-                print(f"[LaMa] Processing mask {i+1}...")
-                m_pil = Image.fromarray((m * 255).astype(np.uint8)).convert("L")
-                bg_pil = Image.fromarray(current_bg_np)
-                
-                # 1. Inpaint
-                inpainted_pil = lama(bg_pil, m_pil)
-                if inpainted_pil.size != (orig_w, orig_h):
-                    inpainted_pil = inpainted_pil.resize((orig_w, orig_h), Image.LANCZOS)
-                
-                # 2. Refine Background (Kỹ thuật LayerD)
-                # Giúp vùng inpaint sắc nét và đồng nhất màu sắc với xung quanh
-                current_bg_np = refine_background(
-                    bg=np.array(inpainted_pil),
-                    mask=m.astype(bool),
-                    n_outer_ratio=0.2,
-                    max_num_colors=10
-                )
-        background_final = Image.fromarray(current_bg_np)
-    else:
-        background_final = image.copy()
+    # ── 2. Matting: lấy soft alpha cho từng mask ───────────────
+    # Matting chạy trên toàn ảnh; SAM3 mask dùng để crop ROI trước
+    # để tránh nhầm với các vật thể khác → guided matting
+    soft_alphas: List[np.ndarray] = []   # float64 (H,W) in [0,1]
 
-    # --- BƯỚC 3: TRÍCH XUẤT LAYER (MATTING + UNBLENDING) ---
-    object_layers = []
-    
-    if detected_objects:
-        print(f"[Matting] Running BiRefNet once for all objects...")
-        
-        # 1. Chạy Matting 1 lần duy nhất cho cả tấm ảnh (Tắt autocast để tránh lỗi Half/Float)
-        with torch.no_grad(), torch.autocast(device_type=device_type, enabled=False):
-            # Ép chạy Float32 hoàn toàn cho Matting
-            full_alpha_tensor = matting_processor(image_rgb)
-            full_alpha_np = full_alpha_tensor.cpu().numpy().astype(np.float64)
+    with torch.no_grad(), torch.autocast(device_type, dtype=mixed_dtype):
+        for m_bin in raw_masks:
+            # Tạo ảnh crop với vùng ngoài mask bị làm tối
+            # → matting tập trung vào đúng vật thể
+            guided = image_np.copy()
+            guided[m_bin == 0] = 0          # hoặc dùng blur thay vì black
+            alpha_f = matting_model(Image.fromarray(guided))   # float64 (H,W)
+            hard = alpha_f > _TH_ALPHA
+            m_bin_tensor = torch.from_numpy(m_bin).to(alpha_f.device) > 0
+            # Giữ lại chỉ phần alpha nằm trong SAM3 mask
+            hard = hard & m_bin_tensor
+            hard = hard.bool() 
+            alpha_f[~hard] = 0.0
+            alpha_np = alpha_f.cpu().to(torch.float64).numpy()
+            alpha_np = np.clip(alpha_np, 0.0, 1.0)
+            soft_alphas.append(alpha_np)
 
-        # 2. Xử lý từng object dựa trên bản đồ Alpha chung đã có
-        print(f"[Unblending] Processing {len(detected_objects)} layers...")
-        for obj in detected_objects:
-            # Chỉ lấy alpha trong vùng SAM3 đã chỉ định cho object này
-            object_alpha = full_alpha_np * (obj["sam_mask"] > 0)
+    # ── 3. Inpaint background cho TỪNG vật thể ─────────────────
+    # Luôn bắt đầu từ ảnh GỐC; union với mask của vật thể đè lên
+    object_layers: List[ObjectLayer] = []
 
-            # Unblending sử dụng background sạch đã tạo ở Bước 2
-            fg_rgb_np = estimate_fg_color(
-                image_np=image_np,
-                bg_np=np.array(background_final),
-                alpha_np=object_alpha
+    with torch.no_grad(), torch.autocast(device_type, enabled=False):
+        for idx, (alpha, label) in enumerate(zip(soft_alphas, labels)):
+            hard_mask = alpha > _TH_ALPHA      # bool (H,W)
+            bbox = _bbox_from_mask(hard_mask.astype(np.uint8) * 255)
+            if bbox is None:
+                continue
+
+            # 3a. Tạo inpaint mask (target + vùng bị đè)
+            inpaint_mask_raw = _build_cumulative_inpaint_mask(raw_masks, idx)
+            inpaint_mask_fg  = _build_inpaint_mask(image_np, hard_mask, kernel_size)
+            # Merge: union của FG-refine mask và overlap mask
+            inpaint_mask = np.maximum(inpaint_mask_raw, inpaint_mask_fg)
+
+            # 3b. Inpaint từ ảnh gốc
+            mask_pil = Image.fromarray(inpaint_mask).convert("L")
+            bg_pil   = lama(image, mask_pil)
+            if bg_pil.size != (orig_w, orig_h):
+                bg_pil = bg_pil.resize((orig_w, orig_h), Image.LANCZOS)
+            bg_np = np.array(bg_pil.convert("RGB"), dtype=np.uint8)
+
+            # 3c. BG refinement (snap màu)
+            bg_np = refine_background(
+                bg_np, inpaint_mask.astype(bool),
+                n_outer_ratio=_BG_REFINE_N_OUTER_RATIO,
+                max_num_colors=_BG_REFINE_NUM_COLORS,
             )
 
-            # Tạo RGBA Layer
-            rgba_np = np.dstack([fg_rgb_np, (object_alpha * 255).astype(np.uint8)])
-            rgba_pil = Image.fromarray(rgba_np)
-            
-            b = obj["bbox"]
-            cropped_layer = rgba_pil.crop((b[0], b[1], b[0] + b[2], b[1] + b[3]))
+            # 3d. Unblend + per-color alpha refinement
+            alpha_refined, fg_rgb = _refine_alpha_with_colors(
+                image_np, bg_np, alpha.copy(), hard_mask, kernel_size
+            )
+
+            # 3e. Tạo RGBA layer crop theo bbox
+            x, y, w, h = bbox
+            fg_crop    = fg_rgb[y:y+h, x:x+w]
+            alpha_crop = (alpha_refined[y:y+h, x:x+w] * 255).astype(np.uint8)
+            rgba_arr   = np.dstack([fg_crop, alpha_crop])
+            rgba_img   = Image.fromarray(rgba_arr, mode="RGBA")
 
             object_layers.append(ObjectLayer(
-                keyword=obj["label"],
-                png_base64=_image_to_base64(cropped_layer, fmt="PNG"),
-                x=b[0], y=b[1], width=b[2], height=b[3],
+                keyword=label,
+                png_base64=_image_to_base64(rgba_img, "PNG"),
+                x=x, y=y, width=w, height=h,
             ))
-            print(f"[Layer] Extracted: {obj['label']}")
+            logger.info(f"[Layer] '{label}' bbox={bbox}")
+
+    # ── 4. Background cuối: inpaint TẤT CẢ mask cùng lúc ──────
+    if raw_masks:
+        union_mask = np.zeros_like(raw_masks[0])
+        for m in raw_masks:
+            union_mask = np.maximum(union_mask, m)
+        # Dùng inpaint_mask đã qua FG-refine nếu có
+        union_mask = expand_mask(union_mask > 0, kernel_size) # Thêm dòng này
+        final_mask_pil = Image.fromarray(union_mask).convert("L")
+        final_bg = lama(image, final_mask_pil)
+        if final_bg.size != (orig_w, orig_h):
+            final_bg = final_bg.resize((orig_w, orig_h), Image.LANCZOS)
+        final_bg_np = np.array(final_bg.convert("RGB"), dtype=np.uint8)
+        final_bg_np = refine_background(
+            final_bg_np, union_mask.astype(bool),
+            n_outer_ratio=_BG_REFINE_N_OUTER_RATIO,
+            max_num_colors=_BG_REFINE_NUM_COLORS,
+        )
+        final_bg = Image.fromarray(final_bg_np)
+    else:
+        final_bg = image
 
     return ProcessResult(
-        background_base64=_image_to_base64(background_final, fmt="PNG"),
+        background_base64=_image_to_base64(final_bg, "PNG"),
         original_width=orig_w,
         original_height=orig_h,
         layers=object_layers,
     )
-
