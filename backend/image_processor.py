@@ -17,7 +17,6 @@ from helpers import (
 
 logger = logging.getLogger(__name__)
 
-# ── Hyperparams (mirror LayerD) ──────────────────────────────
 _TH_ALPHA            = 0.005
 _KERNEL_SCALE        = 0.015
 _UNBLEND_ALPHA_CLIP  = [0, 0.95]
@@ -141,33 +140,128 @@ def _refine_alpha_with_colors(
     return alpha, fg_rgb
 
 
-# ── Overlap helpers ───────────────────────────────────────────
+def _estimate_depth_order(masks: List[np.ndarray]) -> List[int]:
+    """
+    Ước tính thứ tự z bằng overlap ratio.
+    Vật nào có phần bị che NHIỀU HƠN → nằm dưới.
+    Trả về indices từ trên xuống dưới (index 0 = trên cùng).
+    """
+    n = len(masks)
+    # overlap_score[i] = tổng diện tích bị các mask khác che
+    overlap_scores = np.zeros(n)
+    
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            mi = masks[i].astype(bool)
+            mj = masks[j].astype(bool)
+            intersection = np.sum(mi & mj)
+            if intersection == 0:
+                continue
+            # Nếu j che i → i bị che → i nằm dưới j
+            # Heuristic: vật nào nhỏ hơn trong vùng giao thường là vật trên
+            ratio_i = intersection / np.sum(mi)
+            ratio_j = intersection / np.sum(mj)
+            if ratio_i > ratio_j:
+                # i bị che nhiều hơn → i nằm dưới
+                overlap_scores[i] += intersection
+    
+    # Sort: score thấp = ít bị che = nằm trên
+    return list(np.argsort(overlap_scores))
 
-def _build_cumulative_inpaint_mask(
-    masks:        List[np.ndarray],  # list of (H,W) uint8 0/255
-    target_idx:   int,
-    overlap_only: bool = True,
+def _remove_occluder_with_seed(
+    image_np:     np.ndarray,    # ảnh gốc RGB
+    target_mask:  np.ndarray,    # mask của B (bool)
+    occluder_mask: np.ndarray,   # mask của A (bool)
+    lama,
+    orig_size:    tuple,
 ) -> np.ndarray:
     """
-    Tạo mask inpaint cho vật thể `target_idx`:
-    - mask của chính nó
-    - union với các mask của vật thể khác ĐÈ LÊN nó
-      (overlap_only=True → chỉ lấy phần giao; False → toàn bộ mask kia)
-    Trả về mask uint8 0/255.
+    Xóa occluder (A) ra khỏi ảnh, nhưng seed màu B vào vùng
+    overlap trước để guide LaMa fill đúng màu B.
     """
-    target = masks[target_idx].astype(bool)
-    combined = target.copy()
+    overlap = target_mask & occluder_mask   # vùng A đang đè lên B
 
-    for i, m in enumerate(masks):
-        if i == target_idx:
-            continue
-        other = m.astype(bool)
-        if not np.any(other & target):   # không đè lên target → bỏ qua
-            continue
-        combined |= (other & target) if overlap_only else other
+    if not np.any(overlap):
+        return image_np.copy()
 
-    return combined.astype(np.uint8) * 255
+    # Bước 1: Lấy màu đại diện của B từ vùng KHÔNG bị che
+    visible_B = target_mask & (~occluder_mask)  # phần B đang lộ ra
+    if np.sum(visible_B) == 0:
+        # B bị che hoàn toàn → không có thông tin màu → fallback
+        return image_np.copy()
 
+    # Lấy màu trung bình của B tại vùng lộ ra
+    B_colors = image_np[visible_B]           # (N, 3)
+    B_mean_color = np.median(B_colors, axis=0).astype(np.uint8)
+
+    # Bước 2: Seed màu B vào vùng overlap trong ảnh
+    seeded = image_np.copy()
+    seeded[overlap] = B_mean_color           # đặt màu B vào chỗ A đang che
+
+    # Bước 3: Inpaint với mask nhỏ hơn — chỉ che phần rìa overlap
+    # (không che toàn bộ overlap vì đã seed màu B rồi)
+    # → LaMa chỉ cần smooth transition, không cần đoán màu từ đầu
+    kernel = np.ones((7, 7), np.uint8)
+    overlap_u8  = overlap.astype(np.uint8) * 255
+    eroded      = cv2.erode(overlap_u8, kernel, iterations=2)
+    inpaint_region = overlap_u8 & ~eroded    # chỉ phần rìa mỏng của overlap
+
+    if np.sum(inpaint_region) == 0:
+        return seeded
+
+    mask_pil   = Image.fromarray(inpaint_region).convert("L")
+    result     = lama(Image.fromarray(seeded), mask_pil)
+    if result.size != orig_size:
+        result = result.resize(orig_size, Image.LANCZOS)
+
+    return np.array(result.convert("RGB"), dtype=np.uint8)
+
+def _build_source_image_for_object(
+    original_np:  np.ndarray,
+    masks:        List[np.ndarray],
+    target_idx:   int,
+    depth_order:  List[int],
+    lama,
+    orig_size:    tuple,
+) -> np.ndarray:
+    target_pos = depth_order.index(target_idx)
+    objects_above = depth_order[:target_pos]
+    
+    # 1. Lấy mask hiện tại của người (đang bị khuyết)
+    target_mask = masks[target_idx].astype(bool)
+    
+    # 2. Tạo Bounding Box Mask (Vùng không gian tiềm năng của người đó)
+    # Chúng ta dùng BBox để "bao vây" các vật thể đang đè lên
+    res = _bbox_from_mask(masks[target_idx])
+    if res is None: return original_np.copy()
+    x, y, w, h = res
+    target_bbox_mask = np.zeros(target_mask.shape, dtype=bool)
+    target_bbox_mask[y:y+h, x:x+w] = True
+
+    # 3. Tìm các vật cản dựa trên BBox Mask thay vì Target Mask
+    occluders = [
+        i for i in objects_above
+        if np.any(masks[i].astype(bool) & target_bbox_mask) # Giao với BBox
+    ]
+
+    if not occluders:
+        return original_np.copy()
+
+    current = original_np.copy()
+    for occ_idx in occluders:
+        # 4. Khi gọi hàm xóa, ta truyền target_bbox_mask làm "đại diện"
+        # để xác định vùng cần phục hồi màu (overlap)
+        current = _remove_occluder_with_seed(
+            image_np=current,
+            target_mask=target_bbox_mask, # Dùng BBox Mask ở đây
+            occluder_mask=masks[occ_idx].astype(bool),
+            lama=lama,
+            orig_size=orig_size,
+        )
+
+    return current
 
 # ── Pipeline chính ────────────────────────────────────────────
 
@@ -201,6 +295,7 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
             inference_state = processor.set_text_prompt(state=inference_state, prompt=keyword)
 
             masks  = inference_state.get("masks")
+            print(f"Tìm thấy {len(masks) if masks is not None else 0} mask cho '{keyword}'")
             scores = inference_state.get("scores")
             if masks is None or len(masks) == 0:
                 logger.warning(f"[SAM3] Không tìm thấy object cho '{keyword}'")
@@ -250,35 +345,48 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
     object_layers: List[ObjectLayer] = []
 
     with torch.no_grad(), torch.autocast(device_type, enabled=False):
+        depth_order = _estimate_depth_order(raw_masks)
         for idx, (alpha, label) in enumerate(zip(soft_alphas, labels)):
             hard_mask = alpha > _TH_ALPHA      # bool (H,W)
             bbox = _bbox_from_mask(hard_mask.astype(np.uint8) * 255)
             if bbox is None:
                 continue
-
+            source_np = _build_source_image_for_object(
+                original_np=image_np,
+                masks=raw_masks,
+                target_idx=idx,
+                depth_order=depth_order,
+                lama=lama,
+                orig_size=(orig_w, orig_h),
+            )
+            source_img = Image.fromarray(source_np)
             # 3a. Tạo inpaint mask (target + vùng bị đè)
-            inpaint_mask_raw = _build_cumulative_inpaint_mask(raw_masks, idx)
-            inpaint_mask_fg  = _build_inpaint_mask(image_np, hard_mask, kernel_size)
-            # Merge: union của FG-refine mask và overlap mask
-            inpaint_mask = np.maximum(inpaint_mask_raw, inpaint_mask_fg)
+            # inpaint_mask_raw = _build_cumulative_inpaint_mask(raw_masks, idx)
+            # inpaint_mask_fg  = _build_inpaint_mask(image_np, hard_mask, kernel_size)
 
-            # 3b. Inpaint từ ảnh gốc
-            mask_pil = Image.fromarray(inpaint_mask).convert("L")
-            bg_pil   = lama(image, mask_pil)
+            # 3a v2
+            inpaint_mask_fg = _build_inpaint_mask(source_np, hard_mask, kernel_size)
+            mask_pil = Image.fromarray(inpaint_mask_fg).convert("L")
+            # Merge: union của FG-refine mask và overlap mask
+            # inpaint_mask = np.maximum(inpaint_mask_raw, inpaint_mask_fg)
+
+            # # 3b. Inpaint từ ảnh gốc
+            # mask_pil = Image.fromarray(inpaint_mask).convert("L")
+            bg_pil   = lama(source_img, mask_pil)
             if bg_pil.size != (orig_w, orig_h):
                 bg_pil = bg_pil.resize((orig_w, orig_h), Image.LANCZOS)
             bg_np = np.array(bg_pil.convert("RGB"), dtype=np.uint8)
 
             # 3c. BG refinement (snap màu)
             bg_np = refine_background(
-                bg_np, inpaint_mask.astype(bool),
+                bg_np, inpaint_mask_fg.astype(bool),
                 n_outer_ratio=_BG_REFINE_N_OUTER_RATIO,
                 max_num_colors=_BG_REFINE_NUM_COLORS,
             )
 
             # 3d. Unblend + per-color alpha refinement
             alpha_refined, fg_rgb = _refine_alpha_with_colors(
-                image_np, bg_np, alpha.copy(), hard_mask, kernel_size
+                source_np, bg_np, alpha.copy(), hard_mask, kernel_size
             )
 
             # 3e. Tạo RGBA layer crop theo bbox

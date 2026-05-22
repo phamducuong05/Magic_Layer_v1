@@ -57,7 +57,9 @@ def divide_mask_to_connected_components(mask: np.ndarray) -> list[np.ndarray]:
 
 
 def calc_gradient_magnitude(rgb: np.ndarray) -> np.ndarray:
-    """Calculate gradient magnitude of a color image using Sobel operator."""
+    """Calculate gradient magnitude of a color image using Sobel operator.
+    Low gradient magnitude indicates flat color regions, high gradient magnitude indicates edges or textured regions.
+    """
     grad_x = cv2.Sobel(rgb, cv2.CV_64F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(rgb, cv2.CV_64F, 0, 1, ksize=3)
     grad_magnitude = np.sqrt(grad_x**2 + grad_y**2).sum(axis=-1)
@@ -65,7 +67,9 @@ def calc_gradient_magnitude(rgb: np.ndarray) -> np.ndarray:
 
 
 def get_colors_until_percentile(color_counts: Counter, percentile: float) -> np.ndarray:
-    """Calculate percentile from Counter object without pandas."""
+    """Calculate percentile from Counter object without pandas.
+    Find the most common colors until the cumulative percentage reaches the given percentile.
+    """
     # Sort and calculate cumulative percentages
     sorted_items = sorted(color_counts.items(), key=lambda x: x[1], reverse=True)
     colors = np.array([c for c, _ in sorted_items])
@@ -132,9 +136,9 @@ def find_flat_color_region(
             the identified palette colors. Default: 0.85.
 
     Returns:
-        A tuple containing:
-        - color_masks: List of binary masks (numpy arrays), one for each identified color region.
-        - palette: List of RGB color values (numpy arrays) corresponding to each mask.
+        A tuple containing: 
+        - color_masks: List of binary masks (numpy arrays), one for each identified color region (mask cho vùng màu phẳng).
+        - palette: List of RGB color values (numpy arrays) corresponding to each mask (bảng màu tương ứng với các mask).
     """
 
     assert rgb_np.dtype == np.uint8, f"Expected uint8 rgb_np, got {rgb_np.dtype}"
@@ -246,7 +250,7 @@ def estimate_fg_alpha(mask: np.ndarray, fg: np.ndarray, bg: np.ndarray, image: n
     Args:
         mask: Binary mask (H, W) where the color is present
         fg: Foreground color as a numpy array (H, W, 3) or (3,)
-        bg: Background image as a numpy array (H, W, 3)
+        bg: Background image after inpainting and refining as a numpy array (H, W, 3)
         image: Original image as a numpy array (H, W, 3)
 
     Returns:
@@ -284,7 +288,7 @@ def estimate_fg_color(
 
     Args:
         image_np: Original image (H, W, 3), uint8
-        bg_np: Background image (H, W, 3), uint8
+        bg_np: Background image after refining (H, W, 3), uint8
         alpha_np: Alpha mask (H, W), float64 in [0, 1]
         alpha_clip_range: Range for alpha clipping [min, max]
         clip_way: How to handle out-of-range values ("clip" or "replace")
