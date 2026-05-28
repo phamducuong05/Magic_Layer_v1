@@ -44,9 +44,6 @@ class ProcessResult:
     original_height: int
     layers: List[ObjectLayer] = field(default_factory=list)
 
-
-# ── Helpers ───────────────────────────────────────────────────
-
 def _image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
     buf = io.BytesIO()
     img.save(buf, format=fmt)
@@ -141,11 +138,6 @@ def _refine_alpha_with_colors(
 
 
 def _estimate_depth_order(masks: List[np.ndarray]) -> List[int]:
-    """
-    Ước tính thứ tự z bằng overlap ratio.
-    Vật nào có phần bị che NHIỀU HƠN → nằm dưới.
-    Trả về indices từ trên xuống dưới (index 0 = trên cùng).
-    """
     n = len(masks)
     # overlap_score[i] = tổng diện tích bị các mask khác che
     overlap_scores = np.zeros(n)
@@ -177,10 +169,6 @@ def _remove_occluder_with_seed(
     lama,
     orig_size:    tuple,
 ) -> np.ndarray:
-    """
-    Xóa occluder (A) ra khỏi ảnh, nhưng seed màu B vào vùng
-    overlap trước để guide LaMa fill đúng màu B.
-    """
     overlap = target_mask & occluder_mask   # vùng A đang đè lên B
 
     if not np.any(overlap):
@@ -228,22 +216,11 @@ def _build_source_image_for_object(
 ) -> np.ndarray:
     target_pos = depth_order.index(target_idx)
     objects_above = depth_order[:target_pos]
-    
-    # 1. Lấy mask hiện tại của người (đang bị khuyết)
     target_mask = masks[target_idx].astype(bool)
-    
-    # 2. Tạo Bounding Box Mask (Vùng không gian tiềm năng của người đó)
-    # Chúng ta dùng BBox để "bao vây" các vật thể đang đè lên
-    res = _bbox_from_mask(masks[target_idx])
-    if res is None: return original_np.copy()
-    x, y, w, h = res
-    target_bbox_mask = np.zeros(target_mask.shape, dtype=bool)
-    target_bbox_mask[y:y+h, x:x+w] = True
 
-    # 3. Tìm các vật cản dựa trên BBox Mask thay vì Target Mask
     occluders = [
         i for i in objects_above
-        if np.any(masks[i].astype(bool) & target_bbox_mask) # Giao với BBox
+        if np.any(masks[i].astype(bool) & target_mask)
     ]
 
     if not occluders:
@@ -251,19 +228,15 @@ def _build_source_image_for_object(
 
     current = original_np.copy()
     for occ_idx in occluders:
-        # 4. Khi gọi hàm xóa, ta truyền target_bbox_mask làm "đại diện"
-        # để xác định vùng cần phục hồi màu (overlap)
         current = _remove_occluder_with_seed(
             image_np=current,
-            target_mask=target_bbox_mask, # Dùng BBox Mask ở đây
+            target_mask=target_mask,
             occluder_mask=masks[occ_idx].astype(bool),
             lama=lama,
             orig_size=orig_size,
         )
 
     return current
-
-# ── Pipeline chính ────────────────────────────────────────────
 
 def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
     orig_w, orig_h = image.size
@@ -280,7 +253,6 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
                    if device_type == "cuda" and torch.cuda.is_bf16_supported()
                    else torch.float16)
 
-    # ── 1. SAM3: thu thập tất cả mask ──────────────────────────
     raw_masks: List[np.ndarray] = []   # uint8 0/255, (H,W)
     labels:    List[str]        = []
 
@@ -318,30 +290,22 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
             original_width=orig_w, original_height=orig_h,
         )
 
-    # ── 2. Matting: lấy soft alpha cho từng mask ───────────────
-    # Matting chạy trên toàn ảnh; SAM3 mask dùng để crop ROI trước
-    # để tránh nhầm với các vật thể khác → guided matting
     soft_alphas: List[np.ndarray] = []   # float64 (H,W) in [0,1]
 
     with torch.no_grad(), torch.autocast(device_type, dtype=mixed_dtype):
         for m_bin in raw_masks:
-            # Tạo ảnh crop với vùng ngoài mask bị làm tối
-            # → matting tập trung vào đúng vật thể
             guided = image_np.copy()
-            guided[m_bin == 0] = 0          # hoặc dùng blur thay vì black
-            alpha_f = matting_model(Image.fromarray(guided))   # float64 (H,W)
+            guided[m_bin == 0] = 0         
+            alpha_f = matting_model(Image.fromarray(guided))   
             hard = alpha_f > _TH_ALPHA
             m_bin_tensor = torch.from_numpy(m_bin).to(alpha_f.device) > 0
-            # Giữ lại chỉ phần alpha nằm trong SAM3 mask
             hard = hard & m_bin_tensor
             hard = hard.bool() 
             alpha_f[~hard] = 0.0
             alpha_np = alpha_f.cpu().to(torch.float64).numpy()
             alpha_np = np.clip(alpha_np, 0.0, 1.0)
             soft_alphas.append(alpha_np)
-
-    # ── 3. Inpaint background cho TỪNG vật thể ─────────────────
-    # Luôn bắt đầu từ ảnh GỐC; union với mask của vật thể đè lên
+            
     object_layers: List[ObjectLayer] = []
 
     with torch.no_grad(), torch.autocast(device_type, enabled=False):
