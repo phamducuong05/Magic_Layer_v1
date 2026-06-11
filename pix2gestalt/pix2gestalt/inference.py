@@ -1,7 +1,7 @@
 import gc
 import numpy as np
 import torch
-from segment_anything import SamPredictor, sam_model_registry
+# from segment_anything import SamPredictor, sam_model_registry
 from einops import rearrange
 from omegaconf import OmegaConf
 from PIL import Image
@@ -17,7 +17,7 @@ def load_model_from_config(config, ckpt, device, verbose=False):
     closure_device = device
 
     print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location=device)
+    pl_sd = torch.load(ckpt, map_location=device, weights_only=False)
     if "global_step" in pl_sd:
         print(f"Global Step: {pl_sd['global_step']}")
     sd = pl_sd["state_dict"]
@@ -83,33 +83,33 @@ sam_models = {
   'vit_h': './ckpt/sam_vit_h.pth'
 }
 
-def get_sam_predictor(model_type='vit_h', device=None, image=None):
+# def get_sam_predictor(model_type='vit_h', device=None, image=None):
 
-  sam = sam_model_registry[model_type](checkpoint=sam_models[model_type])
-  sam = sam.to(device)
+#   sam = sam_model_registry[model_type](checkpoint=sam_models[model_type])
+#   sam = sam.to(device)
 
-  predictor = SamPredictor(sam)
-  if image is not None:
-    predictor.set_image(image)
-  return predictor
+#   predictor = SamPredictor(sam)
+#   if image is not None:
+#     predictor.set_image(image)
+#   return predictor
 
 
-def run_sam(predictor: SamPredictor, selected_points):
+# def run_sam(predictor: SamPredictor, selected_points):
 
-  if len(selected_points) == 0:
-    return []
-  input_points = [p for p, _ in selected_points]
-  input_labels = [int(l) for _, l in selected_points]
+#   if len(selected_points) == 0:
+#     return []
+#   input_points = [p for p, _ in selected_points]
+#   input_labels = [int(l) for _, l in selected_points]
 
-  masks, _, _ = predictor.predict(
-                    point_coords = np.array(input_points),
-                    point_labels = input_labels,
-                    multimask_output = False, # single object output
-  )
-  visible_mask = 255 * np.squeeze(masks).astype(np.uint8) # (256, 256)
-  overlay_mask = [(masks,'visible_mask')]
+#   masks, _, _ = predictor.predict(
+#                     point_coords = np.array(input_points),
+#                     point_labels = input_labels,
+#                     multimask_output = False, # single object output
+#   )
+#   visible_mask = 255 * np.squeeze(masks).astype(np.uint8) # (256, 256)
+#   overlay_mask = [(masks,'visible_mask')]
   
-  return visible_mask, overlay_mask
+#   return visible_mask, overlay_mask
 
 
 def run_inference(input_image, 
