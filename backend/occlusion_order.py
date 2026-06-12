@@ -69,7 +69,7 @@ def _s_bbox_recession(
     def _recession(mask, bbox):
         x, y, w, h  = bbox
         img_h, img_w = mask.shape
-        strip = max(3, min(8, int(min(w, h) * 0.04)))
+        strip = max(4, min(10, int(min(w, h) * 0.06)))
 
         total_recession = 0.0
         n_checked       = 0
