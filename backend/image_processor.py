@@ -1,30 +1,31 @@
-import io, base64, logging
+"""Orchestrates text-guided component extraction and background inpainting."""
+
+import logging
 from dataclasses import dataclass, field
-from typing import List, Tuple
-from collections import defaultdict
+from typing import List
 
 import cv2
 import numpy as np
-from PIL import Image
 import torch
-from models import get_sam3_processor, get_lama_model, get_matting_model
-from helpers import (
-    estimate_fg_color, estimate_fg_alpha,
-    refine_background, expand_mask,
-    find_flat_color_region_ccs, shrink_mask_ratio, expand_mask_ratio,
-    divide_mask_to_connected_components,
+from PIL import Image
+
+from .core.helpers import (
+    _bbox_from_mask,
+    _calc_kernel_size,
+    _image_to_base64,
+    _inference_context,
+    _merge_overlapping_masks,
+    _normalise_mask,
 )
+from .core.refine import build_inpaint_mask, refine_alpha_with_colors
+from .core.layerd_refine import expand_mask, refine_background
+from .models import model_manager
 
 logger = logging.getLogger(__name__)
 
-_TH_ALPHA            = 0.005
-_KERNEL_SCALE        = 0.015
-_UNBLEND_ALPHA_CLIP  = [0, 0.95]
-_PALETTE_PERCENTILE  = 0.99
-_FG_REFINE_NUM_COLORS   = 2
-_BG_REFINE_NUM_COLORS   = 10
-_FG_REFINE_N_INNER_RATIO = 0.1
-_BG_REFINE_N_OUTER_RATIO = 0.2
+_THRESHOLD_ALPHA = 0.005
+_BG_REFINE_NUM_COLORS = 10
+_BG_REFINE_OUTER_RATIO = 0.2
 
 
 @dataclass
@@ -44,353 +45,197 @@ class ProcessResult:
     original_height: int
     layers: List[ObjectLayer] = field(default_factory=list)
 
-def _image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
-    buf = io.BytesIO()
-    img.save(buf, format=fmt)
-    return base64.b64encode(buf.getvalue()).decode()
 
+def _extract_raw_masks(
+    image: Image.Image, keywords: List[str]
+) -> tuple[List[np.ndarray], List[str]]:
+    """Run SAM3 text prompting and return full-resolution masks and labels."""
+    processor = model_manager.get_segmentation_model().get_processor()
+    raw_masks: List[np.ndarray] = []
+    labels: List[str] = []
 
-def _bbox_from_mask(mask: np.ndarray) -> Tuple[int,int,int,int] | None:
-    rows = np.any(mask > 0, axis=1)
-    cols = np.any(mask > 0, axis=0)
-    if not rows.any():
-        return None
-    y0, y1 = np.where(rows)[0][[0, -1]]
-    x0, x1 = np.where(cols)[0][[0, -1]]
-    return int(x0), int(y0), int(x1-x0+1), int(y1-y0+1)
-
-
-def _calc_kernel_size(image_np: np.ndarray) -> tuple[int,int]:
-    h, w = image_np.shape[:2]
-    return (round(h * _KERNEL_SCALE), round(w * _KERNEL_SCALE))
-
-
-def _build_inpaint_mask(
-    image_rgb: np.ndarray,
-    hard_mask: np.ndarray,           # bool (H,W)
-    kernel_size: tuple[int,int],
-) -> np.ndarray:
-    """
-    Tạo inpaint_mask theo chiến lược FG-refine của LayerD:
-    shrink CC → expand(shrinked ∪ color_masks).
-    Nếu không tìm được flat color region, fallback về expand(hard_mask).
-    """
-    color_masks, _, ccs = find_flat_color_region_ccs(
-        image_rgb, hard_mask,
-        max_num_colors=_FG_REFINE_NUM_COLORS,
-        percentile=_PALETTE_PERCENTILE,
-    )
-    if len(ccs) == 0:
-        return expand_mask(hard_mask, kernel_size)
-
-    shrinked_ccs = [
-        ccs[i] if len(color_masks[i]) == 0
-        else shrink_mask_ratio(ccs[i], _FG_REFINE_N_INNER_RATIO)
-        for i in range(len(ccs))
-    ]
-    combined = np.any(shrinked_ccs + sum(color_masks, []), axis=0)
-    return expand_mask(combined, kernel_size)
-
-
-def _refine_alpha_with_colors(
-    image_rgb: np.ndarray,
-    bg_np:     np.ndarray,
-    alpha:     np.ndarray,           # float64 (H,W) in [0,1]
-    hard_mask: np.ndarray,           # bool
-    kernel_size: tuple[int,int],
-) -> tuple[np.ndarray, np.ndarray]:  # refined alpha, refined fg_rgb
-    """
-    Per-color alpha refinement (port trực tiếp từ LayerD._decompose_step).
-    """
-    image_uint8 = (image_rgb).astype(np.uint8)
-    alpha = alpha.astype(np.float64)
-    fg_rgb = estimate_fg_color(image_uint8, bg_np.astype(np.uint8),
-                               alpha, _UNBLEND_ALPHA_CLIP)
-
-    color_masks, colors, ccs = find_flat_color_region_ccs(
-        image_uint8, hard_mask,
-        max_num_colors=_FG_REFINE_NUM_COLORS,
-        percentile=_PALETTE_PERCENTILE,
-    )
-
-    for colors_cc, color_masks_cc, cc in zip(colors, color_masks, ccs):
-        _ref_alpha  = np.zeros_like(alpha)
-        _ref_color  = np.zeros_like(fg_rgb)
-        _nonzero    = np.zeros_like(alpha)
-
-        for color, cmask in zip(colors_cc, color_masks_cc):
-            cmask_exp = expand_mask(cmask, kernel_size)
-            ra = estimate_fg_alpha(cmask_exp, color, bg_np.astype(np.uint8), image_uint8)
-            if ra is not None:
-                _ref_alpha = np.maximum(_ref_alpha, ra)
-                _ref_color[ra > 0] = color
-                _nonzero += (ra > 0).astype(int)
-
-        boundary = _nonzero > 1
-        if _ref_alpha.sum() > 0:
-            inner_cc  = (~shrink_mask_ratio(cc, _FG_REFINE_N_INNER_RATIO)) & cc
-            target    = ((alpha == 0) | inner_cc) & (~boundary)
-            alpha[target]    = np.maximum(alpha[target], _ref_alpha[target])
-            upd = target & (_ref_alpha > 0)
-            fg_rgb[upd] = _ref_color[upd]
-
-    return alpha, fg_rgb
-
-
-def _estimate_depth_order(masks: List[np.ndarray]) -> List[int]:
-    n = len(masks)
-    # overlap_score[i] = tổng diện tích bị các mask khác che
-    overlap_scores = np.zeros(n)
-    
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            mi = masks[i].astype(bool)
-            mj = masks[j].astype(bool)
-            intersection = np.sum(mi & mj)
-            if intersection == 0:
-                continue
-            # Nếu j che i → i bị che → i nằm dưới j
-            # Heuristic: vật nào nhỏ hơn trong vùng giao thường là vật trên
-            ratio_i = intersection / np.sum(mi)
-            ratio_j = intersection / np.sum(mj)
-            if ratio_i > ratio_j:
-                # i bị che nhiều hơn → i nằm dưới
-                overlap_scores[i] += intersection
-    
-    # Sort: score thấp = ít bị che = nằm trên
-    return list(np.argsort(overlap_scores))
-
-def _remove_occluder_with_seed(
-    image_np:     np.ndarray,    # ảnh gốc RGB
-    target_mask:  np.ndarray,    # mask của B (bool)
-    occluder_mask: np.ndarray,   # mask của A (bool)
-    lama,
-    orig_size:    tuple,
-) -> np.ndarray:
-    overlap = target_mask & occluder_mask   # vùng A đang đè lên B
-
-    if not np.any(overlap):
-        return image_np.copy()
-
-    # Bước 1: Lấy màu đại diện của B từ vùng KHÔNG bị che
-    visible_B = target_mask & (~occluder_mask)  # phần B đang lộ ra
-    if np.sum(visible_B) == 0:
-        # B bị che hoàn toàn → không có thông tin màu → fallback
-        return image_np.copy()
-
-    # Lấy màu trung bình của B tại vùng lộ ra
-    B_colors = image_np[visible_B]           # (N, 3)
-    B_mean_color = np.median(B_colors, axis=0).astype(np.uint8)
-
-    # Bước 2: Seed màu B vào vùng overlap trong ảnh
-    seeded = image_np.copy()
-    seeded[overlap] = B_mean_color           # đặt màu B vào chỗ A đang che
-
-    # Bước 3: Inpaint với mask nhỏ hơn — chỉ che phần rìa overlap
-    # (không che toàn bộ overlap vì đã seed màu B rồi)
-    # → LaMa chỉ cần smooth transition, không cần đoán màu từ đầu
-    kernel = np.ones((7, 7), np.uint8)
-    overlap_u8  = overlap.astype(np.uint8) * 255
-    eroded      = cv2.erode(overlap_u8, kernel, iterations=2)
-    inpaint_region = overlap_u8 & ~eroded    # chỉ phần rìa mỏng của overlap
-
-    if np.sum(inpaint_region) == 0:
-        return seeded
-
-    mask_pil   = Image.fromarray(inpaint_region).convert("L")
-    result     = lama(Image.fromarray(seeded), mask_pil)
-    if result.size != orig_size:
-        result = result.resize(orig_size, Image.LANCZOS)
-
-    return np.array(result.convert("RGB"), dtype=np.uint8)
-
-def _build_source_image_for_object(
-    original_np:  np.ndarray,
-    masks:        List[np.ndarray],
-    target_idx:   int,
-    depth_order:  List[int],
-    lama,
-    orig_size:    tuple,
-) -> np.ndarray:
-    target_pos = depth_order.index(target_idx)
-    objects_above = depth_order[:target_pos]
-    target_mask = masks[target_idx].astype(bool)
-
-    occluders = [
-        i for i in objects_above
-        if np.any(masks[i].astype(bool) & target_mask)
-    ]
-
-    if not occluders:
-        return original_np.copy()
-
-    current = original_np.copy()
-    for occ_idx in occluders:
-        current = _remove_occluder_with_seed(
-            image_np=current,
-            target_mask=target_mask,
-            occluder_mask=masks[occ_idx].astype(bool),
-            lama=lama,
-            orig_size=orig_size,
-        )
-
-    return current
-
-def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
-    orig_w, orig_h = image.size
-    image = image.convert("RGB")
-    image_np = np.array(image, dtype=np.uint8)   # (H,W,3) uint8, dùng xuyên suốt
-
-    processor       = get_sam3_processor()
-    matting_model   = get_matting_model()
-    lama            = get_lama_model()
-    kernel_size     = _calc_kernel_size(image_np)
-
-    device_type = "cuda" if torch.cuda.is_available() else "cpu"
-    mixed_dtype = (torch.bfloat16
-                   if device_type == "cuda" and torch.cuda.is_bf16_supported()
-                   else torch.float16)
-
-    raw_masks: List[np.ndarray] = []   # uint8 0/255, (H,W)
-    labels:    List[str]        = []
-
-    with torch.no_grad(), torch.autocast(device_type, dtype=mixed_dtype):
-        inference_state = processor.set_image(image)
+    with torch.inference_mode(), _inference_context():
+        state = processor.set_image(image)
         for keyword in keywords:
             keyword = keyword.strip()
             if not keyword:
                 continue
 
-            processor.reset_all_prompts(inference_state)
-            inference_state = processor.set_text_prompt(state=inference_state, prompt=keyword)
-
-            masks  = inference_state.get("masks")
-            print(f"Tìm thấy {len(masks) if masks is not None else 0} mask cho '{keyword}'")
-            scores = inference_state.get("scores")
+            processor.reset_all_prompts(state)
+            state = processor.set_text_prompt(state=state, prompt=keyword)
+            masks = state.get("masks")
             if masks is None or len(masks) == 0:
-                logger.warning(f"[SAM3] Không tìm thấy object cho '{keyword}'")
+                logger.warning("[SAM3] No object found for '%s'", keyword)
                 continue
 
-            for i, mt in enumerate(masks):
-                mn = mt.squeeze(0)
-                if hasattr(mn, "cpu"):
-                    mn = mn.cpu().numpy()
-                raw_masks.append((mn > 0).astype(np.uint8) * 255)
-                lbl = f"{keyword}_{i}" if len(masks) > 1 else keyword
-                labels.append(lbl)
-                score = scores[i].item() if scores is not None else 1.0
-                logger.info(f"[SAM3] '{lbl}' score={score:.2f}")
+            keyword_masks = [
+                _normalise_mask(mask, image.size) for mask in masks
+            ]
+            keyword_masks = _merge_overlapping_masks(keyword_masks)
 
-    if not raw_masks:
-        logger.warning("Không detect được object nào.")
-        return ProcessResult(
-            background_base64=_image_to_base64(image),
-            original_width=orig_w, original_height=orig_h,
+            for index, mask in enumerate(keyword_masks):
+                raw_masks.append(mask)
+                label = (
+                    f"{keyword}_{index}"
+                    if len(keyword_masks) > 1
+                    else keyword
+                )
+                labels.append(label)
+                logger.info("[SAM3] grouped instance '%s'", label)
+
+    return raw_masks, labels
+
+
+def _refine_masks(
+    image_np: np.ndarray, raw_masks: List[np.ndarray]
+) -> List[np.ndarray]:
+    """Convert SAM3 hard masks into soft alpha mattes with BiRefNet."""
+    matting_model = model_manager.get_matting_model().process
+    soft_alphas: List[np.ndarray] = []
+
+    with torch.inference_mode(), _inference_context():
+        for mask in raw_masks:
+            guided_image = image_np.copy()
+            guided_image[mask == 0] = 0
+            alpha = matting_model(Image.fromarray(guided_image))
+
+            support = cv2.dilate(
+                mask, np.ones((5, 5), dtype=np.uint8), iterations=1
+            ) > 0
+            valid = (alpha > _THRESHOLD_ALPHA) & torch.from_numpy(support).to(
+                alpha.device
+            )
+            alpha[~valid] = 0.0
+            soft_alphas.append(
+                np.clip(alpha.cpu().to(torch.float64).numpy(), 0.0, 1.0)
+            )
+
+    return soft_alphas
+
+
+def _extract_object_layers(
+    image: Image.Image,
+    image_np: np.ndarray,
+    soft_alphas: List[np.ndarray],
+    labels: List[str],
+    kernel_size: tuple[int, int],
+) -> List[ObjectLayer]:
+    """Refine component colors and alpha mattes, then create RGBA crops."""
+    inpaint = model_manager.get_inpainting_model().process
+    layers: List[ObjectLayer] = []
+
+    for alpha, label in zip(soft_alphas, labels):
+        hard_mask = alpha > _THRESHOLD_ALPHA
+        bbox = _bbox_from_mask(hard_mask.astype(np.uint8))
+        if bbox is None:
+            continue
+
+        inpaint_mask = build_inpaint_mask(image_np, hard_mask, kernel_size)
+        mask_image = Image.fromarray(
+            (inpaint_mask > 0).astype(np.uint8) * 255, mode="L"
         )
-
-    soft_alphas: List[np.ndarray] = []   # float64 (H,W) in [0,1]
-
-    with torch.no_grad(), torch.autocast(device_type, dtype=mixed_dtype):
-        for m_bin in raw_masks:
-            guided = image_np.copy()
-            guided[m_bin == 0] = 0         
-            alpha_f = matting_model(Image.fromarray(guided))   
-            hard = alpha_f > _TH_ALPHA
-            m_bin_tensor = torch.from_numpy(m_bin).to(alpha_f.device) > 0
-            hard = hard & m_bin_tensor
-            hard = hard.bool() 
-            alpha_f[~hard] = 0.0
-            alpha_np = alpha_f.cpu().to(torch.float64).numpy()
-            alpha_np = np.clip(alpha_np, 0.0, 1.0)
-            soft_alphas.append(alpha_np)
-            
-    object_layers: List[ObjectLayer] = []
-
-    with torch.no_grad(), torch.autocast(device_type, enabled=False):
-        depth_order = _estimate_depth_order(raw_masks)
-        for idx, (alpha, label) in enumerate(zip(soft_alphas, labels)):
-            hard_mask = alpha > _TH_ALPHA      # bool (H,W)
-            bbox = _bbox_from_mask(hard_mask.astype(np.uint8) * 255)
-            if bbox is None:
-                continue
-            source_np = _build_source_image_for_object(
-                original_np=image_np,
-                masks=raw_masks,
-                target_idx=idx,
-                depth_order=depth_order,
-                lama=lama,
-                orig_size=(orig_w, orig_h),
+        component_background = inpaint(image, mask_image)
+        if component_background.size != image.size:
+            component_background = component_background.resize(
+                image.size, Image.Resampling.LANCZOS
             )
-            source_img = Image.fromarray(source_np)
-            # 3a. Tạo inpaint mask (target + vùng bị đè)
-            # inpaint_mask_raw = _build_cumulative_inpaint_mask(raw_masks, idx)
-            # inpaint_mask_fg  = _build_inpaint_mask(image_np, hard_mask, kernel_size)
-
-            # 3a v2
-            inpaint_mask_fg = _build_inpaint_mask(source_np, hard_mask, kernel_size)
-            mask_pil = Image.fromarray(inpaint_mask_fg).convert("L")
-            # Merge: union của FG-refine mask và overlap mask
-            # inpaint_mask = np.maximum(inpaint_mask_raw, inpaint_mask_fg)
-
-            # # 3b. Inpaint từ ảnh gốc
-            # mask_pil = Image.fromarray(inpaint_mask).convert("L")
-            bg_pil   = lama(source_img, mask_pil)
-            if bg_pil.size != (orig_w, orig_h):
-                bg_pil = bg_pil.resize((orig_w, orig_h), Image.LANCZOS)
-            bg_np = np.array(bg_pil.convert("RGB"), dtype=np.uint8)
-
-            # 3c. BG refinement (snap màu)
-            bg_np = refine_background(
-                bg_np, inpaint_mask_fg.astype(bool),
-                n_outer_ratio=_BG_REFINE_N_OUTER_RATIO,
-                max_num_colors=_BG_REFINE_NUM_COLORS,
-            )
-
-            # 3d. Unblend + per-color alpha refinement
-            alpha_refined, fg_rgb = _refine_alpha_with_colors(
-                source_np, bg_np, alpha.copy(), hard_mask, kernel_size
-            )
-
-            # 3e. Tạo RGBA layer crop theo bbox
-            x, y, w, h = bbox
-            fg_crop    = fg_rgb[y:y+h, x:x+w]
-            alpha_crop = (alpha_refined[y:y+h, x:x+w] * 255).astype(np.uint8)
-            rgba_arr   = np.dstack([fg_crop, alpha_crop])
-            rgba_img   = Image.fromarray(rgba_arr, mode="RGBA")
-
-            object_layers.append(ObjectLayer(
-                keyword=label,
-                png_base64=_image_to_base64(rgba_img, "PNG"),
-                x=x, y=y, width=w, height=h,
-            ))
-            logger.info(f"[Layer] '{label}' bbox={bbox}")
-
-    # ── 4. Background cuối: inpaint TẤT CẢ mask cùng lúc ──────
-    if raw_masks:
-        union_mask = np.zeros_like(raw_masks[0])
-        for m in raw_masks:
-            union_mask = np.maximum(union_mask, m)
-        # Dùng inpaint_mask đã qua FG-refine nếu có
-        union_mask = expand_mask(union_mask > 0, kernel_size) # Thêm dòng này
-        final_mask_pil = Image.fromarray(union_mask).convert("L")
-        final_bg = lama(image, final_mask_pil)
-        if final_bg.size != (orig_w, orig_h):
-            final_bg = final_bg.resize((orig_w, orig_h), Image.LANCZOS)
-        final_bg_np = np.array(final_bg.convert("RGB"), dtype=np.uint8)
-        final_bg_np = refine_background(
-            final_bg_np, union_mask.astype(bool),
-            n_outer_ratio=_BG_REFINE_N_OUTER_RATIO,
+        background_np = np.asarray(
+            component_background.convert("RGB"), dtype=np.uint8
+        )
+        background_np = refine_background(
+            background_np,
+            inpaint_mask.astype(bool),
+            n_outer_ratio=_BG_REFINE_OUTER_RATIO,
             max_num_colors=_BG_REFINE_NUM_COLORS,
         )
-        final_bg = Image.fromarray(final_bg_np)
-    else:
-        final_bg = image
+        refined_alpha, foreground_rgb = refine_alpha_with_colors(
+            image_np,
+            background_np,
+            alpha.copy(),
+            hard_mask,
+            kernel_size,
+        )
+
+        x, y, layer_width, layer_height = bbox
+        rgb_crop = foreground_rgb[y : y + layer_height, x : x + layer_width]
+        alpha_crop = np.rint(
+            refined_alpha[y : y + layer_height, x : x + layer_width] * 255
+        ).astype(np.uint8)
+        rgba_image = Image.fromarray(
+            np.dstack((rgb_crop, alpha_crop)), mode="RGBA"
+        )
+        layers.append(
+            ObjectLayer(
+                keyword=label,
+                png_base64=_image_to_base64(rgba_image),
+                x=x,
+                y=y,
+                width=layer_width,
+                height=layer_height,
+            )
+        )
+        logger.info("[Layer] '%s' bbox=%s", label, bbox)
+
+    return layers
+
+
+def _generate_final_background(
+    image: Image.Image,
+    raw_masks: List[np.ndarray],
+    kernel_size: tuple[int, int],
+) -> Image.Image:
+    """Inpaint all detected components from one expanded union mask."""
+    union_mask = np.logical_or.reduce([mask > 0 for mask in raw_masks])
+    union_mask = expand_mask(union_mask, kernel_size).astype(bool)
+    final_mask = Image.fromarray(union_mask.astype(np.uint8) * 255, mode="L")
+
+    inpaint = model_manager.get_inpainting_model().process
+    background = inpaint(image, final_mask)
+    if background.size != image.size:
+        background = background.resize(image.size, Image.Resampling.LANCZOS)
+
+    background_np = np.asarray(background.convert("RGB"), dtype=np.uint8)
+    background_np = refine_background(
+        background_np,
+        union_mask,
+        n_outer_ratio=_BG_REFINE_OUTER_RATIO,
+        max_num_colors=_BG_REFINE_NUM_COLORS,
+    )
+    return Image.fromarray(background_np, mode="RGB")
+
+
+def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
+    """Coordinate segmentation, matting, layer extraction, and inpainting."""
+    # Normalize once so every model and NumPy operation shares the same RGB data.
+    image = image.convert("RGB")
+    width, height = image.size
+    image_np = np.asarray(image, dtype=np.uint8)
+
+    # Stage 1: text-guided SAM3 segmentation.
+    raw_masks, labels = _extract_raw_masks(image, keywords)
+    if not raw_masks:
+        logger.warning("No objects were detected; returning the original background.")
+        return ProcessResult(
+            background_base64=_image_to_base64(image),
+            original_width=width,
+            original_height=height,
+        )
+
+    # Stage 2: turn hard SAM3 masks into edge-aware soft alpha mattes.
+    kernel_size = _calc_kernel_size(image_np)
+    soft_alphas = _refine_masks(image_np, raw_masks)
+
+    # Stage 3: refine RGB/alpha and encode each component as a cropped PNG.
+    layers = _extract_object_layers(
+        image, image_np, soft_alphas, labels, kernel_size
+    )
+
+    # Stage 4: remove all detected components in one final background pass.
+    background = _generate_final_background(image, raw_masks, kernel_size)
 
     return ProcessResult(
-        background_base64=_image_to_base64(final_bg, "PNG"),
-        original_width=orig_w,
-        original_height=orig_h,
-        layers=object_layers,
+        background_base64=_image_to_base64(background),
+        original_width=width,
+        original_height=height,
+        layers=layers,
     )

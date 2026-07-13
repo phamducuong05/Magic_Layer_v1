@@ -1,0 +1,17 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pydantic>=2.7
+PyYAML>=6.0
+numpy>=1.26,<2
+Pillow>=10.0
+opencv-python-headless>=4.9
+torch>=2.5
+torchvision>=0.20
+transformers>=4.46
+huggingface-hub>=0.26
+simple-lama-inpainting>=0.1.2
+# Optional for models.inpainting.active: sdxl
+diffusers>=0.31
+accelerate>=1.0
+safetensors>=0.4

@@ -1,0 +1,23 @@
+device: auto
+models:
+  matting:
+    active: birefnet
+    birefnet:
+      model_id: "ZhengPeng7/BiRefNet"
+      trust_remote_code: true
+      resolution: [1024, 1024]
+  inpainting:
+    active: lama
+    lama:
+      # SimpleLama tự động quản lý trọng số
+      dummy: true
+    sdxl:
+      model_id: "runwayml/stable-diffusion-inpainting"
+      use_xformers: true
+      cpu_offload: true
+  segmentation:
+    active: sam3
+    sam3:
+      checkpoint_path: "checkpoints/sam3.pt"
+      confidence_threshold: 0.5
+      load_from_hf: false

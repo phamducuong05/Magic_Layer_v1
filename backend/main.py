@@ -16,9 +16,14 @@ from fastapi.responses import JSONResponse
 from PIL import Image
 from pydantic import BaseModel
 
-from image_processor import ObjectLayer, ProcessResult, process_image
-from models import warmup_models
 import numpy as np
+
+try:
+    from .image_processor import ProcessResult, process_image
+    from .models import model_manager
+except ImportError:  # Legacy: run uvicorn from inside backend/.
+    from image_processor import ProcessResult, process_image
+    from models import model_manager
 
 # ──────────────────────────────────────────────
 # Logging
@@ -55,7 +60,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     logger.info("Server starting — loading AI models...")
-    warmup_models()
+    model_manager.warmup_all()
     logger.info("Server ready.")
 
 
