@@ -24,7 +24,11 @@ class BaseMattingModel(BaseModel):
 class BaseInpaintingModel(BaseModel):
     @abstractmethod
     def process(
-        self, image: Image.Image, mask: Image.Image, prompt: str = ""
+        self,
+        image: Image.Image,
+        mask: Image.Image,
+        prompt: str = "",
+        debug_label: str = "",
     ) -> Image.Image:
         pass
 

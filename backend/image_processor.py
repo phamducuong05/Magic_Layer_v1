@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from .core.debug import save_inpaint_debug
 from .core.helpers import (
     _bbox_from_mask,
     _calc_kernel_size,
@@ -121,7 +122,8 @@ def _extract_object_layers(
     kernel_size: tuple[int, int],
 ) -> List[ObjectLayer]:
     """Refine component colors and alpha mattes, then create RGBA crops."""
-    inpaint = model_manager.get_inpainting_model().process
+    inpainting_model = model_manager.get_inpainting_model()
+    inpaint = inpainting_model.process
     layers: List[ObjectLayer] = []
 
     for alpha, label in zip(soft_alphas, labels):
@@ -134,7 +136,9 @@ def _extract_object_layers(
         mask_image = Image.fromarray(
             (inpaint_mask > 0).astype(np.uint8) * 255, mode="L"
         )
-        component_background = inpaint(image, mask_image)
+        component_background = inpaint(
+            image, mask_image, debug_label=f"component_{label}"
+        )
         if component_background.size != image.size:
             component_background = component_background.resize(
                 image.size, Image.Resampling.LANCZOS
@@ -182,24 +186,39 @@ def _extract_object_layers(
 def _generate_final_background(
     image: Image.Image,
     raw_masks: List[np.ndarray],
+    soft_alphas: List[np.ndarray],
     kernel_size: tuple[int, int],
 ) -> Image.Image:
-    """Inpaint all detected components from one expanded union mask."""
+    """Inpaint all components using both hard masks and soft alpha coverage."""
     union_mask = np.logical_or.reduce([mask > 0 for mask in raw_masks])
+    for alpha in soft_alphas:
+        union_mask |= alpha > _THRESHOLD_ALPHA
     union_mask = expand_mask(union_mask, kernel_size).astype(bool)
     final_mask = Image.fromarray(union_mask.astype(np.uint8) * 255, mode="L")
 
-    inpaint = model_manager.get_inpainting_model().process
-    background = inpaint(image, final_mask)
+    inpainting_model = model_manager.get_inpainting_model()
+    background = inpainting_model.process(
+        image, final_mask, debug_label="final_background"
+    )
     if background.size != image.size:
         background = background.resize(image.size, Image.Resampling.LANCZOS)
 
     background_np = np.asarray(background.convert("RGB"), dtype=np.uint8)
+    save_inpaint_debug(
+        getattr(inpainting_model, "debug_dir", None),
+        "final_background",
+        **{"07_before_background_refine": background_np},
+    )
     background_np = refine_background(
         background_np,
         union_mask,
         n_outer_ratio=_BG_REFINE_OUTER_RATIO,
         max_num_colors=_BG_REFINE_NUM_COLORS,
+    )
+    save_inpaint_debug(
+        getattr(inpainting_model, "debug_dir", None),
+        "final_background",
+        **{"08_after_background_refine": background_np},
     )
     return Image.fromarray(background_np, mode="RGB")
 
@@ -231,7 +250,9 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
     )
 
     # Stage 4: remove all detected components in one final background pass.
-    background = _generate_final_background(image, raw_masks, kernel_size)
+    background = _generate_final_background(
+        image, raw_masks, soft_alphas, kernel_size
+    )
 
     return ProcessResult(
         background_base64=_image_to_base64(background),

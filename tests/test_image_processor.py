@@ -23,6 +23,7 @@ models_module.model_manager = Mock()
 sys.modules["backend.models"] = models_module
 
 from backend import image_processor as pipeline
+from backend.core.helpers import _prepare_inpaint_masks, _preserve_unmasked_pixels
 
 
 @pytest.fixture
@@ -90,6 +91,41 @@ def _install_inpainting_fake(monkeypatch, output):
         Mock(return_value=inpainting_model),
     )
     return inpainting_model.process
+
+
+def test_preserve_unmasked_pixels_changes_only_masked_region():
+    original = Image.new("RGB", (4, 4), (255, 0, 0))
+    generated = Image.new("RGB", (4, 4), (0, 0, 255))
+    mask_array = np.zeros((4, 4), dtype=np.uint8)
+    mask_array[1:3, 1:3] = 255
+
+    result = _preserve_unmasked_pixels(
+        original, generated, Image.fromarray(mask_array, mode="L")
+    )
+    result_array = np.asarray(result)
+
+    assert np.all(result_array[mask_array == 0] == (255, 0, 0))
+    assert np.all(result_array[mask_array > 0] == (0, 0, 255))
+
+
+def test_prepare_inpaint_masks_generates_beyond_blend_boundary():
+    mask_array = np.zeros((31, 31), dtype=np.uint8)
+    mask_array[15, 15] = 255
+
+    generation_mask, blend_mask = _prepare_inpaint_masks(
+        Image.fromarray(mask_array, mode="L"),
+        generation_expansion=17,
+        composition_expansion=11,
+        feather_radius=2.0,
+    )
+
+    generation_array = np.asarray(generation_mask)
+    blend_array = np.asarray(blend_mask)
+    assert np.count_nonzero(generation_array == 255) > np.count_nonzero(
+        blend_array == 255
+    )
+    assert generation_array[15, 15] == 255
+    assert blend_array[15, 15] >= 250
 
 
 def test_extract_raw_masks_uses_each_nonempty_prompt(monkeypatch, rgb_image):
@@ -217,6 +253,8 @@ def test_generate_final_background_unions_masks(monkeypatch, rgb_image):
     first[1:3, 1:3] = 255
     second = np.zeros((6, 8), dtype=np.uint8)
     second[3:5, 5:7] = 255
+    soft_alpha = np.zeros((6, 8), dtype=np.float64)
+    soft_alpha[0, 7] = 0.5
 
     inpainted = Image.new("RGB", rgb_image.size, (30, 40, 50))
     inpaint = _install_inpainting_fake(monkeypatch, inpainted)
@@ -226,13 +264,14 @@ def test_generate_final_background_unions_masks(monkeypatch, rgb_image):
     monkeypatch.setattr(pipeline, "refine_background", refine)
 
     result = pipeline._generate_final_background(
-        rgb_image, [first, second], (1, 1)
+        rgb_image, [first, second], [soft_alpha], (1, 1)
     )
 
     assert result.size == rgb_image.size
     expand.assert_called_once()
     union = expand.call_args.args[0]
-    assert np.array_equal(union, (first > 0) | (second > 0))
+    expected_union = (first > 0) | (second > 0) | (soft_alpha > 0.005)
+    assert np.array_equal(union, expected_union)
     inpaint.assert_called_once()
     passed_mask = np.asarray(inpaint.call_args.args[1])
     assert np.array_equal(passed_mask > 0, union)

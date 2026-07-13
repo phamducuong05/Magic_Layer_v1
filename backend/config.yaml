@@ -11,10 +11,23 @@ models:
     lama:
       # SimpleLama tự động quản lý trọng số
       dummy: true
+      generation_mask_expansion: 17
+      composition_mask_expansion: 11
+      feather_radius: 2.0
+      debug_dir: "debug/inpainting"
     sdxl:
       model_id: "runwayml/stable-diffusion-inpainting"
-      use_xformers: true
+      use_xformers: false
       cpu_offload: true
+      strength: 0.55
+      num_inference_steps: 30
+      guidance_scale: 3.5
+      generation_mask_expansion: 17
+      composition_mask_expansion: 11
+      feather_radius: 2.0
+      debug_dir: "debug/inpainting"
+      prompt: "empty seamless continuation of the existing background, matching the surrounding texture, color, lighting, and perspective"
+      negative_prompt: "object, person, animal, furniture, decoration, text, watermark, new detail, artifact, blur, distorted pattern"
   segmentation:
     active: sam3
     sam3:
