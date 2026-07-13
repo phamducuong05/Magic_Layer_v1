@@ -9,7 +9,6 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .core.debug import save_inpaint_debug
 from .core.helpers import (
     _bbox_from_mask,
     _calc_kernel_size,
@@ -136,9 +135,7 @@ def _extract_object_layers(
         mask_image = Image.fromarray(
             (inpaint_mask > 0).astype(np.uint8) * 255, mode="L"
         )
-        component_background = inpaint(
-            image, mask_image, debug_label=f"component_{label}"
-        )
+        component_background = inpaint(image, mask_image)
         if component_background.size != image.size:
             component_background = component_background.resize(
                 image.size, Image.Resampling.LANCZOS
@@ -197,28 +194,16 @@ def _generate_final_background(
     final_mask = Image.fromarray(union_mask.astype(np.uint8) * 255, mode="L")
 
     inpainting_model = model_manager.get_inpainting_model()
-    background = inpainting_model.process(
-        image, final_mask, debug_label="final_background"
-    )
+    background = inpainting_model.process(image, final_mask)
     if background.size != image.size:
         background = background.resize(image.size, Image.Resampling.LANCZOS)
 
     background_np = np.asarray(background.convert("RGB"), dtype=np.uint8)
-    save_inpaint_debug(
-        getattr(inpainting_model, "debug_dir", None),
-        "final_background",
-        **{"07_before_background_refine": background_np},
-    )
     background_np = refine_background(
         background_np,
         union_mask,
         n_outer_ratio=_BG_REFINE_OUTER_RATIO,
         max_num_colors=_BG_REFINE_NUM_COLORS,
-    )
-    save_inpaint_debug(
-        getattr(inpainting_model, "debug_dir", None),
-        "final_background",
-        **{"08_after_background_refine": background_np},
     )
     return Image.fromarray(background_np, mode="RGB")
 

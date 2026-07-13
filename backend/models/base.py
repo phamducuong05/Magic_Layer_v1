@@ -28,7 +28,6 @@ class BaseInpaintingModel(BaseModel):
         image: Image.Image,
         mask: Image.Image,
         prompt: str = "",
-        debug_label: str = "",
     ) -> Image.Image:
         pass
 

@@ -14,7 +14,6 @@ models:
       generation_mask_expansion: 17
       composition_mask_expansion: 11
       feather_radius: 2.0
-      debug_dir: "debug/inpainting"
     sdxl:
       model_id: "runwayml/stable-diffusion-inpainting"
       use_xformers: false
@@ -25,7 +24,6 @@ models:
       generation_mask_expansion: 17
       composition_mask_expansion: 11
       feather_radius: 2.0
-      debug_dir: "debug/inpainting"
       prompt: "empty seamless continuation of the existing background, matching the surrounding texture, color, lighting, and perspective"
       negative_prompt: "object, person, animal, furniture, decoration, text, watermark, new detail, artifact, blur, distorted pattern"
   segmentation:
