@@ -3,7 +3,7 @@
 import numpy as np
 from PIL import Image
 
-from run_mask_completion import save_masks
+from backend.run_mask_completion import save_masks
 
 
 def test_save_masks_writes_binary_full_size_pngs(tmp_path):
