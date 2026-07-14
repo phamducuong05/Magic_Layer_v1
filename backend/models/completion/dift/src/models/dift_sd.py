@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import Any, Callable, Dict, List, Optional, Union
-from diffusers.models.unet_2d_condition import UNet2DConditionModel
+from diffusers import UNet2DConditionModel
 from diffusers import DDIMScheduler
 import gc
 from PIL import Image
@@ -227,11 +227,12 @@ class SDFeaturizer:
             unet_ft: a torch tensor in the shape of [1, c, h, w]
         '''
         img_tensor = img_tensor.repeat(ensemble_size, 1, 1, 1).to(self.device) # ensem, c, h, w
-        prompt_embeds = self.pipe._encode_prompt(
+        prompt_embeds, _ = self.pipe.encode_prompt(
             prompt=prompt,
             device=self.device,
             num_images_per_prompt=1,
-            do_classifier_free_guidance=False) # [1, 77, dim]
+            do_classifier_free_guidance=False,
+        ) # [1, 77, dim]
         prompt_embeds = prompt_embeds.repeat(ensemble_size, 1, 1)
         unet_ft_all = self.pipe(
             img_tensor=img_tensor,
