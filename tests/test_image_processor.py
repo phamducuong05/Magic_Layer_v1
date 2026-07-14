@@ -93,6 +93,19 @@ def _install_inpainting_fake(monkeypatch, output):
     return inpainting_model.process
 
 
+def _detected_object(object_id, semantic_class, bbox):
+    mask = np.zeros((20, 20), dtype=np.uint8)
+    x, y, width, height = bbox
+    mask[y : y + height, x : x + width] = 255
+    return pipeline.DetectedObject(
+        object_id=object_id,
+        semantic_class=semantic_class,
+        display_label=object_id,
+        modal_mask=mask,
+        bbox=bbox,
+    )
+
+
 def test_preserve_unmasked_pixels_changes_only_masked_region():
     original = Image.new("RGB", (4, 4), (255, 0, 0))
     generated = Image.new("RGB", (4, 4), (0, 0, 255))
@@ -209,6 +222,49 @@ def test_extract_objects_keeps_nonoverlapping_same_keyword(
     ]
 
 
+def test_link_overlap_partners_records_cross_class_relationship():
+    person = _detected_object("person-1", "person", (0, 0, 10, 10))
+    chair = _detected_object("chair-1", "chair", (5, 5, 10, 10))
+
+    pairs = pipeline._link_overlap_partners([person, chair])
+
+    assert pairs == [("person-1", "chair-1")]
+    assert person.overlap_partner_ids == {"chair-1"}
+    assert chair.overlap_partner_ids == {"person-1"}
+
+
+def test_link_overlap_partners_ignores_same_class_and_separate_objects():
+    first_person = _detected_object("person-1", "person", (0, 0, 10, 10))
+    second_person = _detected_object("person-2", "person", (5, 5, 10, 10))
+    chair = _detected_object("chair-1", "chair", (15, 15, 2, 2))
+
+    pairs = pipeline._link_overlap_partners(
+        [first_person, second_person, chair]
+    )
+
+    assert pairs == []
+    assert first_person.overlap_partner_ids == set()
+    assert second_person.overlap_partner_ids == set()
+    assert chair.overlap_partner_ids == set()
+
+
+def test_link_overlap_partners_keeps_multiple_partners_unique():
+    person = _detected_object("person-1", "person", (0, 0, 10, 10))
+    chair = _detected_object("chair-1", "chair", (1, 1, 5, 5))
+    table = _detected_object("table-1", "table", (2, 2, 5, 5))
+
+    pairs = pipeline._link_overlap_partners([person, chair, table])
+
+    assert pairs == [
+        ("person-1", "chair-1"),
+        ("person-1", "table-1"),
+        ("chair-1", "table-1"),
+    ]
+    assert person.overlap_partner_ids == {"chair-1", "table-1"}
+    assert chair.overlap_partner_ids == {"person-1", "table-1"}
+    assert table.overlap_partner_ids == {"person-1", "chair-1"}
+
+
 def test_refine_masks_guides_matting_and_limits_alpha(monkeypatch, rgb_image):
     raw_mask = np.zeros((6, 8), dtype=np.uint8)
     raw_mask[2:4, 3:5] = 255
@@ -312,11 +368,13 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
         bbox=(2, 1, 4, 4),
     )
     extract_objects = Mock(return_value=[detected])
+    link_overlaps = Mock(return_value=[])
     refine_masks = Mock(return_value=[alpha])
     extract_layers = Mock(return_value=[expected_layer])
     generate_background = Mock(return_value=expected_background)
     encode = Mock(side_effect=lambda image, fmt="PNG": f"encoded-{image.size}")
     monkeypatch.setattr(pipeline, "_extract_objects", extract_objects)
+    monkeypatch.setattr(pipeline, "_link_overlap_partners", link_overlaps)
     monkeypatch.setattr(pipeline, "_refine_masks", refine_masks)
     monkeypatch.setattr(pipeline, "_extract_object_layers", extract_layers)
     monkeypatch.setattr(
@@ -335,6 +393,7 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     assert prepared_image.mode == "RGB"
     assert prepared_image.size == rgb_image.size
     assert prepared_keywords == ["component"]
+    link_overlaps.assert_called_once_with([detected])
     refine_masks.assert_called_once()
     extract_layers.assert_called_once()
     generate_background.assert_called_once()

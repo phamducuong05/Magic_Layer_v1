@@ -19,6 +19,7 @@ from .core.helpers import (
 )
 from .core.refine import build_inpaint_mask, refine_alpha_with_colors
 from .core.layerd_refine import expand_mask, refine_background
+from .core.occlusion import ObjectBounds, OverlapPair, find_cross_class_overlaps
 from .models import model_manager
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class DetectedObject:
     display_label: str
     modal_mask: np.ndarray
     bbox: tuple[int, int, int, int]
+    overlap_partner_ids: set[str] = field(default_factory=set)
 
 
 def _extract_objects(
@@ -108,6 +110,31 @@ def _extract_objects(
                 logger.info("[SAM3] grouped instance '%s'", display_label)
 
     return objects
+
+
+def _link_overlap_partners(
+    objects: List[DetectedObject],
+) -> list[OverlapPair]:
+    """Record positive-area, cross-class box overlaps on both objects."""
+    for detected in objects:
+        detected.overlap_partner_ids.clear()
+
+    pairs = find_cross_class_overlaps(
+        [
+            ObjectBounds(
+                object_id=detected.object_id,
+                semantic_class=detected.semantic_class,
+                bbox=detected.bbox,
+            )
+            for detected in objects
+        ]
+    )
+    objects_by_id = {detected.object_id: detected for detected in objects}
+    for first_id, second_id in pairs:
+        objects_by_id[first_id].overlap_partner_ids.add(second_id)
+        objects_by_id[second_id].overlap_partner_ids.add(first_id)
+
+    return pairs
 
 
 def _refine_masks(
@@ -248,6 +275,7 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
             original_width=width,
             original_height=height,
         )
+    _link_overlap_partners(objects)
     raw_masks = [detected.modal_mask for detected in objects]
     labels = [detected.display_label for detected in objects]
 
