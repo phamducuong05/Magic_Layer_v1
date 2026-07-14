@@ -24,6 +24,7 @@ sys.modules["backend.models"] = models_module
 
 from backend import image_processor as pipeline
 from backend.core.helpers import _prepare_inpaint_masks, _preserve_unmasked_pixels
+from backend.core.occlusion import PairDecision
 
 
 @pytest.fixture
@@ -265,6 +266,163 @@ def test_link_overlap_partners_keeps_multiple_partners_unique():
     assert table.overlap_partner_ids == {"person-1", "chair-1"}
 
 
+def test_complete_overlapping_objects_skips_model_without_overlap(
+    monkeypatch, rgb_image
+):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    get_completion_model = Mock()
+    monkeypatch.setattr(
+        pipeline.model_manager,
+        "get_completion_model",
+        get_completion_model,
+    )
+
+    pipeline._complete_overlapping_objects(rgb_image, [person])
+
+    get_completion_model.assert_not_called()
+    assert person.amodal_mask is None
+    assert person.completion_hole_area is None
+
+
+def test_complete_overlapping_objects_batches_and_maps_results(
+    monkeypatch, rgb_image
+):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    table = _detected_object("table-1", "table", (6, 0, 2, 2))
+    person.overlap_partner_ids.add(chair.object_id)
+    chair.overlap_partner_ids.add(person.object_id)
+
+    person_amodal = np.ones_like(person.modal_mask)
+    chair_amodal = np.full_like(chair.modal_mask, 2)
+    completion_model = Mock()
+    completion_model.complete.return_value = [person_amodal, chair_amodal]
+    monkeypatch.setattr(
+        pipeline.model_manager,
+        "get_completion_model",
+        Mock(return_value=completion_model),
+    )
+
+    pipeline._complete_overlapping_objects(
+        rgb_image, [person, chair, table]
+    )
+
+    completion_model.complete.assert_called_once()
+    completed_image, modal_masks, bboxes = completion_model.complete.call_args.args
+    assert completed_image is rgb_image
+    assert modal_masks == [person.modal_mask, chair.modal_mask]
+    assert bboxes == [person.bbox, chair.bbox]
+    assert person.amodal_mask is person_amodal
+    assert chair.amodal_mask is chair_amodal
+    assert table.amodal_mask is None
+
+
+def test_complete_overlapping_objects_counts_only_newly_completed_pixels(
+    monkeypatch, rgb_image
+):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    person.overlap_partner_ids.add(chair.object_id)
+    chair.overlap_partner_ids.add(person.object_id)
+
+    person_amodal = person.modal_mask.astype(bool)
+    person_amodal[10, 10] = True
+    chair.modal_mask = (chair.modal_mask > 0).astype(np.uint8)
+    chair_amodal = chair.modal_mask.copy()
+    chair_amodal[10, 10] = 1
+    chair_amodal[10, 11] = 1
+
+    completion_model = Mock()
+    completion_model.complete.return_value = [person_amodal, chair_amodal]
+    monkeypatch.setattr(
+        pipeline.model_manager,
+        "get_completion_model",
+        Mock(return_value=completion_model),
+    )
+
+    pipeline._complete_overlapping_objects(rgb_image, [person, chair])
+
+    assert np.array_equal(
+        person.completion_hole_mask,
+        person_amodal & (person.modal_mask == 0),
+    )
+    assert np.array_equal(
+        chair.completion_hole_mask,
+        (chair_amodal > 0) & (chair.modal_mask == 0),
+    )
+    assert person.completion_hole_area == 1
+    assert chair.completion_hole_area == 2
+
+
+def test_apply_pair_decisions_records_unique_occluders_on_hidden_object():
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    table = _detected_object("table-1", "table", (1, 1, 4, 4))
+    decisions = [
+        PairDecision(
+            "person-1", "chair-1", "person-1", "chair-1"
+        ),
+        PairDecision(
+            "person-1", "table-1", "person-1", "table-1"
+        ),
+    ]
+
+    pipeline._apply_pair_decisions([person, chair, table], decisions)
+
+    assert person.occluder_ids == {"chair-1", "table-1"}
+    assert chair.occluder_ids == set()
+    assert table.occluder_ids == set()
+
+
+def test_apply_pair_decisions_ignores_ambiguous_pair():
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    ambiguous = PairDecision("person-1", "chair-1", None, None)
+
+    pipeline._apply_pair_decisions([person, chair], [ambiguous])
+
+    assert person.occluder_ids == set()
+    assert chair.occluder_ids == set()
+
+
+def test_build_reconstruction_masks_constrains_assigned_occluders():
+    hidden = _detected_object("hidden", "person", (8, 8, 4, 4))
+    first_occluder = _detected_object("first", "chair", (0, 0, 1, 1))
+    second_occluder = _detected_object("second", "table", (0, 0, 1, 1))
+    distant_occluder = _detected_object("distant", "lamp", (0, 0, 1, 1))
+
+    hidden.amodal_mask = hidden.modal_mask > 0
+    hidden.amodal_mask[8:12, 12:14] = True
+    hidden.completion_hole_mask = hidden.amodal_mask & (
+        hidden.modal_mask == 0
+    )
+    hidden.occluder_ids = {"first", "second", "distant"}
+
+    first_occluder.modal_mask.fill(0)
+    first_occluder.modal_mask[7, 13] = 255
+    first_occluder.modal_mask[9, 10] = 255
+    second_occluder.modal_mask.fill(0)
+    second_occluder.modal_mask[12, 8] = 255
+    distant_occluder.modal_mask.fill(0)
+    distant_occluder.modal_mask[0, 0] = 255
+
+    pipeline._build_reconstruction_masks(
+        [hidden, first_occluder, second_occluder, distant_occluder],
+        (3, 3),
+    )
+
+    reconstruction = hidden.reconstruction_mask
+    assert reconstruction.dtype == bool
+    assert np.all(reconstruction[hidden.completion_hole_mask])
+    assert reconstruction[7, 13]
+    assert reconstruction[12, 8]
+    assert not reconstruction[9, 10]
+    assert not reconstruction[0, 0]
+    assert first_occluder.reconstruction_mask is None
+    assert second_occluder.reconstruction_mask is None
+    assert distant_occluder.reconstruction_mask is None
+
+
 def test_refine_masks_guides_matting_and_limits_alpha(monkeypatch, rgb_image):
     raw_mask = np.zeros((6, 8), dtype=np.uint8)
     raw_mask[2:4, 3:5] = 255
@@ -369,12 +527,16 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     )
     extract_objects = Mock(return_value=[detected])
     link_overlaps = Mock(return_value=[])
+    complete_overlaps = Mock()
     refine_masks = Mock(return_value=[alpha])
     extract_layers = Mock(return_value=[expected_layer])
     generate_background = Mock(return_value=expected_background)
     encode = Mock(side_effect=lambda image, fmt="PNG": f"encoded-{image.size}")
     monkeypatch.setattr(pipeline, "_extract_objects", extract_objects)
     monkeypatch.setattr(pipeline, "_link_overlap_partners", link_overlaps)
+    monkeypatch.setattr(
+        pipeline, "_complete_overlapping_objects", complete_overlaps
+    )
     monkeypatch.setattr(pipeline, "_refine_masks", refine_masks)
     monkeypatch.setattr(pipeline, "_extract_object_layers", extract_layers)
     monkeypatch.setattr(
@@ -394,6 +556,7 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     assert prepared_image.size == rgb_image.size
     assert prepared_keywords == ["component"]
     link_overlaps.assert_called_once_with([detected])
+    complete_overlaps.assert_called_once_with(prepared_image, [detected])
     refine_masks.assert_called_once()
     extract_layers.assert_called_once()
     generate_background.assert_called_once()

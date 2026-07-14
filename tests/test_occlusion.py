@@ -1,5 +1,6 @@
-"""Tests for cross-class bounding-box overlap detection."""
+"""Tests for cross-class overlap detection and pairwise role assignment."""
 
+from backend.core import occlusion
 from backend.core.occlusion import ObjectBounds, find_cross_class_overlaps
 
 
@@ -64,3 +65,54 @@ def test_returns_each_pair_once_in_input_order():
 
 def test_empty_input_returns_no_pairs():
     assert find_cross_class_overlaps([]) == []
+
+
+def test_larger_first_hole_assigns_first_object_as_occluded():
+    decisions = occlusion.assign_pair_roles(
+        [("person-1", "chair-1")],
+        {"person-1": 12, "chair-1": 4},
+    )
+
+    decision = decisions[0]
+    assert decision.occluded_id == "person-1"
+    assert decision.occluder_id == "chair-1"
+    assert decision.ambiguous is False
+
+
+def test_larger_second_hole_assigns_second_object_as_occluded():
+    decisions = occlusion.assign_pair_roles(
+        [("person-1", "chair-1")],
+        {"person-1": 3, "chair-1": 9},
+    )
+
+    decision = decisions[0]
+    assert decision.occluded_id == "chair-1"
+    assert decision.occluder_id == "person-1"
+    assert decision.ambiguous is False
+
+
+def test_equal_holes_create_ambiguous_decision_without_roles():
+    decisions = occlusion.assign_pair_roles(
+        [("person-1", "chair-1")],
+        {"person-1": 5, "chair-1": 5},
+    )
+
+    decision = decisions[0]
+    assert decision.occluded_id is None
+    assert decision.occluder_id is None
+    assert decision.ambiguous is True
+
+
+def test_multi_pair_roles_are_independent_and_keep_pair_order():
+    decisions = occlusion.assign_pair_roles(
+        [("person-1", "chair-1"), ("person-1", "table-1")],
+        {"person-1": 10, "chair-1": 4, "table-1": 20},
+    )
+
+    assert [
+        (decision.occluded_id, decision.occluder_id)
+        for decision in decisions
+    ] == [
+        ("person-1", "chair-1"),
+        ("table-1", "person-1"),
+    ]

@@ -13,6 +13,7 @@ from .base import (
 from .segmentation import sam3
 from .matting import birefnet
 from .inpainting import lama, sdxl
+from .completion import adapter
 
 logger = logging.getLogger(__name__)
 

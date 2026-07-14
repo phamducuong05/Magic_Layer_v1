@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Sequence
+from typing import Mapping, Optional, Sequence
 
 
 BoundingBox = tuple[int, int, int, int]
@@ -16,6 +16,20 @@ class ObjectBounds:
     object_id: str
     semantic_class: str
     bbox: BoundingBox
+
+
+@dataclass(frozen=True)
+class PairDecision:
+    """Occluded/occluder roles for one overlap pair."""
+
+    first_id: str
+    second_id: str
+    occluded_id: Optional[str]
+    occluder_id: Optional[str]
+
+    @property
+    def ambiguous(self) -> bool:
+        return self.occluded_id is None
 
 
 def find_cross_class_overlaps(
@@ -41,3 +55,32 @@ def find_cross_class_overlaps(
             overlaps.append((first.object_id, second.object_id))
 
     return overlaps
+
+
+def assign_pair_roles(
+    pairs: Sequence[OverlapPair], hole_areas: Mapping[str, int]
+) -> list[PairDecision]:
+    """Assign roles independently using only each pair's hole areas."""
+    decisions: list[PairDecision] = []
+
+    for first_id, second_id in pairs:
+        first_area = hole_areas[first_id]
+        second_area = hole_areas[second_id]
+
+        if first_area > second_area:
+            occluded_id, occluder_id = first_id, second_id
+        elif second_area > first_area:
+            occluded_id, occluder_id = second_id, first_id
+        else:
+            occluded_id = occluder_id = None
+
+        decisions.append(
+            PairDecision(
+                first_id=first_id,
+                second_id=second_id,
+                occluded_id=occluded_id,
+                occluder_id=occluder_id,
+            )
+        )
+
+    return decisions

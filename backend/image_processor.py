@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -19,7 +19,13 @@ from .core.helpers import (
 )
 from .core.refine import build_inpaint_mask, refine_alpha_with_colors
 from .core.layerd_refine import expand_mask, refine_background
-from .core.occlusion import ObjectBounds, OverlapPair, find_cross_class_overlaps
+from .core.occlusion import (
+    ObjectBounds,
+    OverlapPair,
+    PairDecision,
+    assign_pair_roles,
+    find_cross_class_overlaps,
+)
 from .models import model_manager
 
 logger = logging.getLogger(__name__)
@@ -57,6 +63,11 @@ class DetectedObject:
     modal_mask: np.ndarray
     bbox: tuple[int, int, int, int]
     overlap_partner_ids: set[str] = field(default_factory=set)
+    occluder_ids: set[str] = field(default_factory=set)
+    amodal_mask: Optional[np.ndarray] = None
+    completion_hole_mask: Optional[np.ndarray] = None
+    completion_hole_area: Optional[int] = None
+    reconstruction_mask: Optional[np.ndarray] = None
 
 
 def _extract_objects(
@@ -135,6 +146,78 @@ def _link_overlap_partners(
         objects_by_id[second_id].overlap_partner_ids.add(first_id)
 
     return pairs
+
+
+def _complete_overlapping_objects(
+    image: Image.Image, objects: List[DetectedObject]
+) -> None:
+    """Complete each grouped object involved in an overlap as one batch."""
+    completion_objects = [
+        detected for detected in objects if detected.overlap_partner_ids
+    ]
+    if not completion_objects:
+        return
+
+    amodal_masks = model_manager.get_completion_model().complete(
+        image,
+        [detected.modal_mask for detected in completion_objects],
+        [detected.bbox for detected in completion_objects],
+    )
+    for detected, amodal_mask in zip(completion_objects, amodal_masks):
+        detected.amodal_mask = amodal_mask
+        detected.completion_hole_mask = (amodal_mask > 0) & (
+            detected.modal_mask == 0
+        )
+        detected.completion_hole_area = int(
+            np.count_nonzero(detected.completion_hole_mask)
+        )
+
+
+def _apply_pair_decisions(
+    objects: List[DetectedObject], decisions: List[PairDecision]
+) -> None:
+    """Record each decisive pair's occluder on its occluded object."""
+    objects_by_id = {detected.object_id: detected for detected in objects}
+    for detected in objects:
+        detected.occluder_ids.clear()
+
+    for decision in decisions:
+        if decision.ambiguous:
+            continue
+        objects_by_id[decision.occluded_id].occluder_ids.add(
+            decision.occluder_id
+        )
+
+
+def _build_reconstruction_masks(
+    objects: List[DetectedObject], kernel_size: tuple[int, int]
+) -> None:
+    """Build constrained masks for objects with assigned occluders."""
+    objects_by_id = {detected.object_id: detected for detected in objects}
+    for detected in objects:
+        detected.reconstruction_mask = None
+        if (
+            not detected.occluder_ids
+            or detected.amodal_mask is None
+            or detected.completion_hole_mask is None
+        ):
+            continue
+
+        occluder_union = np.zeros_like(detected.modal_mask, dtype=bool)
+        for occluder_id in detected.occluder_ids:
+            occluder_union |= objects_by_id[occluder_id].modal_mask > 0
+
+        expanded_support = expand_mask(
+            detected.amodal_mask > 0, kernel_size
+        ).astype(bool)
+        relevant_occluder = (
+            occluder_union
+            & expanded_support
+            & ~(detected.modal_mask > 0)
+        )
+        detected.reconstruction_mask = (
+            detected.completion_hole_mask | relevant_occluder
+        )
 
 
 def _refine_masks(
@@ -275,12 +358,23 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
             original_width=width,
             original_height=height,
         )
-    _link_overlap_partners(objects)
+    overlap_pairs = _link_overlap_partners(objects)
+    _complete_overlapping_objects(image, objects)
+    pair_decisions = assign_pair_roles(
+        overlap_pairs,
+        {
+            detected.object_id: detected.completion_hole_area
+            for detected in objects
+            if detected.completion_hole_area is not None
+        },
+    )
+    _apply_pair_decisions(objects, pair_decisions)
+    kernel_size = _calc_kernel_size(image_np)
+    _build_reconstruction_masks(objects, kernel_size)
     raw_masks = [detected.modal_mask for detected in objects]
     labels = [detected.display_label for detected in objects]
 
     # Stage 2: turn hard SAM3 masks into edge-aware soft alpha mattes.
-    kernel_size = _calc_kernel_size(image_np)
     soft_alphas = _refine_masks(image_np, raw_masks)
 
     # Stage 3: refine RGB/alpha and encode each component as a cropped PNG.
