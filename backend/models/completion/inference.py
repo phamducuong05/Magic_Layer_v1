@@ -4,15 +4,10 @@ import cv2
 import torch
 import torch.nn as nn
 
-import utils
-import pdb
 from skimage.morphology import convex_hull
-from torch.nn import functional as F
-import matplotlib.pyplot as plt
 
-import ipdb
-from PIL import Image
-import pycocotools.mask as maskUtils
+from .utils.common_utils import densecrf
+from .utils.data_utils import crop_padding
 
 def to_eraser(inst, bbox, newbbox):
     inst = inst.squeeze(0).numpy()
@@ -20,7 +15,7 @@ def to_eraser(inst, bbox, newbbox):
     w, h = bbox.numpy()[2:]
     inst = cv2.resize(inst, (w, h), interpolation=cv2.INTER_LINEAR)
     offbbox = [newbbox[0] - bbox[0], newbbox[1] - bbox[1], newbbox[2], newbbox[3]]
-    eraser = utils.crop_padding(inst, offbbox, pad_value=(0,))
+    eraser = crop_padding(inst, offbbox, pad_value=(0,))
     eraser = cv2.resize(eraser, (final_w, final_h), interpolation=cv2.INTER_NEAREST)
     #eraser = (eraser >= 0.5).astype(inst.dtype)
     return torch.from_numpy(eraser).unsqueeze(0)
@@ -28,7 +23,7 @@ def to_eraser(inst, bbox, newbbox):
 def get_eraser(inst_ind, idx, bbox, input_size):
     inst_ind = inst_ind.numpy()
     bbox = bbox.numpy().tolist()
-    eraser = cv2.resize(utils.crop_padding(inst_ind, bbox, pad_value=(0,)),
+    eraser = cv2.resize(crop_padding(inst_ind, bbox, pad_value=(0,)),
         (input_size, input_size), interpolation=cv2.INTER_NEAREST)
     eraser = (eraser == idx + 1)
     return torch.from_numpy(eraser.astype(np.float32)).unsqueeze(0)
@@ -71,7 +66,7 @@ def recover_mask(mask, bbox, h, w, interp):
         mask = cv2.resize(mask, (size, size), interpolation=cv2.INTER_NEAREST)
     woff, hoff = bbox[0], bbox[1]
     newbbox = [-woff, -hoff, w, h]
-    return utils.crop_padding(mask, newbbox, pad_value=(0,))
+    return crop_padding(mask, newbbox, pad_value=(0,))
 
 def resize_mask(mask, size, interp):
     if interp == 'linear':
@@ -258,7 +253,7 @@ def infer_instseg(model, image, category, bboxes, new_bboxes, input_size, th, rg
             interpolation=cv2.INTER_NEAREST)
         bbox_mask_tensor = torch.from_numpy(
             bbox_mask.astype(np.float32) * category[i]).unsqueeze(0).unsqueeze(0).cuda()
-        image_patch = cv2.resize(utils.crop_padding(image, new_bboxes[i], pad_value=(0,0,0)),
+        image_patch = cv2.resize(crop_padding(image, new_bboxes[i], pad_value=(0,0,0)),
             (input_size, input_size), interpolation=cv2.INTER_CUBIC)
         image_tensor = torch.from_numpy(
             image_patch.transpose((2,0,1)).astype(np.float32)).unsqueeze(0).cuda() # 13HW
@@ -271,9 +266,9 @@ def infer_instseg(model, image, category, bboxes, new_bboxes, input_size, th, rg
         output = nn.functional.softmax(output, dim=1) # 12HW
         if rgb is not None:
             prob = output[0,...].cpu().numpy() # 2HW
-            rgb_patch = cv2.resize(utils.crop_padding(rgb, new_bboxes[i], pad_value=(0,0,0)),
+            rgb_patch = cv2.resize(crop_padding(rgb, new_bboxes[i], pad_value=(0,0,0)),
                 (input_size, input_size), interpolation=cv2.INTER_CUBIC)
-            prob_crf = np.array(utils.densecrf(prob, rgb_patch)).reshape(*prob.shape)
+            prob_crf = np.array(densecrf(prob, rgb_patch)).reshape(*prob.shape)
             pred = (prob_crf[1,:,:] > th).astype(np.uint8) # HW
         else:
             pred = (output[0,1,:,:] > th).cpu().numpy().astype(np.uint8) # HW
@@ -309,7 +304,7 @@ def infer_amodal_aw_sdm(model, image_fn, inmodal, category, bboxes, use_rgb=True
                 int(bboxes[i][2] * org_src_ft.shape[1] / org_w),
                 int(bboxes[i][3] * org_src_ft.shape[0] / org_h),
                 ]
-            src_ft = utils.crop_padding(org_src_ft, src_ft_new_bbox, pad_value=(0,)*org_src_ft.shape[-1])
+            src_ft = crop_padding(org_src_ft, src_ft_new_bbox, pad_value=(0,)*org_src_ft.shape[-1])
             src_ft = torch.tensor(src_ft).permute(2,0,1).unsqueeze(0)
             src_ft = src_ft.to('cuda:0')
             if layer_i == 0:
@@ -326,14 +321,14 @@ def infer_amodal_aw_sdm(model, image_fn, inmodal, category, bboxes, use_rgb=True
                 src_ft = torch.tensor(org_src_ft).permute(2,0,1).unsqueeze(0)
                 src_ft = nn.Upsample(size=(org_h, org_w), mode='bilinear')(src_ft).squeeze(0) # L x h x w
                 src_ft = src_ft.permute(1,2,0).cpu().numpy() # h x w x L
-                src_ft = utils.crop_padding(src_ft, bboxes[i], pad_value=(0,)*src_ft.shape[-1]) # h x w x L
+                src_ft = crop_padding(src_ft, bboxes[i], pad_value=(0,)*src_ft.shape[-1]) # h x w x L
                 src_ft = torch.tensor(src_ft).permute(2,0,1).unsqueeze(0)
                 src_ft = nn.Upsample(size=(cur_upsample_sz, cur_upsample_sz), mode='bilinear')(src_ft).squeeze(0) # L x h x w
                 src_ft = src_ft.permute(1,2,0).cpu().numpy() # h x w x L
 
             src_ft_dict[layer_i] = src_ft
             
-        inmodal_patch = utils.crop_padding(inmodal[i], bboxes[i], pad_value=(0,))
+        inmodal_patch = crop_padding(inmodal[i], bboxes[i], pad_value=(0,))
         if input_size is not None:
             newsize = input_size
         elif min_input_size > bboxes[i,2]:

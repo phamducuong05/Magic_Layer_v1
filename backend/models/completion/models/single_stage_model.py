@@ -3,21 +3,20 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 
-from models import backbone
-import utils
-
-import ipdb
+from ..utils.common_utils import init_weights, load_state
+from ..utils.distributed_utils import DistModule
+from . import backbone
 
 class SingleStageModel(object):
 
     def __init__(self, params, dist_model=False):
         self.model = backbone.__dict__[params['backbone_arch']](**params['backbone_param'])
         # ipdb.set_trace()
-        utils.init_weights(self.model, init_type='xavier')
+        init_weights(self.model, init_type='xavier')
         # ipdb.set_trace()
         self.model.cuda()
         if dist_model:
-            self.model = utils.DistModule(self.model)
+            self.model = DistModule(self.model)
             self.world_size = dist.get_world_size()
         else:
             self.model = backbone.FixModule(self.model)
@@ -48,12 +47,12 @@ class SingleStageModel(object):
             path = os.path.join(path, "ckpt_iter_{}.pth.tar".format(Iter))
 
         if resume:
-            utils.load_state(path, self.model, self.optim)
+            load_state(path, self.model, self.optim)
         else:
-            utils.load_state(path, self.model)
+            load_state(path, self.model)
 
     def load_pretrain(self, load_path):
-        utils.load_state(load_path, self.model)
+        load_state(load_path, self.model)
 
     def save_state(self, path, Iter):
         path = os.path.join(path, "ckpt_iter_{}.pth.tar".format(Iter))

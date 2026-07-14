@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+import numpy as np
 from PIL import Image
 import torch
 
@@ -35,4 +37,17 @@ class BaseInpaintingModel(BaseModel):
 class BaseSegmentationModel(BaseModel):
     @abstractmethod
     def get_processor(self) -> Any:
+        pass
+
+
+class BaseCompletionModel(BaseModel):
+    """Interface for completing multiple modal masks from one source image."""
+
+    @abstractmethod
+    def complete(
+        self,
+        image: Image.Image,
+        modal_masks: List[np.ndarray],
+    ) -> List[np.ndarray]:
+        """Return one amodal mask per input mask, preserving input order."""
         pass

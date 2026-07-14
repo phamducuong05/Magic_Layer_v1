@@ -3,7 +3,12 @@ from typing import Optional
 
 from ..config import config
 from .registry import ModelRegistry
-from .base import BaseSegmentationModel, BaseMattingModel, BaseInpaintingModel
+from .base import (
+    BaseCompletionModel,
+    BaseInpaintingModel,
+    BaseMattingModel,
+    BaseSegmentationModel,
+)
 
 from .segmentation import sam3
 from .matting import birefnet
@@ -28,6 +33,7 @@ class ModelManager:
             self._segmentation_model: Optional[BaseSegmentationModel] = None
             self._matting_model: Optional[BaseMattingModel] = None
             self._inpainting_model: Optional[BaseInpaintingModel] = None
+            self._completion_model: Optional[BaseCompletionModel] = None
             self._initialized = True
 
     def _get_model_instance(self, category: str):
@@ -54,6 +60,11 @@ class ModelManager:
         if self._inpainting_model is None:
             self._inpainting_model = self._get_model_instance("inpainting")
         return self._inpainting_model
+
+    def get_completion_model(self) -> BaseCompletionModel:
+        if self._completion_model is None:
+            self._completion_model = self._get_model_instance("completion")
+        return self._completion_model
 
     def warmup_all(self):
         """Khởi tạo tất cả các model được cấu hình là active."""

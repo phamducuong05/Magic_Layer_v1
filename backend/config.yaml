@@ -32,3 +32,11 @@ models:
       checkpoint_path: "checkpoints/sam3.pt"
       confidence_threshold: 0.5
       load_from_hf: false
+  completion:
+    active: sdamodal
+    sdamodal:
+      config_path: "backend/models/completion/config_SDAmodal.yaml"
+      checkpoint_path: "checkpoints/ckpt_SDAmodal.pth"
+      input_size: 512
+      enlarge_box: 3.0
+      lazy_load: true

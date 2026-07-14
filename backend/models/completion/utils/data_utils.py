@@ -2,7 +2,6 @@ import numpy as np
 from PIL import Image
 import io
 import cv2
-import ipdb
 
 def pil_loader(img_str):
     buff = io.BytesIO(img_str)

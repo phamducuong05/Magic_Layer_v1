@@ -5,8 +5,6 @@ import torch.nn.functional as F
 from .unet_parts import inconv, down, up, outconv
 from .. import resnet
 
-
-import ipdb
 import cv2
 import numpy as np
 

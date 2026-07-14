@@ -7,7 +7,8 @@ class ModelRegistry:
     _registry: Dict[str, Dict[str, Type]] = {
         "matting": {},
         "inpainting": {},
-        "segmentation": {}
+        "segmentation": {},
+        "completion": {},
     }
 
     @classmethod
