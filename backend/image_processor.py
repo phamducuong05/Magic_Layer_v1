@@ -46,13 +46,23 @@ class ProcessResult:
     layers: List[ObjectLayer] = field(default_factory=list)
 
 
-def _extract_raw_masks(
+@dataclass
+class DetectedObject:
+    """One same-class grouped SAM3 object in full-image coordinates."""
+
+    object_id: str
+    semantic_class: str
+    display_label: str
+    modal_mask: np.ndarray
+    bbox: tuple[int, int, int, int]
+
+
+def _extract_objects(
     image: Image.Image, keywords: List[str]
-) -> tuple[List[np.ndarray], List[str]]:
-    """Run SAM3 text prompting and return full-resolution masks and labels."""
+) -> List[DetectedObject]:
+    """Run SAM3 and describe each same-class grouped detection."""
     processor = model_manager.get_segmentation_model().get_processor()
-    raw_masks: List[np.ndarray] = []
-    labels: List[str] = []
+    objects: List[DetectedObject] = []
 
     with torch.inference_mode(), _inference_context():
         state = processor.set_image(image)
@@ -74,16 +84,30 @@ def _extract_raw_masks(
             keyword_masks = _merge_overlapping_masks(keyword_masks)
 
             for index, mask in enumerate(keyword_masks):
-                raw_masks.append(mask)
-                label = (
+                bbox = _bbox_from_mask(mask)
+                if bbox is None:
+                    logger.warning(
+                        "[SAM3] Ignoring empty grouped mask for '%s'", keyword
+                    )
+                    continue
+
+                display_label = (
                     f"{keyword}_{index}"
                     if len(keyword_masks) > 1
                     else keyword
                 )
-                labels.append(label)
-                logger.info("[SAM3] grouped instance '%s'", label)
+                objects.append(
+                    DetectedObject(
+                        object_id=f"object-{len(objects)}",
+                        semantic_class=keyword,
+                        display_label=display_label,
+                        modal_mask=mask,
+                        bbox=bbox,
+                    )
+                )
+                logger.info("[SAM3] grouped instance '%s'", display_label)
 
-    return raw_masks, labels
+    return objects
 
 
 def _refine_masks(
@@ -216,14 +240,16 @@ def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
     image_np = np.asarray(image, dtype=np.uint8)
 
     # Stage 1: text-guided SAM3 segmentation.
-    raw_masks, labels = _extract_raw_masks(image, keywords)
-    if not raw_masks:
+    objects = _extract_objects(image, keywords)
+    if not objects:
         logger.warning("No objects were detected; returning the original background.")
         return ProcessResult(
             background_base64=_image_to_base64(image),
             original_width=width,
             original_height=height,
         )
+    raw_masks = [detected.modal_mask for detected in objects]
+    labels = [detected.display_label for detected in objects]
 
     # Stage 2: turn hard SAM3 masks into edge-aware soft alpha mattes.
     kernel_size = _calc_kernel_size(image_np)

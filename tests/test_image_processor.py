@@ -128,25 +128,27 @@ def test_prepare_inpaint_masks_generates_beyond_blend_boundary():
     assert blend_array[15, 15] >= 250
 
 
-def test_extract_raw_masks_uses_each_nonempty_prompt(monkeypatch, rgb_image):
+def test_extract_objects_uses_each_nonempty_prompt(monkeypatch, rgb_image):
     processor = FakeSamProcessor()
     _install_segmentation_fake(monkeypatch, processor)
 
-    masks, labels = pipeline._extract_raw_masks(
-        rgb_image, [" component ", "", "missing"]
-    )
+    objects = pipeline._extract_objects(rgb_image, [" component ", "", "missing"])
 
     assert processor.image is rgb_image
     assert processor.prompts == ["component", "missing"]
     assert processor.reset_count == 2
-    assert labels == ["component"]
-    assert len(masks) == 1
-    assert masks[0].shape == (6, 8)
-    assert masks[0].dtype == np.uint8
-    assert set(np.unique(masks[0])) == {0, 255}
+    assert len(objects) == 1
+    detected = objects[0]
+    assert detected.object_id == "object-0"
+    assert detected.semantic_class == "component"
+    assert detected.display_label == "component"
+    assert detected.bbox == (2, 1, 4, 4)
+    assert detected.modal_mask.shape == (6, 8)
+    assert detected.modal_mask.dtype == np.uint8
+    assert set(np.unique(detected.modal_mask)) == {0, 255}
 
 
-def test_extract_raw_masks_merges_overlapping_same_keyword(monkeypatch, rgb_image):
+def test_extract_objects_merges_before_calculating_bbox(monkeypatch, rgb_image):
     processor = FakeSamProcessor()
 
     def two_masks(state, prompt):
@@ -160,15 +162,18 @@ def test_extract_raw_masks_merges_overlapping_same_keyword(monkeypatch, rgb_imag
     processor.set_text_prompt = two_masks
     _install_segmentation_fake(monkeypatch, processor)
 
-    masks, labels = pipeline._extract_raw_masks(rgb_image, ["button"])
+    objects = pipeline._extract_objects(rgb_image, ["button"])
 
-    assert len(masks) == 1
-    assert labels == ["button"]
-    assert np.all(masks[0][1:4, 1:4] == 255)
-    assert np.all(masks[0][2:5, 3:6] == 255)
+    assert len(objects) == 1
+    detected = objects[0]
+    assert detected.semantic_class == "button"
+    assert detected.display_label == "button"
+    assert detected.bbox == (1, 1, 5, 4)
+    assert np.all(detected.modal_mask[1:4, 1:4] == 255)
+    assert np.all(detected.modal_mask[2:5, 3:6] == 255)
 
 
-def test_extract_raw_masks_keeps_nonoverlapping_same_keyword(
+def test_extract_objects_keeps_nonoverlapping_same_keyword(
     monkeypatch, rgb_image
 ):
     processor = FakeSamProcessor()
@@ -184,10 +189,24 @@ def test_extract_raw_masks_keeps_nonoverlapping_same_keyword(
     processor.set_text_prompt = two_masks
     _install_segmentation_fake(monkeypatch, processor)
 
-    masks, labels = pipeline._extract_raw_masks(rgb_image, ["button"])
+    objects = pipeline._extract_objects(rgb_image, ["button"])
 
-    assert len(masks) == 2
-    assert labels == ["button_0", "button_1"]
+    assert [detected.object_id for detected in objects] == [
+        "object-0",
+        "object-1",
+    ]
+    assert [detected.semantic_class for detected in objects] == [
+        "button",
+        "button",
+    ]
+    assert [detected.display_label for detected in objects] == [
+        "button_0",
+        "button_1",
+    ]
+    assert [detected.bbox for detected in objects] == [
+        (0, 0, 2, 2),
+        (6, 4, 2, 2),
+    ]
 
 
 def test_refine_masks_guides_matting_and_limits_alpha(monkeypatch, rgb_image):
@@ -285,12 +304,19 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     expected_layer = pipeline.ObjectLayer("component", "layer-data", 2, 1, 4, 4)
     expected_background = Image.new("RGB", rgb_image.size, (1, 2, 3))
 
-    extract_masks = Mock(return_value=([raw_mask], ["component"]))
+    detected = pipeline.DetectedObject(
+        object_id="object-0",
+        semantic_class="component",
+        display_label="component",
+        modal_mask=raw_mask,
+        bbox=(2, 1, 4, 4),
+    )
+    extract_objects = Mock(return_value=[detected])
     refine_masks = Mock(return_value=[alpha])
     extract_layers = Mock(return_value=[expected_layer])
     generate_background = Mock(return_value=expected_background)
     encode = Mock(side_effect=lambda image, fmt="PNG": f"encoded-{image.size}")
-    monkeypatch.setattr(pipeline, "_extract_raw_masks", extract_masks)
+    monkeypatch.setattr(pipeline, "_extract_objects", extract_objects)
     monkeypatch.setattr(pipeline, "_refine_masks", refine_masks)
     monkeypatch.setattr(pipeline, "_extract_object_layers", extract_layers)
     monkeypatch.setattr(
@@ -304,8 +330,8 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     assert result.original_height == 6
     assert result.background_base64 == "encoded-(8, 6)"
     assert result.layers == [expected_layer]
-    extract_masks.assert_called_once()
-    prepared_image, prepared_keywords = extract_masks.call_args.args
+    extract_objects.assert_called_once()
+    prepared_image, prepared_keywords = extract_objects.call_args.args
     assert prepared_image.mode == "RGB"
     assert prepared_image.size == rgb_image.size
     assert prepared_keywords == ["component"]
@@ -317,7 +343,7 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
 def test_process_image_returns_original_when_nothing_detected(
     monkeypatch, rgb_image
 ):
-    monkeypatch.setattr(pipeline, "_extract_raw_masks", Mock(return_value=([], [])))
+    monkeypatch.setattr(pipeline, "_extract_objects", Mock(return_value=[]))
     refine_masks = Mock()
     monkeypatch.setattr(pipeline, "_refine_masks", refine_masks)
     monkeypatch.setattr(
