@@ -91,12 +91,20 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
-def load_state(path, model, optimizer=None):
-    def map_func(storage, location):
-        return storage.cuda()
+def _checkpoint_device(model, device=None):
+    if device is not None:
+        return torch.device(device)
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def load_state(path, model, optimizer=None, device=None):
+    map_location = _checkpoint_device(model, device)
     if os.path.isfile(path):
         print("=> loading checkpoint '{}'".format(path))
-        checkpoint = torch.load(path, map_location=map_func)
+        checkpoint = torch.load(path, map_location=map_location)
         model.load_state_dict(checkpoint['state_dict'], strict=False)
         ckpt_keys = set(checkpoint['state_dict'].keys())
         own_keys = set(model.state_dict().keys())
@@ -115,13 +123,12 @@ def load_state(path, model, optimizer=None):
     else:
         raise Exception("=> no checkpoint found at '{}'".format(path))
 
-def load_weights(path, model):
-    def map_func(storage, location):
-        return storage.cuda()
+def load_weights(path, model, device=None):
+    map_location = _checkpoint_device(model, device)
     if not os.path.isfile(path):
         raise Exception("File not exist: {}".format(path))
     print("=> loading checkpoint '{}'".format(path))
-    weights = torch.load(path, map_location=map_func)
+    weights = torch.load(path, map_location=map_location)
     model.load_state_dict(weights, strict=False)
     ckpt_keys = set(weights.keys())
     own_keys = set(model.state_dict().keys())

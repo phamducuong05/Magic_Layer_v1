@@ -48,6 +48,11 @@ class BaseCompletionModel(BaseModel):
         self,
         image: Image.Image,
         modal_masks: List[np.ndarray],
+        bboxes: List[tuple[int, int, int, int]],
     ) -> List[np.ndarray]:
-        """Return one amodal mask per input mask, preserving input order."""
+        """Return amodal masks in input order.
+
+        ``modal_masks[i]`` and ``bboxes[i]`` must describe the same grouped
+        object. Bounding boxes use ``(x, y, width, height)`` coordinates.
+        """
         pass

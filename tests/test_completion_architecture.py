@@ -1,5 +1,6 @@
 """Tests for the model-agnostic amodal completion architecture."""
 
+import inspect
 import sys
 import types
 from pathlib import Path
@@ -23,7 +24,8 @@ class FakeCompletionModel(BaseCompletionModel):
     def _load_model(self):
         self.loaded = True
 
-    def complete(self, image, modal_masks):
+    def complete(self, image, modal_masks, bboxes):
+        self.received_bboxes = bboxes
         return modal_masks
 
 
@@ -32,12 +34,20 @@ def test_completion_model_contract_preserves_mask_order():
     image = Image.new("RGB", (2, 2))
     first = np.zeros((2, 2), dtype=np.uint8)
     second = np.ones((2, 2), dtype=np.uint8)
+    bboxes = [(0, 0, 1, 1), (0, 0, 2, 2)]
 
-    result = model.complete(image, [first, second])
+    result = model.complete(image, [first, second], bboxes)
 
     assert model.loaded is True
     assert result[0] is first
     assert result[1] is second
+    assert model.received_bboxes is bboxes
+
+
+def test_completion_contract_requires_grouped_bounding_boxes():
+    parameters = inspect.signature(BaseCompletionModel.complete).parameters
+
+    assert list(parameters) == ["self", "image", "modal_masks", "bboxes"]
 
 
 def test_completion_model_requires_complete_method():

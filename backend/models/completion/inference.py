@@ -31,13 +31,24 @@ def get_eraser(inst_ind, idx, bbox, input_size):
 
 
 # add by guanqi - 10.23
-def net_forward_aw_sdm(model, image, inmodal_patch, eraser, use_rgb, th, args=None, debug=False, no_eraser=False):
-    if use_rgb:
-        for layer_i in image.keys():
-            image[layer_i] = torch.tensor(image[layer_i]).unsqueeze(0)
-            image[layer_i] = image[layer_i].cuda()
+def _resolve_device(model, device=None):
+    return torch.device(device if device is not None else model.device)
 
-    inmodal_patch = torch.from_numpy(inmodal_patch.astype(np.float32)).unsqueeze(0).unsqueeze(0).cuda()
+
+def net_forward_aw_sdm(model, image, inmodal_patch, eraser, use_rgb, th,
+                       args=None, debug=False, no_eraser=False, device=None):
+    runtime_device = _resolve_device(model, device)
+    if use_rgb:
+        image = {
+            layer_i: torch.as_tensor(
+                value, device=runtime_device
+            ).unsqueeze(0)
+            for layer_i, value in image.items()
+        }
+
+    inmodal_patch = torch.from_numpy(
+        inmodal_patch.astype(np.float32)
+    ).unsqueeze(0).unsqueeze(0).to(runtime_device)
 
     with torch.no_grad():        
         if use_rgb:
@@ -241,7 +252,9 @@ def get_ancestors(graph, idx):
     is_ancestor[idx] = False
     return np.where(is_ancestor)[0]
 
-def infer_instseg(model, image, category, bboxes, new_bboxes, input_size, th, rgb=None):
+def infer_instseg(model, image, category, bboxes, new_bboxes, input_size, th,
+                  rgb=None, device=None):
+    runtime_device = _resolve_device(model, device)
     num = bboxes.shape[0]
     seg_patches = []
     for i in range(num):
@@ -252,11 +265,13 @@ def infer_instseg(model, image, category, bboxes, new_bboxes, input_size, th, rg
         bbox_mask = cv2.resize(bbox_mask, (input_size, input_size),
             interpolation=cv2.INTER_NEAREST)
         bbox_mask_tensor = torch.from_numpy(
-            bbox_mask.astype(np.float32) * category[i]).unsqueeze(0).unsqueeze(0).cuda()
+            bbox_mask.astype(np.float32) * category[i]
+        ).unsqueeze(0).unsqueeze(0).to(runtime_device)
         image_patch = cv2.resize(crop_padding(image, new_bboxes[i], pad_value=(0,0,0)),
             (input_size, input_size), interpolation=cv2.INTER_CUBIC)
         image_tensor = torch.from_numpy(
-            image_patch.transpose((2,0,1)).astype(np.float32)).unsqueeze(0).cuda() # 13HW
+            image_patch.transpose((2,0,1)).astype(np.float32)
+        ).unsqueeze(0).to(runtime_device) # 13HW
         with torch.no_grad():
             output = model.model(torch.cat([image_tensor, bbox_mask_tensor], dim=1)).detach()
         if output.shape[2] != image_tensor.shape[2]:
@@ -277,20 +292,42 @@ def infer_instseg(model, image, category, bboxes, new_bboxes, input_size, th, rg
 
 
 
-def infer_amodal_aw_sdm(model, image_fn, inmodal, category, bboxes, use_rgb=True, th=0.5,
-                     input_size=None, min_input_size=16, interp='nearest', debug_info=False, args=None):
+def _validate_dift_feature_pyramid(feature_pyramid):
+    required_levels = {0, 1, 2, 3}
+    missing_levels = sorted(required_levels - set(feature_pyramid))
+    if missing_levels:
+        missing = ", ".join(str(level) for level in missing_levels)
+        raise ValueError(f"missing DIFT feature levels: {missing}")
+
+    for level in sorted(required_levels):
+        feature = feature_pyramid[level]
+        if not isinstance(feature, torch.Tensor) or feature.ndim != 3:
+            raise ValueError(
+                f"DIFT feature level {level} must have shape (C, H, W)"
+            )
+        if min(feature.shape) <= 0:
+            raise ValueError(
+                f"DIFT feature level {level} must have non-empty dimensions"
+            )
+
+
+def infer_amodal_aw_sdm(model, feature_pyramid, inmodal, category, bboxes,
+                     use_rgb=True, th=0.5, input_size=None, min_input_size=16,
+                     interp='nearest', debug_info=False, args=None, device=None):
+    runtime_device = _resolve_device(model, device)
+    _validate_dift_feature_pyramid(feature_pyramid)
     num = inmodal.shape[0]
     inmodal_patches = []
     amodal_patches = []
 
-    import torch.nn as nn
-    import os
-    org_src_ft_dict = {}
-    for layer_i in [0, 1, 2, 3]:
-        feat_dir = 'feature/pth' + str(layer_i)
-        feat = torch.load(os.path.join(feat_dir, image_fn[:-4] + '.pt'))
-        org_src_ft = feat.permute(1,2,0).numpy() # h x w x L
-        org_src_ft_dict[layer_i] = org_src_ft
+    org_src_ft_dict = {
+        layer_i: feature_pyramid[layer_i]
+        .detach()
+        .permute(1, 2, 0)
+        .cpu()
+        .numpy()
+        for layer_i in [0, 1, 2, 3]
+    }
     org_h, org_w = inmodal[0].shape[0], inmodal[0].shape[1]
 
     for i in range(num):
@@ -306,7 +343,7 @@ def infer_amodal_aw_sdm(model, image_fn, inmodal, category, bboxes, use_rgb=True
                 ]
             src_ft = crop_padding(org_src_ft, src_ft_new_bbox, pad_value=(0,)*org_src_ft.shape[-1])
             src_ft = torch.tensor(src_ft).permute(2,0,1).unsqueeze(0)
-            src_ft = src_ft.to('cuda:0')
+            src_ft = src_ft.to(runtime_device)
             if layer_i == 0:
                 cur_upsample_sz = 24
             elif layer_i == 1:
@@ -340,7 +377,8 @@ def infer_amodal_aw_sdm(model, image_fn, inmodal, category, bboxes, use_rgb=True
 
         inmodal_patches.append(inmodal_patch)
         amodal_patches.append(net_forward_aw_sdm(
-            model, src_ft_dict, inmodal_patch * category[i], None, use_rgb, th, args=args))
+            model, src_ft_dict, inmodal_patch * category[i], None, use_rgb, th,
+            args=args, device=runtime_device))
     if debug_info:
         return inmodal_patches, amodal_patches
     else:

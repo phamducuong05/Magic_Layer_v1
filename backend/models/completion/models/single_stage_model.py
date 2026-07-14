@@ -9,12 +9,13 @@ from . import backbone
 
 class SingleStageModel(object):
 
-    def __init__(self, params, dist_model=False):
+    def __init__(self, params, dist_model=False, device="cuda"):
+        self.device = torch.device(device)
         self.model = backbone.__dict__[params['backbone_arch']](**params['backbone_param'])
         # ipdb.set_trace()
         init_weights(self.model, init_type='xavier')
         # ipdb.set_trace()
-        self.model.cuda()
+        self.model.to(self.device)
         if dist_model:
             self.model = DistModule(self.model)
             self.world_size = dist.get_world_size()
@@ -47,12 +48,12 @@ class SingleStageModel(object):
             path = os.path.join(path, "ckpt_iter_{}.pth.tar".format(Iter))
 
         if resume:
-            load_state(path, self.model, self.optim)
+            load_state(path, self.model, self.optim, device=self.device)
         else:
-            load_state(path, self.model)
+            load_state(path, self.model, device=self.device)
 
     def load_pretrain(self, load_path):
-        load_state(load_path, self.model)
+        load_state(load_path, self.model, device=self.device)
 
     def save_state(self, path, Iter):
         path = os.path.join(path, "ckpt_iter_{}.pth.tar".format(Iter))

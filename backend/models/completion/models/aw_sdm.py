@@ -10,8 +10,8 @@ from . import SingleStageModel
 
 class AWSDM(SingleStageModel):
 
-    def __init__(self, params, load_pretrain=None, dist_model=False):
-        super(AWSDM, self).__init__(params, dist_model)
+    def __init__(self, params, load_pretrain=None, dist_model=False, device="cuda"):
+        super(AWSDM, self).__init__(params, dist_model, device=device)
         self.params = params
         self.use_rgb = params.get("use_rgb", False)
 
@@ -21,9 +21,9 @@ class AWSDM(SingleStageModel):
     def set_input(self, rgb=None, mask=None, target=None):
         self.rgb = {}
         for key_i in rgb.keys():
-            self.rgb[key_i] = rgb[key_i].cuda()
-        self.mask = mask.cuda()
-        self.target = target.cuda()
+            self.rgb[key_i] = rgb[key_i].to(self.device)
+        self.mask = mask.to(self.device)
+        self.target = target.to(self.device)
 
     def evaluate(self, image, inmodal, category, bboxes, amodal, gt_order_matrix, input_size):
         # amodal
