@@ -342,6 +342,25 @@ def _generate_final_background(
     return Image.fromarray(background_np, mode="RGB")
 
 
+def process_masks(
+    image: Image.Image, keywords: List[str]
+) -> List[np.ndarray]:
+    """Run segmentation and conditional completion, returning masks only."""
+    image = image.convert("RGB")
+    objects = _extract_objects(image, keywords)
+    if not objects:
+        return []
+
+    _link_overlap_partners(objects)
+    _complete_overlapping_objects(image, objects)
+    return [
+        detected.amodal_mask
+        if detected.amodal_mask is not None
+        else detected.modal_mask
+        for detected in objects
+    ]
+
+
 def process_image(image: Image.Image, keywords: List[str]) -> ProcessResult:
     """Coordinate segmentation, matting, layer extraction, and inpainting."""
     # Normalize once so every model and NumPy operation shares the same RGB data.

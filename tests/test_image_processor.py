@@ -577,3 +577,80 @@ def test_process_image_returns_original_when_nothing_detected(
     assert result.background_base64 == "original-image"
     assert result.layers == []
     refine_masks.assert_not_called()
+
+
+def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
+    monkeypatch, rgb_image
+):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    lamp = _detected_object("lamp-1", "lamp", (6, 0, 2, 2))
+    for detected in (person, chair, lamp):
+        detected.modal_mask = np.zeros((6, 8), dtype=np.uint8)
+    person.modal_mask[0:4, 0:4] = 255
+    chair.modal_mask[2:6, 2:6] = 255
+    lamp.modal_mask[0:2, 6:8] = 255
+    person.overlap_partner_ids.add(chair.object_id)
+    chair.overlap_partner_ids.add(person.object_id)
+
+    person_amodal = (person.modal_mask > 0).astype(np.uint8)
+    chair_amodal = (chair.modal_mask > 0).astype(np.uint8)
+    person_amodal[4, 1] = 1
+    chair_amodal[1, 4] = 1
+    completion_model = Mock()
+    completion_model.complete.return_value = [person_amodal, chair_amodal]
+
+    monkeypatch.setattr(
+        pipeline, "_extract_objects", Mock(return_value=[person, chair, lamp])
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_link_overlap_partners",
+        Mock(return_value=[("person-1", "chair-1")]),
+    )
+    monkeypatch.setattr(
+        pipeline.model_manager,
+        "get_completion_model",
+        Mock(return_value=completion_model),
+    )
+    matting_getter = Mock()
+    inpainting_getter = Mock()
+    monkeypatch.setattr(
+        pipeline.model_manager, "get_matting_model", matting_getter
+    )
+    monkeypatch.setattr(
+        pipeline.model_manager, "get_inpainting_model", inpainting_getter
+    )
+
+    masks = pipeline.process_masks(rgb_image, ["person", "chair", "lamp"])
+
+    assert masks == [person_amodal, chair_amodal, lamp.modal_mask]
+    assert all(mask.shape == (6, 8) for mask in masks)
+    completion_model.complete.assert_called_once()
+    matting_getter.assert_not_called()
+    inpainting_getter.assert_not_called()
+
+
+def test_process_masks_skips_completion_model_without_overlap(
+    monkeypatch, rgb_image
+):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    person.modal_mask = np.zeros((6, 8), dtype=np.uint8)
+    person.modal_mask[0:4, 0:4] = 255
+    monkeypatch.setattr(
+        pipeline, "_extract_objects", Mock(return_value=[person])
+    )
+    monkeypatch.setattr(
+        pipeline, "_link_overlap_partners", Mock(return_value=[])
+    )
+    completion_getter = Mock()
+    monkeypatch.setattr(
+        pipeline.model_manager,
+        "get_completion_model",
+        completion_getter,
+    )
+
+    masks = pipeline.process_masks(rgb_image, ["person"])
+
+    assert masks == [person.modal_mask]
+    completion_getter.assert_not_called()
