@@ -42,7 +42,8 @@ def test_notebook_matches_current_process_image_stage_order():
         "link_overlap_partners(objects)",
         "get_completion_candidates(objects)",
         "complete_objects(",
-        "assign_pair_roles(overlap_pairs, hole_areas)",
+        "effective_hole_area(",
+        "assign_pair_roles(",
         "apply_pair_decisions(objects, pair_decisions)",
         "build_reconstruction_masks(objects, kernel_size)",
         "refine_objects(image_np, objects, matte)",
@@ -54,6 +55,10 @@ def test_notebook_matches_current_process_image_stage_order():
     assert 'config.get_pipeline_config("completion")' in source
     assert "max_area_growth_ratio=" in source
     assert "max_bbox_growth_ratio=" in source
+    assert "minimum_hole_area_pixels" in source
+    assert "minimum_hole_area_ratio" in source
+    assert "tie_tolerance_ratio=" in source
+    assert "effective_completion_hole_area" in source
     assert "from backend.pipeline.segmentation import extract_objects" in source
     assert "from backend.pipeline.completion import" in source
     assert "from backend.pipeline.reconstruction import" in source

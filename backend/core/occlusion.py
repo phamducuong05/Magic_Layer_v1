@@ -58,22 +58,45 @@ def find_cross_class_overlaps(
     return overlaps
 
 
+def effective_hole_area(
+    raw_area: int,
+    modal_area: int,
+    *,
+    minimum_pixels: int,
+    minimum_modal_ratio: float,
+) -> int:
+    """Suppress completion-hole noise while preserving meaningful raw area."""
+    if minimum_pixels < 0 or minimum_modal_ratio < 0:
+        raise ValueError("hole-area noise-floor settings must be non-negative")
+
+    relative_floor = modal_area * minimum_modal_ratio
+    meaningful_floor = max(minimum_pixels, relative_floor)
+    return raw_area if raw_area >= meaningful_floor else 0
+
+
 def assign_pair_roles(
-    pairs: Sequence[OverlapPair], hole_areas: Mapping[str, int]
+    pairs: Sequence[OverlapPair],
+    hole_areas: Mapping[str, int],
+    *,
+    tie_tolerance_ratio: float = 0.0,
 ) -> list[PairDecision]:
     """Assign roles independently using only each pair's hole areas."""
+    if tie_tolerance_ratio < 0:
+        raise ValueError("tie_tolerance_ratio must be non-negative")
+
     decisions: list[PairDecision] = []
 
     for first_id, second_id in pairs:
         first_area = hole_areas[first_id]
         second_area = hole_areas[second_id]
 
-        if first_area > second_area:
-            occluded_id, occluder_id = first_id, second_id
-        elif second_area > first_area:
-            occluded_id, occluder_id = second_id, first_id
-        else:
+        tie_tolerance = max(first_area, second_area) * tie_tolerance_ratio
+        if abs(first_area - second_area) <= tie_tolerance:
             occluded_id = occluder_id = None
+        elif first_area > second_area:
+            occluded_id, occluder_id = first_id, second_id
+        else:
+            occluded_id, occluder_id = second_id, first_id
 
         decisions.append(
             PairDecision(

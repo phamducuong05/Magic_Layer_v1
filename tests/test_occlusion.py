@@ -1,7 +1,11 @@
 """Tests for cross-class overlap detection and pairwise role assignment."""
 
 from backend.core import occlusion
-from backend.core.occlusion import ObjectBounds, find_cross_class_overlaps
+from backend.core.occlusion import (
+    ObjectBounds,
+    effective_hole_area,
+    find_cross_class_overlaps,
+)
 
 
 def _object(object_id, semantic_class, bbox):
@@ -67,6 +71,33 @@ def test_empty_input_returns_no_pairs():
     assert find_cross_class_overlaps([]) == []
 
 
+def test_hole_below_absolute_noise_floor_has_zero_effective_area():
+    assert effective_hole_area(
+        raw_area=15,
+        modal_area=1_000,
+        minimum_pixels=16,
+        minimum_modal_ratio=0.01,
+    ) == 0
+
+
+def test_hole_below_modal_relative_noise_floor_has_zero_effective_area():
+    assert effective_hole_area(
+        raw_area=30,
+        modal_area=4_000,
+        minimum_pixels=16,
+        minimum_modal_ratio=0.01,
+    ) == 0
+
+
+def test_meaningful_hole_preserves_raw_area_as_effective_area():
+    assert effective_hole_area(
+        raw_area=40,
+        modal_area=4_000,
+        minimum_pixels=16,
+        minimum_modal_ratio=0.01,
+    ) == 40
+
+
 def test_larger_first_hole_assigns_first_object_as_occluded():
     decisions = occlusion.assign_pair_roles(
         [("person-1", "chair-1")],
@@ -101,6 +132,31 @@ def test_equal_holes_create_ambiguous_decision_without_roles():
     assert decision.occluded_id is None
     assert decision.occluder_id is None
     assert decision.ambiguous is True
+
+
+def test_near_equal_holes_within_relative_tolerance_are_ambiguous():
+    decisions = occlusion.assign_pair_roles(
+        [("person-1", "chair-1")],
+        {"person-1": 100, "chair-1": 91},
+        tie_tolerance_ratio=0.1,
+    )
+
+    decision = decisions[0]
+    assert decision.occluded_id is None
+    assert decision.occluder_id is None
+    assert decision.ambiguous is True
+
+
+def test_hole_difference_above_relative_tolerance_assigns_roles():
+    decisions = occlusion.assign_pair_roles(
+        [("person-1", "chair-1")],
+        {"person-1": 100, "chair-1": 89},
+        tie_tolerance_ratio=0.1,
+    )
+
+    decision = decisions[0]
+    assert decision.occluded_id == "person-1"
+    assert decision.occluder_id == "chair-1"
 
 
 def test_multi_pair_roles_are_independent_and_keep_pair_order():

@@ -3,6 +3,9 @@ pipeline:
   completion:
     max_area_growth_ratio: 4.0
     max_bbox_growth_ratio: 9.0
+    minimum_hole_area_pixels: 16
+    minimum_hole_area_ratio: 0.01
+    tie_tolerance_ratio: 0.1
   reconstruction:
     context_ratio: 0.25
 models:

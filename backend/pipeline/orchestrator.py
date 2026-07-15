@@ -8,7 +8,7 @@ from PIL import Image
 
 from ..config import config
 from ..core.helpers import _calc_kernel_size, _image_to_base64
-from ..core.occlusion import assign_pair_roles
+from ..core.occlusion import assign_pair_roles, effective_hole_area
 from .background import generate_final_background
 from .completion import (
     complete_objects,
@@ -63,6 +63,31 @@ def _complete_candidates(
         )
 
 
+def _effective_hole_areas(
+    objects: Sequence,
+    *,
+    minimum_pixels: int,
+    minimum_modal_ratio: float,
+) -> dict[str, int]:
+    """Attach noise-filtered areas while retaining raw completion diagnostics."""
+    areas: dict[str, int] = {}
+    for detected in objects:
+        raw_area = detected.completion_hole_area
+        if raw_area is None:
+            continue
+
+        effective_area = effective_hole_area(
+            raw_area,
+            int(np.count_nonzero(detected.modal_mask)),
+            minimum_pixels=minimum_pixels,
+            minimum_modal_ratio=minimum_modal_ratio,
+        )
+        detected.effective_completion_hole_area = effective_area
+        areas[detected.object_id] = effective_area
+
+    return areas
+
+
 def process_masks(
     image: Image.Image,
     keywords: Sequence[str],
@@ -109,13 +134,20 @@ def process_image(
 
     overlap_pairs = link_overlap_partners(objects)
     _complete_candidates(image, objects, manager)
+    completion_config = config.get_pipeline_config("completion")
+    effective_hole_areas = _effective_hole_areas(
+        objects,
+        minimum_pixels=int(completion_config["minimum_hole_area_pixels"]),
+        minimum_modal_ratio=float(
+            completion_config["minimum_hole_area_ratio"]
+        ),
+    )
     pair_decisions = assign_pair_roles(
         overlap_pairs,
-        {
-            detected.object_id: detected.completion_hole_area
-            for detected in objects
-            if detected.completion_hole_area is not None
-        },
+        effective_hole_areas,
+        tie_tolerance_ratio=float(
+            completion_config["tie_tolerance_ratio"]
+        ),
     )
     apply_pair_decisions(objects, pair_decisions)
     kernel_size = _calc_kernel_size(image_np, 0.0075)

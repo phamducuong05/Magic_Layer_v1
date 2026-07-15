@@ -84,6 +84,20 @@ def test_completion_candidates_and_model_are_explicit_and_ordered():
     assert second.completion_hole_area == 0
 
 
+def test_detected_object_keeps_raw_and_effective_hole_areas_separate():
+    from backend.pipeline.types import DetectedObject
+
+    mask = np.ones((3, 4), dtype=np.uint8)
+    detected = DetectedObject(
+        "object-0", "person", "person", mask, (0, 0, 4, 3)
+    )
+    detected.completion_hole_area = 7
+    detected.effective_completion_hole_area = 0
+
+    assert detected.completion_hole_area == 7
+    assert detected.effective_completion_hole_area == 0
+
+
 def test_extracted_geometry_stages_do_not_reference_global_model_manager():
     from backend.pipeline import completion, reconstruction, segmentation
 

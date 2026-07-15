@@ -41,6 +41,7 @@ class DetectedObject:
     amodal_mask: Optional[np.ndarray] = None
     completion_hole_mask: Optional[np.ndarray] = None
     completion_hole_area: Optional[int] = None
+    effective_completion_hole_area: Optional[int] = None
     reconstruction_mask: Optional[np.ndarray] = None
     reconstruction_canvas: Optional[Image.Image] = None
     reconstruction_roi: Optional[SquareROI] = None

@@ -543,7 +543,29 @@ def test_completion_output_count_mismatch_falls_back_all_candidates(rgb_image):
 def test_completion_validation_config_is_explicit():
     from backend.config import config
 
-    assert config.get_pipeline_config("completion") == COMPLETION_LIMITS
+    completion_config = config.get_pipeline_config("completion")
+    assert {
+        key: completion_config[key] for key in COMPLETION_LIMITS
+    } == COMPLETION_LIMITS
+
+
+def test_effective_hole_areas_are_attached_without_overwriting_raw_areas():
+    person = _detected_object("person-1", "person", (0, 0, 10, 10))
+    chair = _detected_object("chair-1", "chair", (2, 2, 10, 10))
+    person.completion_hole_area = 15
+    chair.completion_hole_area = 20
+
+    effective_areas = pipeline_orchestrator._effective_hole_areas(
+        [person, chair],
+        minimum_pixels=16,
+        minimum_modal_ratio=0.01,
+    )
+
+    assert effective_areas == {"person-1": 0, "chair-1": 20}
+    assert person.completion_hole_area == 15
+    assert chair.completion_hole_area == 20
+    assert person.effective_completion_hole_area == 0
+    assert chair.effective_completion_hole_area == 20
 
 
 def test_apply_pair_decisions_records_unique_occluders_on_hidden_object():
@@ -667,6 +689,16 @@ def test_reconstruction_context_ratio_is_configured():
     assert config.get_pipeline_config("reconstruction") == {
         "context_ratio": 0.25
     }
+
+
+def test_completion_noise_floor_and_tie_tolerance_are_configured():
+    from backend.config import config
+
+    completion_config = config.get_pipeline_config("completion")
+
+    assert completion_config["minimum_hole_area_pixels"] == 16
+    assert completion_config["minimum_hole_area_ratio"] == 0.01
+    assert completion_config["tie_tolerance_ratio"] == 0.1
 
 
 def test_refine_masks_guides_matting_and_limits_alpha(monkeypatch, rgb_image):
