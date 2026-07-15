@@ -41,7 +41,7 @@ def test_notebook_matches_current_process_image_stage_order():
         "extract_objects(image, keywords, segmentation_processor)",
         "link_overlap_partners(objects)",
         "get_completion_candidates(objects)",
-        "complete_objects(image, completion_candidates, completion_model)",
+        "complete_objects(",
         "assign_pair_roles(overlap_pairs, hole_areas)",
         "apply_pair_decisions(objects, pair_decisions)",
         "build_reconstruction_masks(objects, kernel_size)",
@@ -51,6 +51,9 @@ def test_notebook_matches_current_process_image_stage_order():
     ]
     positions = [source.index(call) for call in calls]
     assert positions == sorted(positions)
+    assert 'config.get_pipeline_config("completion")' in source
+    assert "max_area_growth_ratio=" in source
+    assert "max_bbox_growth_ratio=" in source
     assert "from backend.pipeline.segmentation import extract_objects" in source
     assert "from backend.pipeline.completion import" in source
     assert "from backend.pipeline.reconstruction import" in source

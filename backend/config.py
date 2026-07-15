@@ -43,5 +43,14 @@ class ConfigManager:
         specific_config = cat_config.get(active_name, {})
         return {"name": active_name, **specific_config}
 
+    def get_pipeline_config(self, stage: str) -> Dict[str, Any]:
+        """Return configuration owned by one image-pipeline stage."""
+        stage_config = self.config_dict.get("pipeline", {}).get(stage, {})
+        if not isinstance(stage_config, dict):
+            raise ValueError(
+                f"Pipeline configuration for {stage!r} must be a mapping"
+            )
+        return dict(stage_config)
+
 # Global config instance for easy access
 config = ConfigManager()

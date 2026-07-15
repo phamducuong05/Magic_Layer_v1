@@ -1,4 +1,10 @@
 device: auto
+pipeline:
+  completion:
+    max_area_growth_ratio: 4.0
+    max_bbox_growth_ratio: 9.0
+  reconstruction:
+    context_ratio: 0.25
 models:
   matting:
     active: birefnet

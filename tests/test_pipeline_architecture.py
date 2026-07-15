@@ -68,7 +68,13 @@ def test_completion_candidates_and_model_are_explicit_and_ordered():
     model.complete.return_value = [amodal_first, amodal_second]
     image = Image.new("RGB", (5, 4))
 
-    complete_objects(image, candidates, model)
+    complete_objects(
+        image,
+        candidates,
+        model,
+        max_area_growth_ratio=4.0,
+        max_bbox_growth_ratio=9.0,
+    )
 
     assert candidates == [first, second]
     model.complete.assert_called_once_with(

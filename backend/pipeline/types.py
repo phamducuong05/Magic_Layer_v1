@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import numpy as np
+from PIL import Image
+
+from .roi import SquareROI
 
 
 @dataclass
@@ -39,4 +42,6 @@ class DetectedObject:
     completion_hole_mask: Optional[np.ndarray] = None
     completion_hole_area: Optional[int] = None
     reconstruction_mask: Optional[np.ndarray] = None
+    reconstruction_canvas: Optional[Image.Image] = None
+    reconstruction_roi: Optional[SquareROI] = None
     soft_alpha: Optional[np.ndarray] = None

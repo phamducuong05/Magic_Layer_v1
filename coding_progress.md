@@ -15,11 +15,15 @@ The required runtime order is:
 6. Calculate each object's newly completed area.
 7. Compare completed areas independently for every overlap pair.
 8. Treat the larger-area object as occluded and the other as its occluder.
-9. Reconstruct the occluded object's hidden RGB content with inpainting.
-10. Run BiRefNet only after reconstruction for successfully reconstructed
-    objects.
-11. Return completed RGBA object layers while preserving the existing final
-    background-removal behavior.
+9. Build a binary reconstruction mask from the completion hole and the
+   spatially relevant part of every assigned occluder.
+10. Reconstruct the occluded object's hidden RGB content with ROI-based
+    inpainting driven by that hard mask.
+11. Run BiRefNet on an expanded square crop. Ordinary and fallback objects use
+    the original RGB image with modal support; successfully reconstructed
+    objects use reconstructed RGB with amodal support.
+12. Recover clean foreground colors, export completed RGBA object layers, and
+    preserve the existing original-image final-background behavior.
 
 The workflow must not use an explicit occlusion signal, class heuristic, or
 global depth ordering.
@@ -29,7 +33,15 @@ global depth ordering.
 - Implementation currently reaches reconstruction-mask construction.
 - Hidden RGB reconstruction has not been implemented yet.
 - BiRefNet still processes the original image and modal masks for every object.
-- The latest deterministic test run passes: **67 tests passed**.
+- Matting and per-layer background estimation still run on full-image inputs;
+  expanded square per-object ROIs have not been implemented yet.
+- The image-processing implementation has been split into explicit
+  `backend/pipeline/` stages. `backend/image_processor.py` is now only the
+  small public compatibility facade.
+- The latest verification after that refactor produced **80 passing tests and
+  one known checkpoint-path expectation failure**. The configured server path
+  is intentionally preserved; the stale local test expectation must not drive
+  a production-path change.
 - Real SDAmodal/DIFT checkpoint quality has not yet been evaluated in this
   integration. Checkpoints remain assumed available and correctly loadable.
 
@@ -37,8 +49,9 @@ global depth ordering.
 
 ### 3.1 Grouped object records and bounding boxes
 
-`backend/image_processor.py` now converts grouped SAM3 results into
-`DetectedObject` records. Each record preserves:
+`backend/pipeline/segmentation.py` converts grouped SAM3 results into
+`DetectedObject` records defined in `backend/pipeline/types.py`. Each record
+preserves:
 
 - Stable object ID.
 - Semantic class.
@@ -49,6 +62,7 @@ global depth ordering.
 - Assigned occluders.
 - Amodal mask and completion-hole information.
 - Reconstruction mask.
+- Per-object soft alpha once matting has completed.
 
 Bounding boxes are calculated after same-class mask grouping. Overlap checks
 therefore operate on grouped semantic objects, not on pre-grouping components.
@@ -62,7 +76,8 @@ therefore operate on grouped semantic objects, not on pre-grouping components.
 - Edge or corner contact is ignored.
 - Only positive-area bounding-box intersection creates an overlap edge.
 
-`_link_overlap_partners()` records every edge in both participating
+`backend/pipeline/completion.py::link_overlap_partners()` records every edge in
+both participating
 `DetectedObject.overlap_partner_ids` sets.
 
 ### 3.3 Completion model architecture
@@ -109,8 +124,8 @@ feature levels in memory.
 ### 3.6 Modal-mask and bounding-box preparation
 
 `backend/models/completion/mask_inputs.py` prepares SDAmodal inputs while
-preserving the grouped bounding boxes already produced by
-`image_processor.py`.
+preserving the grouped bounding boxes already produced by the segmentation
+stage.
 
 - It does not recalculate tight boxes from the masks.
 - It validates mask dimensions and mask/box count alignment.
@@ -131,7 +146,8 @@ The completion package now contains:
 
 ### 3.8 Conditional completion in the image pipeline
 
-`_complete_overlapping_objects()` now:
+`backend/pipeline/completion.py::get_completion_candidates()` and
+`complete_objects()` now:
 
 - Selects only objects with at least one cross-class overlap partner.
 - Includes each object once even when it has multiple partners.
@@ -163,14 +179,14 @@ edge:
 No global depth order is constructed. An object may be occluded in one pair
 and act as an occluder in another pair.
 
-`_apply_pair_decisions()` consumes these decisions and stores unique assigned
-occluders in each occluded object's `occluder_ids`. Ambiguous decisions do not
-add an occluder.
+`backend/pipeline/reconstruction.py::apply_pair_decisions()` consumes these
+decisions and stores unique assigned occluders in each occluded object's
+`occluder_ids`. Ambiguous decisions do not add an occluder.
 
 ### 3.11 Reconstruction-mask construction
 
-`_build_reconstruction_masks()` creates one full-image boolean mask for every
-object with assigned occluders:
+`backend/pipeline/reconstruction.py::build_reconstruction_masks()` creates one
+full-image boolean mask for every object with assigned occluders:
 
 1. Union all assigned occluders' modal masks.
 2. Expand the occluded object's amodal support with the existing image-derived
@@ -181,6 +197,40 @@ object with assigned occluders:
 
 This supports multiple occluders in one future inpainting call, protects known
 visible pixels, and excludes distant portions of large occluders.
+
+The exact construction is:
+
+```text
+completion_hole = amodal_mask AND NOT modal_mask
+
+relevant_occluder =
+    union(assigned_occluder_modal_masks)
+    AND expanded_amodal_support
+    AND NOT modal_mask
+
+reconstruction_mask = completion_hole OR relevant_occluder
+```
+
+`reconstruction_mask` is a hard boolean mask. It is not a soft alpha matte and
+must remain separate from the later matting result.
+
+### 3.12 Pipeline-module refactor
+
+The former monolithic `backend/image_processor.py` implementation is now split
+into explicit stages:
+
+- `pipeline/segmentation.py`: grouped object extraction.
+- `pipeline/completion.py`: overlap links and amodal completion.
+- `pipeline/reconstruction.py`: pair-role application and reconstruction-mask
+  construction.
+- `pipeline/matting.py`: per-object alpha generation.
+- `pipeline/layers.py`: foreground recovery and RGBA layer export.
+- `pipeline/background.py`: final original-image background generation.
+- `pipeline/orchestrator.py`: dependency injection and runtime ordering.
+
+`backend/image_processor.py` exports only the supported public API and data
+types. New implementation work should target the owning pipeline module, not
+restore private compatibility wrappers to the facade.
 
 ## 4. Important Gaps in the Current Implementation
 
@@ -196,9 +246,13 @@ be treated as finished:
 - Reconstruction-specific inpainting configuration and prompt policy.
 - Hidden RGB reconstruction and reconstruction-result validation.
 - Modal fallback when reconstruction fails.
-- Per-object BiRefNet canvas/support selection.
-- Amodal bounding boxes for reconstructed layer cropping.
+- Shared expanded-square ROI geometry, boundary padding, and coordinate
+  restoration.
+- Per-object BiRefNet source/support selection and cropped inference.
+- Modal or amodal inference ROIs, distinct from final refined-alpha export
+  bounds.
 - Layer extraction from the same reconstructed canvas used for matting.
+- ROI-based temporary background inpainting for foreground-color recovery.
 - Structured diagnostics, timings, and fallback reasons.
 - Real-model acceptance testing and GPU-memory measurement.
 
@@ -214,12 +268,24 @@ continuing.
 
 ### Step 19: Reconstruct hidden RGB
 
-- Add `reconstruction_canvas` to `DetectedObject`.
-- Select only objects with non-empty reconstruction masks.
-- Call the existing inpainting model once per selected object using the
-  original image, its reconstruction mask, and semantic-class prompt context.
-- Normalize the result to full-size RGB and store it on that object.
-- Do not run reconstruction for ordinary or ambiguous objects.
+- Add reusable ROI helpers that calculate a support bbox, expand it by a
+  configurable context ratio, convert it to a square, handle image-boundary
+  padding, crop aligned images/masks, and restore crop coordinates.
+- Add `reconstruction_crop` and `reconstruction_roi` to `DetectedObject` (or
+  use an equivalent single typed reconstruction-result record). Avoid storing
+  one unnecessary full-image copy per object.
+- Select only objects whose `reconstruction_mask` exists and is non-empty.
+  The presence of `amodal_mask` alone is not a reconstruction trigger because
+  both members of an overlap pair run through completion.
+- Calculate the reconstruction ROI from `amodal_mask`, then crop the original
+  image and `reconstruction_mask` with exactly the same ROI.
+- Convert the cropped reconstruction mask to a binary `0/255` PIL `L` image.
+  Never pass `soft_alpha` directly to an inpainting model.
+- Call the reconstruction-capable inpainting backend once per selected object
+  with the original RGB crop, hard reconstruction mask, and semantic-class
+  prompt context where supported.
+- Store the normalized reconstructed RGB crop and its full-image ROI.
+- Do not run reconstruction for ordinary, ambiguous, or empty-mask objects.
 
 ### Step 20: Harden completion output validation and fallback
 
@@ -250,45 +316,76 @@ enter the user-visible matting and layer-output path.
 - Let LaMa ignore textual prompts while SDXL receives object-aware context.
 - Verify reconstruction calls and final-background calls use their intended
   policies.
+- Keep reconstruction inpainting distinct from the later temporary background
+  inpainting used to recover clean foreground colors for RGBA export.
 
 ### Step 23: Validate reconstruction and provide modal fallback
 
-- Validate returned image type, dimensions, and RGB conversion.
-- Ensure pixels outside the permitted blend region remain unchanged.
+- Validate returned image type, ROI dimensions, and RGB conversion.
+- Ensure pixels outside the permitted hard-mask/blend region remain unchanged
+  inside the crop.
 - Confirm the completion-hole region contains usable RGB data.
-- On failure, clear the reconstruction canvas and mark the object for its
+- On failure, clear the reconstruction crop/result and mark the object for its
   ordinary original-image/modal-mask path.
 - Ensure one object's failure does not discard other successful objects.
 
 ### Step 24: Refactor BiRefNet to per-object inputs
 
-- Replace the shared-image/raw-mask-list matting interface with object-based
-  matting inputs.
-- Ordinary, ambiguous, or failed objects use the original image and modal
-  support.
-- Successfully reconstructed objects use their reconstruction canvas and
-  amodal support.
-- Constrain alpha to a narrow dilation of the selected support.
-- Prove BiRefNet runs only after reconstruction is complete.
+- Replace the shared full-image/raw-mask-list matting interface with
+  object-based cropped matting inputs.
+- Ordinary, ambiguous, or failed objects use an expanded square crop from the
+  original image and `modal_mask` support.
+- Successfully reconstructed objects use their reconstructed RGB crop and
+  aligned `amodal_mask` support.
+- Use the selected support only to choose the ROI, optionally guide the input,
+  and constrain output. The current BiRefNet adapter receives an RGB image, not
+  a second mask argument.
+- Preserve a small amount of real surrounding RGB context instead of zeroing
+  every pixel outside the hard support before inference.
+- Resize the returned alpha to the unpadded ROI, constrain it to a narrow
+  dilation of the selected modal/amodal support, and paste it into a zero-valued
+  full-image alpha canvas.
+- Store the result as `DetectedObject.soft_alpha` and retain the exact source
+  crop/ROI identity required by layer extraction.
+- Prove reconstructed objects enter BiRefNet only after reconstruction is
+  complete. Ordinary objects still run BiRefNet directly on their original RGB
+  crops.
 
 ### Step 25: Refactor object-layer extraction
 
 - Consume `DetectedObject` records instead of synchronized masks and labels.
-- Use the same canvas that was used for each object's matting pass.
-- Use modal bounds for ordinary/fallback objects.
-- Calculate and use amodal bounds for successfully reconstructed objects.
-- Preserve display labels and full-image offsets.
+- Use the same original or reconstructed RGB crop that was used for each
+  object's matting pass.
+- Build the temporary background-estimation inpainting mask as a hard binary
+  mask from the selected modal/amodal support, optionally unioned with
+  thresholded alpha coverage. Do not pass fractional `soft_alpha` directly to
+  inpainting.
+- Run this temporary background inpainting on the per-object ROI instead of
+  repeatedly processing the full source image. This pass removes the whole
+  object to estimate its background; it is separate from hidden-object
+  reconstruction, which removes only `reconstruction_mask`.
+- Run foreground-color recovery with the selected source crop, its inpainted
+  background estimate, and the soft alpha.
+- Calculate the tight export bbox from the final `refined_alpha`, after alpha
+  and color refinement. Do not reuse the square inference ROI as the exported
+  layer bounds.
+- Map the tight crop back to full-image `(x, y)` coordinates and preserve
+  display labels.
 - Prevent foreground-color refinement from reintroducing pixels from the
   original occluder-filled image.
 
 ### Step 26: Preserve final-background semantics
 
 - Keep final background inpainting based on the original source image.
-- Base the removal union on original modal object coverage and resulting soft
-  alpha coverage.
+- Base the removal union on original modal object coverage and only soft-alpha
+  coverage associated with the originally visible modal support.
 - Do not blindly add amodal completion holes to the global removal mask.
-- Ensure per-object reconstruction canvases never become the final-background
-  input.
+- In particular, do not union a reconstructed object's full amodal
+  `soft_alpha` into the original-image background-removal mask. Constrain that
+  coverage to a narrow dilation of its original `modal_mask` or retain a
+  separate visible-alpha coverage mask.
+- Ensure per-object reconstruction crops/results never become the
+  final-background input.
 - Keep a single final background-inpainting pass.
 
 ### Step 27: Add diagnostics and observability
@@ -315,8 +412,13 @@ Cover at minimum:
 - Completion-batch failure.
 - Reconstruction failure.
 - Ordinary and reconstructed matting paths.
+- Expanded square ROI creation, border padding, and full-image coordinate
+  restoration.
 - Amodal versus modal layer bounds.
-- Final background isolation from reconstruction canvases.
+- Hard-mask enforcement at both reconstruction and background-estimation
+  inpainting boundaries.
+- Final refined-alpha export bounds without clipping newly recovered edges.
+- Final background isolation from per-object reconstruction results.
 
 ### Step 29: Run real-model acceptance and performance evaluation
 
@@ -340,9 +442,14 @@ The integration is complete only when all of the following are true:
 - Multiple assigned occluders produce one constrained reconstruction pass per
   occluded object.
 - Successful hidden-object reconstruction happens before BiRefNet.
-- Ordinary and fallback objects preserve their existing modal behavior.
-- Completed layers use reconstructed RGB, amodal alpha support, and amodal
-  bounds.
+- Every inpainting adapter receives a binary hard mask; `soft_alpha` is reserved
+  for alpha refinement, foreground recovery, and RGBA compositing.
+- Matting uses expanded square per-object ROIs and restores alpha to full-image
+  coordinates.
+- Ordinary and fallback objects use original RGB with modal support.
+- Successfully completed layers use reconstructed RGB with amodal support.
+- Layer export uses tight bounds from final refined alpha, not the square
+  inference ROI or a pre-refinement mask.
 - The final background still comes from the original image and visible-object
   removal coverage.
 - Failure paths return safe modal results instead of malformed completed
@@ -358,8 +465,12 @@ Run the full deterministic suite with:
 C:\Users\admin\anaconda3\envs\layer\python.exe -m pytest -q
 ```
 
-Current verified result when this document was created:
+Most recent verified result before this documentation update:
 
 ```text
-67 passed
+80 passed, 1 known checkpoint-path expectation failure
 ```
+
+The remaining failure reflects a stale local expected checkpoint path. The
+runtime path is intentionally configured to match the server and should remain
+unchanged.

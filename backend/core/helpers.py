@@ -87,11 +87,11 @@ def _bbox_from_mask(mask: np.ndarray) -> Tuple[int, int, int, int] | None:
     return int(x0), int(y0), int(x1 - x0 + 1), int(y1 - y0 + 1)
 
 
-def _calc_kernel_size(image: np.ndarray) -> tuple[int, int]:
+def _calc_kernel_size(image: np.ndarray, kernel_scale: float = _KERNEL_SCALE) -> tuple[int, int]:
     height, width = image.shape[:2]
     return (
-        max(1, round(height * _KERNEL_SCALE)),
-        max(1, round(width * _KERNEL_SCALE)),
+        max(1, round(height * kernel_scale)),
+        max(1, round(width * kernel_scale)),
     )
 
 

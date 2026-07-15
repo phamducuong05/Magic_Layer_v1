@@ -22,7 +22,14 @@ from backend.pipeline import layers as layer_stage
 from backend.pipeline import matting as matting_stage
 from backend.pipeline import orchestrator as pipeline_orchestrator
 from backend.pipeline import reconstruction as reconstruction_stage
+from backend.pipeline import roi as roi_stage
 from backend.pipeline import segmentation as segmentation_stage
+
+
+COMPLETION_LIMITS = {
+    "max_area_growth_ratio": 4.0,
+    "max_bbox_growth_ratio": 9.0,
+}
 
 
 @pytest.fixture
@@ -81,6 +88,50 @@ def _detected_object(object_id, semantic_class, bbox):
         modal_mask=mask,
         bbox=bbox,
     )
+
+
+def test_square_roi_expands_support_with_configured_context():
+    support = np.zeros((10, 12), dtype=bool)
+    support[3:9, 4:8] = True
+
+    roi = roi_stage.square_roi_from_support(support, context_ratio=0.25)
+
+    assert (roi.x, roi.y, roi.size) == (1, 1, 9)
+    assert roi.image_size == (12, 10)
+    assert roi.padding == (0, 0, 0, 0)
+
+
+def test_square_roi_preserves_border_padding_and_restores_coordinates():
+    support = np.zeros((5, 6), dtype=bool)
+    support[0:2, 0:2] = True
+
+    roi = roi_stage.square_roi_from_support(support, context_ratio=0.5)
+    cropped = np.ones((roi.size, roi.size), dtype=np.uint8)
+    restored = roi_stage.restore_array(cropped, roi)
+
+    assert (roi.x, roi.y, roi.size) == (-1, -1, 4)
+    assert roi.padding == (1, 1, 0, 0)
+    assert roi.inner_box == (1, 1, 4, 4)
+    assert restored.shape == support.shape
+    assert np.all(restored[0:3, 0:3] == 1)
+    assert np.count_nonzero(restored) == 9
+
+
+def test_roi_crops_image_and_mask_with_identical_padding():
+    image_array = np.arange(5 * 6, dtype=np.uint8).reshape(5, 6)
+    image = Image.fromarray(image_array, mode="L")
+    mask = np.zeros((5, 6), dtype=np.uint8)
+    mask[0, 0] = 255
+    roi = roi_stage.SquareROI(-1, -1, 4, 6, 5)
+
+    image_crop = np.asarray(roi_stage.crop_image(image, roi))
+    mask_crop = roi_stage.crop_array(mask, roi)
+
+    assert image_crop.shape == mask_crop.shape == (4, 4)
+    assert image_crop[1, 1] == image_array[0, 0]
+    assert mask_crop[1, 1] == 255
+    assert np.all(image_crop[0, :] == 0)
+    assert np.all(mask_crop[:, 0] == 0)
 
 
 def test_preserve_unmasked_pixels_changes_only_masked_region():
@@ -257,7 +308,7 @@ def test_complete_overlapping_objects_skips_model_without_overlap(
     candidates = completion_stage.get_completion_candidates([person])
 
     completion_stage.complete_objects(
-        rgb_image, candidates, completion_model
+        rgb_image, candidates, completion_model, **COMPLETION_LIMITS
     )
 
     completion_model.complete.assert_not_called()
@@ -274,8 +325,10 @@ def test_complete_overlapping_objects_batches_and_maps_results(
     person.overlap_partner_ids.add(chair.object_id)
     chair.overlap_partner_ids.add(person.object_id)
 
-    person_amodal = np.ones_like(person.modal_mask)
-    chair_amodal = np.full_like(chair.modal_mask, 2)
+    person_amodal = person.modal_mask.copy()
+    person_amodal[0, 4] = 255
+    chair_amodal = chair.modal_mask.copy()
+    chair_amodal[2, 6] = 2
     completion_model = Mock()
     completion_model.complete.return_value = [person_amodal, chair_amodal]
     del monkeypatch
@@ -284,6 +337,7 @@ def test_complete_overlapping_objects_batches_and_maps_results(
         rgb_image,
         completion_stage.get_completion_candidates([person, chair, table]),
         completion_model,
+        **COMPLETION_LIMITS,
     )
 
     completion_model.complete.assert_called_once()
@@ -291,8 +345,10 @@ def test_complete_overlapping_objects_batches_and_maps_results(
     assert completed_image is rgb_image
     assert modal_masks == [person.modal_mask, chair.modal_mask]
     assert bboxes == [person.bbox, chair.bbox]
-    assert person.amodal_mask is person_amodal
-    assert chair.amodal_mask is chair_amodal
+    assert np.array_equal(person.amodal_mask, person_amodal > 0)
+    assert np.array_equal(chair.amodal_mask, chair_amodal > 0)
+    assert person.amodal_mask.dtype == bool
+    assert chair.amodal_mask.dtype == bool
     assert table.amodal_mask is None
 
 
@@ -316,7 +372,10 @@ def test_complete_overlapping_objects_counts_only_newly_completed_pixels(
     del monkeypatch
 
     completion_stage.complete_objects(
-        rgb_image, [person, chair], completion_model
+        rgb_image,
+        [person, chair],
+        completion_model,
+        **COMPLETION_LIMITS,
     )
 
     assert np.array_equal(
@@ -329,6 +388,162 @@ def test_complete_overlapping_objects_counts_only_newly_completed_pixels(
     )
     assert person.completion_hole_area == 1
     assert chair.completion_hole_area == 2
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    [
+        "wrong_shape",
+        "nonnumeric",
+        "nonfinite",
+        "empty",
+        "missing_modal_pixel",
+    ],
+)
+def test_completion_rejects_malformed_object_outputs(
+    rgb_image, invalid_kind
+):
+    detected = _detected_object("person-1", "person", (0, 0, 4, 4))
+    output = detected.modal_mask.copy()
+    if invalid_kind == "wrong_shape":
+        output = output[:-1]
+    elif invalid_kind == "nonnumeric":
+        output = output.astype(str)
+    elif invalid_kind == "nonfinite":
+        output = output.astype(np.float32)
+        output[0, 0] = np.nan
+    elif invalid_kind == "empty":
+        output.fill(0)
+    elif invalid_kind == "missing_modal_pixel":
+        output[0, 0] = 0
+
+    completion_model = Mock()
+    completion_model.complete.return_value = [output]
+
+    completion_stage.complete_objects(
+        rgb_image,
+        [detected],
+        completion_model,
+        **COMPLETION_LIMITS,
+    )
+
+    expected_modal = detected.modal_mask > 0
+    assert np.array_equal(detected.amodal_mask, expected_modal)
+    assert detected.amodal_mask.dtype == bool
+    assert not np.any(detected.completion_hole_mask)
+    assert detected.completion_hole_area == 0
+
+
+def test_completion_rejects_excessive_area_growth(rgb_image):
+    detected = _detected_object("person-1", "person", (0, 0, 4, 4))
+    oversized = np.zeros_like(detected.modal_mask)
+    oversized[0:8, 0:8] = 1
+    completion_model = Mock()
+    completion_model.complete.return_value = [oversized]
+
+    completion_stage.complete_objects(
+        rgb_image,
+        [detected],
+        completion_model,
+        max_area_growth_ratio=3.0,
+        max_bbox_growth_ratio=9.0,
+    )
+
+    assert np.array_equal(detected.amodal_mask, detected.modal_mask > 0)
+    assert detected.completion_hole_area == 0
+
+
+def test_completion_rejects_excessive_bbox_growth(rgb_image):
+    detected = _detected_object("person-1", "person", (0, 0, 4, 4))
+    scattered = detected.modal_mask.copy()
+    scattered[15, 15] = 1
+    completion_model = Mock()
+    completion_model.complete.return_value = [scattered]
+
+    completion_stage.complete_objects(
+        rgb_image,
+        [detected],
+        completion_model,
+        max_area_growth_ratio=4.0,
+        max_bbox_growth_ratio=9.0,
+    )
+
+    assert np.array_equal(detected.amodal_mask, detected.modal_mask > 0)
+    assert detected.completion_hole_area == 0
+
+
+def test_completion_preserves_valid_objects_when_another_output_is_invalid(
+    rgb_image,
+):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    valid_person = person.modal_mask.copy()
+    valid_person[0, 4] = 1
+    invalid_chair = chair.modal_mask[:-1]
+    completion_model = Mock()
+    completion_model.complete.return_value = [valid_person, invalid_chair]
+
+    completion_stage.complete_objects(
+        rgb_image,
+        [person, chair],
+        completion_model,
+        **COMPLETION_LIMITS,
+    )
+
+    assert np.array_equal(person.amodal_mask, valid_person > 0)
+    assert person.completion_hole_area == 1
+    assert np.array_equal(chair.amodal_mask, chair.modal_mask > 0)
+    assert chair.completion_hole_area == 0
+
+
+def test_completion_batch_failure_falls_back_all_candidates(rgb_image):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    completion_model = Mock()
+    completion_model.complete.side_effect = RuntimeError("DIFT failed")
+
+    completion_stage.complete_objects(
+        rgb_image,
+        [person, chair],
+        completion_model,
+        **COMPLETION_LIMITS,
+    )
+
+    for detected in (person, chair):
+        assert np.array_equal(
+            detected.amodal_mask, detected.modal_mask > 0
+        )
+        assert not np.any(detected.completion_hole_mask)
+        assert detected.completion_hole_area == 0
+
+
+def test_completion_output_count_mismatch_falls_back_all_candidates(rgb_image):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    partial = person.modal_mask.copy()
+    partial[0, 4] = 1
+    completion_model = Mock()
+    completion_model.complete.return_value = [partial]
+
+    completion_stage.complete_objects(
+        rgb_image,
+        [person, chair],
+        completion_model,
+        **COMPLETION_LIMITS,
+    )
+
+    for detected in (person, chair):
+        assert np.array_equal(
+            detected.amodal_mask, detected.modal_mask > 0
+        )
+        assert not np.any(detected.completion_hole_mask)
+        assert detected.completion_hole_area == 0
+
+
+def test_completion_validation_config_is_explicit():
+    from backend.config import config
+
+    assert config.get_pipeline_config("completion") == COMPLETION_LIMITS
 
 
 def test_apply_pair_decisions_records_unique_occluders_on_hidden_object():
@@ -402,6 +617,56 @@ def test_build_reconstruction_masks_constrains_assigned_occluders():
     assert first_occluder.reconstruction_mask is None
     assert second_occluder.reconstruction_mask is None
     assert distant_occluder.reconstruction_mask is None
+
+
+def test_reconstruct_objects_inpaints_only_nonempty_masks(rgb_image):
+    hidden = _detected_object("hidden", "person", (0, 0, 4, 4))
+    empty = _detected_object("empty", "chair", (4, 0, 4, 4))
+    ordinary = _detected_object("ordinary", "table", (0, 4, 4, 4))
+    hidden.reconstruction_mask = np.zeros((6, 8), dtype=bool)
+    hidden.reconstruction_mask[2:4, 3:5] = True
+    hidden.amodal_mask = np.zeros((6, 8), dtype=bool)
+    hidden.amodal_mask[1:5, 2:6] = True
+    empty.reconstruction_mask = np.zeros((6, 8), dtype=bool)
+    empty.amodal_mask = empty.reconstruction_mask.copy()
+
+    reconstructed = Image.new("RGBA", (2, 2), (10, 20, 30, 255))
+    inpaint = Mock(return_value=reconstructed)
+
+    reconstruction_stage.reconstruct_objects(
+        rgb_image,
+        [hidden, empty, ordinary],
+        inpaint,
+        context_ratio=0.25,
+    )
+
+    inpaint.assert_called_once()
+    source, mask, prompt = inpaint.call_args.args
+    assert source.mode == "RGB"
+    assert source.size == (6, 6)
+    assert mask.mode == "L"
+    assert mask.size == source.size
+    assert set(np.unique(np.asarray(mask))) == {0, 255}
+    assert "person" in prompt
+    assert hidden.reconstruction_canvas.mode == "RGB"
+    assert hidden.reconstruction_canvas.size == source.size
+    assert hidden.reconstruction_roi is not None
+    restored_mask = roi_stage.restore_array(
+        np.asarray(mask) > 0, hidden.reconstruction_roi
+    )
+    assert np.array_equal(restored_mask, hidden.reconstruction_mask)
+    assert empty.reconstruction_canvas is None
+    assert empty.reconstruction_roi is None
+    assert ordinary.reconstruction_canvas is None
+    assert ordinary.reconstruction_roi is None
+
+
+def test_reconstruction_context_ratio_is_configured():
+    from backend.config import config
+
+    assert config.get_pipeline_config("reconstruction") == {
+        "context_ratio": 0.25
+    }
 
 
 def test_refine_masks_guides_matting_and_limits_alpha(monkeypatch, rgb_image):
@@ -526,8 +791,13 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     link_overlaps = Mock(return_value=[])
     apply_decisions = Mock()
     build_reconstruction = Mock()
+    events = []
+    reconstruct_objects = Mock(
+        side_effect=lambda *_args, **_kwargs: events.append("reconstruct")
+    )
 
     def attach_alpha(_image_np, objects, supplied_matte):
+        events.append("matte")
         assert supplied_matte is matte
         objects[0].soft_alpha = alpha
 
@@ -548,6 +818,11 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
         pipeline_orchestrator,
         "build_reconstruction_masks",
         build_reconstruction,
+    )
+    monkeypatch.setattr(
+        pipeline_orchestrator,
+        "reconstruct_objects",
+        reconstruct_objects,
     )
     monkeypatch.setattr(
         pipeline_orchestrator, "refine_objects", refine_objects
@@ -582,6 +857,13 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     manager.get_completion_model.assert_not_called()
     apply_decisions.assert_called_once_with([detected], [])
     build_reconstruction.assert_called_once()
+    reconstruct_objects.assert_called_once_with(
+        prepared_image,
+        [detected],
+        inpaint,
+        context_ratio=0.25,
+    )
+    assert events[:2] == ["reconstruct", "matte"]
     refine_objects.assert_called_once()
     extract_layers.assert_called_once()
     generate_background.assert_called_once()
@@ -654,7 +936,10 @@ def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
         rgb_image, ["person", "chair", "lamp"], manager=manager
     )
 
-    assert masks == [person_amodal, chair_amodal, lamp.modal_mask]
+    assert len(masks) == 3
+    assert np.array_equal(masks[0], person_amodal > 0)
+    assert np.array_equal(masks[1], chair_amodal > 0)
+    assert np.array_equal(masks[2], lamp.modal_mask)
     assert all(mask.shape == (6, 8) for mask in masks)
     completion_model.complete.assert_called_once()
     matting_getter.assert_not_called()

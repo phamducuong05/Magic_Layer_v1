@@ -6,6 +6,7 @@ from typing import Any, Sequence
 import numpy as np
 from PIL import Image
 
+from ..config import config
 from ..core.helpers import _calc_kernel_size, _image_to_base64
 from ..core.occlusion import assign_pair_roles
 from .background import generate_final_background
@@ -19,6 +20,7 @@ from .matting import refine_objects
 from .reconstruction import (
     apply_pair_decisions,
     build_reconstruction_masks,
+    reconstruct_objects,
 )
 from .segmentation import extract_objects
 from .types import ProcessResult
@@ -47,7 +49,18 @@ def _complete_candidates(
 ) -> None:
     candidates = get_completion_candidates(objects)
     if candidates:
-        complete_objects(image, candidates, manager.get_completion_model())
+        completion_config = config.get_pipeline_config("completion")
+        complete_objects(
+            image,
+            candidates,
+            manager.get_completion_model(),
+            max_area_growth_ratio=float(
+                completion_config["max_area_growth_ratio"]
+            ),
+            max_bbox_growth_ratio=float(
+                completion_config["max_bbox_growth_ratio"]
+            ),
+        )
 
 
 def process_masks(
@@ -105,13 +118,21 @@ def process_image(
         },
     )
     apply_pair_decisions(objects, pair_decisions)
-    kernel_size = _calc_kernel_size(image_np)
+    kernel_size = _calc_kernel_size(image_np, 0.0075)
     build_reconstruction_masks(objects, kernel_size)
+
+    inpaint = manager.get_inpainting_model().process
+    reconstruction_config = config.get_pipeline_config("reconstruction")
+    reconstruct_objects(
+        image,
+        objects,
+        inpaint,
+        context_ratio=float(reconstruction_config["context_ratio"]),
+    )
 
     matte = manager.get_matting_model().process
     refine_objects(image_np, objects, matte)
 
-    inpaint = manager.get_inpainting_model().process
     layers = extract_object_layers(
         image, image_np, objects, kernel_size, inpaint
     )
