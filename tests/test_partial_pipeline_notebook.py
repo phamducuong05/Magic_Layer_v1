@@ -38,19 +38,28 @@ def test_notebook_matches_current_process_image_stage_order():
         if cell["cell_type"] == "code"
     )
     calls = [
-        "_extract_objects(image, keywords)",
-        "_link_overlap_partners(objects)",
-        "_complete_overlapping_objects(image, objects)",
+        "extract_objects(image, keywords, segmentation_processor)",
+        "link_overlap_partners(objects)",
+        "get_completion_candidates(objects)",
+        "complete_objects(image, completion_candidates, completion_model)",
         "assign_pair_roles(overlap_pairs, hole_areas)",
-        "_apply_pair_decisions(objects, pair_decisions)",
-        "_build_reconstruction_masks(objects, kernel_size)",
-        "_refine_masks(image_np, raw_masks)",
-        "_extract_object_layers(",
-        "_generate_final_background(",
+        "apply_pair_decisions(objects, pair_decisions)",
+        "build_reconstruction_masks(objects, kernel_size)",
+        "refine_objects(image_np, objects, matte)",
+        "extract_object_layers(",
+        "generate_final_background(",
     ]
     positions = [source.index(call) for call in calls]
     assert positions == sorted(positions)
-    assert "from backend.image_processor import" in source
+    assert "from backend.pipeline.segmentation import extract_objects" in source
+    assert "from backend.pipeline.completion import" in source
+    assert "from backend.pipeline.reconstruction import" in source
+    assert "from backend.pipeline.matting import refine_objects" in source
+    assert "from backend.pipeline.layers import extract_object_layers" in source
+    assert "from backend.pipeline.background import" in source
+    assert "from backend.image_processor import" not in source
+    assert "_extract_objects" not in source
+    assert "_refine_masks" not in source
     assert "tests/test_data/sample.jpg" not in source
     assert "Image.new(" not in source
 

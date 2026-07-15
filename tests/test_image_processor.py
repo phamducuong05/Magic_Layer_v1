@@ -4,8 +4,6 @@ These tests use small deterministic fakes. They never load SAM3, BiRefNet, LaMa,
 or model weights, so failures point to pipeline wiring rather than model quality.
 """
 
-import sys
-import types
 from unittest.mock import Mock
 
 import numpy as np
@@ -15,16 +13,16 @@ from PIL import Image
 torch = pytest.importorskip("torch", reason="the backend requires PyTorch")
 pytest.importorskip("cv2", reason="the image pipeline requires OpenCV")
 
-# Importing the real registry would import every heavyweight model adapter and
-# its optional dependencies. image_processor only needs the manager interface,
-# which each test configures with deterministic fakes.
-models_module = types.ModuleType("backend.models")
-models_module.model_manager = Mock()
-sys.modules["backend.models"] = models_module
-
 from backend import image_processor as pipeline
 from backend.core.helpers import _prepare_inpaint_masks, _preserve_unmasked_pixels
 from backend.core.occlusion import PairDecision
+from backend.pipeline import background as background_stage
+from backend.pipeline import completion as completion_stage
+from backend.pipeline import layers as layer_stage
+from backend.pipeline import matting as matting_stage
+from backend.pipeline import orchestrator as pipeline_orchestrator
+from backend.pipeline import reconstruction as reconstruction_stage
+from backend.pipeline import segmentation as segmentation_stage
 
 
 @pytest.fixture
@@ -62,36 +60,14 @@ class FakeSamProcessor:
         return state
 
 
-def _install_segmentation_fake(monkeypatch, processor):
-    segmentation_model = Mock()
-    segmentation_model.get_processor.return_value = processor
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_segmentation_model",
-        Mock(return_value=segmentation_model),
-    )
-
-
 def _install_matting_fake(monkeypatch, alpha):
-    matting_model = Mock()
-    matting_model.process.return_value = alpha
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_matting_model",
-        Mock(return_value=matting_model),
-    )
-    return matting_model.process
+    del monkeypatch
+    return Mock(return_value=alpha)
 
 
 def _install_inpainting_fake(monkeypatch, output):
-    inpainting_model = Mock()
-    inpainting_model.process.return_value = output
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_inpainting_model",
-        Mock(return_value=inpainting_model),
-    )
-    return inpainting_model.process
+    del monkeypatch
+    return Mock(return_value=output)
 
 
 def _detected_object(object_id, semantic_class, bbox):
@@ -144,9 +120,11 @@ def test_prepare_inpaint_masks_generates_beyond_blend_boundary():
 
 def test_extract_objects_uses_each_nonempty_prompt(monkeypatch, rgb_image):
     processor = FakeSamProcessor()
-    _install_segmentation_fake(monkeypatch, processor)
+    del monkeypatch
 
-    objects = pipeline._extract_objects(rgb_image, [" component ", "", "missing"])
+    objects = segmentation_stage.extract_objects(
+        rgb_image, [" component ", "", "missing"], processor
+    )
 
     assert processor.image is rgb_image
     assert processor.prompts == ["component", "missing"]
@@ -174,9 +152,11 @@ def test_extract_objects_merges_before_calculating_bbox(monkeypatch, rgb_image):
         return state
 
     processor.set_text_prompt = two_masks
-    _install_segmentation_fake(monkeypatch, processor)
+    del monkeypatch
 
-    objects = pipeline._extract_objects(rgb_image, ["button"])
+    objects = segmentation_stage.extract_objects(
+        rgb_image, ["button"], processor
+    )
 
     assert len(objects) == 1
     detected = objects[0]
@@ -201,9 +181,11 @@ def test_extract_objects_keeps_nonoverlapping_same_keyword(
         return state
 
     processor.set_text_prompt = two_masks
-    _install_segmentation_fake(monkeypatch, processor)
+    del monkeypatch
 
-    objects = pipeline._extract_objects(rgb_image, ["button"])
+    objects = segmentation_stage.extract_objects(
+        rgb_image, ["button"], processor
+    )
 
     assert [detected.object_id for detected in objects] == [
         "object-0",
@@ -227,7 +209,7 @@ def test_link_overlap_partners_records_cross_class_relationship():
     person = _detected_object("person-1", "person", (0, 0, 10, 10))
     chair = _detected_object("chair-1", "chair", (5, 5, 10, 10))
 
-    pairs = pipeline._link_overlap_partners([person, chair])
+    pairs = completion_stage.link_overlap_partners([person, chair])
 
     assert pairs == [("person-1", "chair-1")]
     assert person.overlap_partner_ids == {"chair-1"}
@@ -239,7 +221,7 @@ def test_link_overlap_partners_ignores_same_class_and_separate_objects():
     second_person = _detected_object("person-2", "person", (5, 5, 10, 10))
     chair = _detected_object("chair-1", "chair", (15, 15, 2, 2))
 
-    pairs = pipeline._link_overlap_partners(
+    pairs = completion_stage.link_overlap_partners(
         [first_person, second_person, chair]
     )
 
@@ -254,7 +236,7 @@ def test_link_overlap_partners_keeps_multiple_partners_unique():
     chair = _detected_object("chair-1", "chair", (1, 1, 5, 5))
     table = _detected_object("table-1", "table", (2, 2, 5, 5))
 
-    pairs = pipeline._link_overlap_partners([person, chair, table])
+    pairs = completion_stage.link_overlap_partners([person, chair, table])
 
     assert pairs == [
         ("person-1", "chair-1"),
@@ -269,17 +251,16 @@ def test_link_overlap_partners_keeps_multiple_partners_unique():
 def test_complete_overlapping_objects_skips_model_without_overlap(
     monkeypatch, rgb_image
 ):
+    del monkeypatch
     person = _detected_object("person-1", "person", (0, 0, 4, 4))
-    get_completion_model = Mock()
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_completion_model",
-        get_completion_model,
+    completion_model = Mock()
+    candidates = completion_stage.get_completion_candidates([person])
+
+    completion_stage.complete_objects(
+        rgb_image, candidates, completion_model
     )
 
-    pipeline._complete_overlapping_objects(rgb_image, [person])
-
-    get_completion_model.assert_not_called()
+    completion_model.complete.assert_not_called()
     assert person.amodal_mask is None
     assert person.completion_hole_area is None
 
@@ -297,14 +278,12 @@ def test_complete_overlapping_objects_batches_and_maps_results(
     chair_amodal = np.full_like(chair.modal_mask, 2)
     completion_model = Mock()
     completion_model.complete.return_value = [person_amodal, chair_amodal]
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_completion_model",
-        Mock(return_value=completion_model),
-    )
+    del monkeypatch
 
-    pipeline._complete_overlapping_objects(
-        rgb_image, [person, chair, table]
+    completion_stage.complete_objects(
+        rgb_image,
+        completion_stage.get_completion_candidates([person, chair, table]),
+        completion_model,
     )
 
     completion_model.complete.assert_called_once()
@@ -334,13 +313,11 @@ def test_complete_overlapping_objects_counts_only_newly_completed_pixels(
 
     completion_model = Mock()
     completion_model.complete.return_value = [person_amodal, chair_amodal]
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_completion_model",
-        Mock(return_value=completion_model),
-    )
+    del monkeypatch
 
-    pipeline._complete_overlapping_objects(rgb_image, [person, chair])
+    completion_stage.complete_objects(
+        rgb_image, [person, chair], completion_model
+    )
 
     assert np.array_equal(
         person.completion_hole_mask,
@@ -367,7 +344,9 @@ def test_apply_pair_decisions_records_unique_occluders_on_hidden_object():
         ),
     ]
 
-    pipeline._apply_pair_decisions([person, chair, table], decisions)
+    reconstruction_stage.apply_pair_decisions(
+        [person, chair, table], decisions
+    )
 
     assert person.occluder_ids == {"chair-1", "table-1"}
     assert chair.occluder_ids == set()
@@ -379,7 +358,9 @@ def test_apply_pair_decisions_ignores_ambiguous_pair():
     chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
     ambiguous = PairDecision("person-1", "chair-1", None, None)
 
-    pipeline._apply_pair_decisions([person, chair], [ambiguous])
+    reconstruction_stage.apply_pair_decisions(
+        [person, chair], [ambiguous]
+    )
 
     assert person.occluder_ids == set()
     assert chair.occluder_ids == set()
@@ -406,7 +387,7 @@ def test_build_reconstruction_masks_constrains_assigned_occluders():
     distant_occluder.modal_mask.fill(0)
     distant_occluder.modal_mask[0, 0] = 255
 
-    pipeline._build_reconstruction_masks(
+    reconstruction_stage.build_reconstruction_masks(
         [hidden, first_occluder, second_occluder, distant_occluder],
         (3, 3),
     )
@@ -429,7 +410,9 @@ def test_refine_masks_guides_matting_and_limits_alpha(monkeypatch, rgb_image):
     predicted_alpha = torch.ones((6, 8), dtype=torch.float32)
     matting = _install_matting_fake(monkeypatch, predicted_alpha)
 
-    result = pipeline._refine_masks(np.asarray(rgb_image), [raw_mask])
+    result = matting_stage.refine_masks(
+        np.asarray(rgb_image), [raw_mask], matting
+    )
 
     assert len(result) == 1
     assert result[0].shape == (6, 8)
@@ -455,18 +438,25 @@ def test_extract_object_layers_builds_rgba_crop(monkeypatch, rgb_image):
     inpaint_mask = np.zeros((6, 8), dtype=bool)
     inpaint_mask[1:5, 2:6] = True
     build_mask = Mock(return_value=inpaint_mask)
-    monkeypatch.setattr(pipeline, "build_inpaint_mask", build_mask)
+    monkeypatch.setattr(layer_stage, "build_inpaint_mask", build_mask)
     monkeypatch.setattr(
-        pipeline,
+        layer_stage,
         "refine_background",
         Mock(side_effect=lambda background, *_args, **_kwargs: background),
     )
     foreground = np.full_like(image_np, 200)
     refine_alpha = Mock(return_value=(alpha, foreground))
-    monkeypatch.setattr(pipeline, "refine_alpha_with_colors", refine_alpha)
+    monkeypatch.setattr(
+        layer_stage, "refine_alpha_with_colors", refine_alpha
+    )
 
-    layers = pipeline._extract_object_layers(
-        rgb_image, image_np, [alpha], ["component"], kernel_size
+    layers = layer_stage.extract_layers(
+        rgb_image,
+        image_np,
+        [alpha],
+        ["component"],
+        kernel_size,
+        inpaint,
     )
 
     assert len(layers) == 1
@@ -492,12 +482,12 @@ def test_generate_final_background_unions_masks(monkeypatch, rgb_image):
     inpainted = Image.new("RGB", rgb_image.size, (30, 40, 50))
     inpaint = _install_inpainting_fake(monkeypatch, inpainted)
     expand = Mock(side_effect=lambda mask, _kernel: mask)
-    monkeypatch.setattr(pipeline, "expand_mask", expand)
+    monkeypatch.setattr(background_stage, "expand_mask", expand)
     refine = Mock(side_effect=lambda background, *_args, **_kwargs: background)
-    monkeypatch.setattr(pipeline, "refine_background", refine)
+    monkeypatch.setattr(background_stage, "refine_background", refine)
 
-    result = pipeline._generate_final_background(
-        rgb_image, [first, second], [soft_alpha], (1, 1)
+    result = background_stage.generate_background_from_masks(
+        rgb_image, [first, second], [soft_alpha], (1, 1), inpaint
     )
 
     assert result.size == rgb_image.size
@@ -525,58 +515,101 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
         modal_mask=raw_mask,
         bbox=(2, 1, 4, 4),
     )
+    manager = Mock()
+    processor = Mock()
+    manager.get_segmentation_model.return_value.get_processor.return_value = (
+        processor
+    )
+    matte = manager.get_matting_model.return_value.process
+    inpaint = manager.get_inpainting_model.return_value.process
     extract_objects = Mock(return_value=[detected])
     link_overlaps = Mock(return_value=[])
-    complete_overlaps = Mock()
-    refine_masks = Mock(return_value=[alpha])
+    apply_decisions = Mock()
+    build_reconstruction = Mock()
+
+    def attach_alpha(_image_np, objects, supplied_matte):
+        assert supplied_matte is matte
+        objects[0].soft_alpha = alpha
+
+    refine_objects = Mock(side_effect=attach_alpha)
     extract_layers = Mock(return_value=[expected_layer])
     generate_background = Mock(return_value=expected_background)
     encode = Mock(side_effect=lambda image, fmt="PNG": f"encoded-{image.size}")
-    monkeypatch.setattr(pipeline, "_extract_objects", extract_objects)
-    monkeypatch.setattr(pipeline, "_link_overlap_partners", link_overlaps)
     monkeypatch.setattr(
-        pipeline, "_complete_overlapping_objects", complete_overlaps
+        pipeline_orchestrator, "extract_objects", extract_objects
     )
-    monkeypatch.setattr(pipeline, "_refine_masks", refine_masks)
-    monkeypatch.setattr(pipeline, "_extract_object_layers", extract_layers)
     monkeypatch.setattr(
-        pipeline, "_generate_final_background", generate_background
+        pipeline_orchestrator, "link_overlap_partners", link_overlaps
     )
-    monkeypatch.setattr(pipeline, "_image_to_base64", encode)
+    monkeypatch.setattr(
+        pipeline_orchestrator, "apply_pair_decisions", apply_decisions
+    )
+    monkeypatch.setattr(
+        pipeline_orchestrator,
+        "build_reconstruction_masks",
+        build_reconstruction,
+    )
+    monkeypatch.setattr(
+        pipeline_orchestrator, "refine_objects", refine_objects
+    )
+    monkeypatch.setattr(
+        pipeline_orchestrator, "extract_object_layers", extract_layers
+    )
+    monkeypatch.setattr(
+        pipeline_orchestrator,
+        "generate_final_background",
+        generate_background,
+    )
+    monkeypatch.setattr(pipeline_orchestrator, "_image_to_base64", encode)
 
-    result = pipeline.process_image(rgb_image, ["component"])
+    result = pipeline_orchestrator.process_image(
+        rgb_image, ["component"], manager=manager
+    )
 
     assert result.original_width == 8
     assert result.original_height == 6
     assert result.background_base64 == "encoded-(8, 6)"
     assert result.layers == [expected_layer]
     extract_objects.assert_called_once()
-    prepared_image, prepared_keywords = extract_objects.call_args.args
+    prepared_image, prepared_keywords, supplied_processor = (
+        extract_objects.call_args.args
+    )
     assert prepared_image.mode == "RGB"
     assert prepared_image.size == rgb_image.size
     assert prepared_keywords == ["component"]
+    assert supplied_processor is processor
     link_overlaps.assert_called_once_with([detected])
-    complete_overlaps.assert_called_once_with(prepared_image, [detected])
-    refine_masks.assert_called_once()
+    manager.get_completion_model.assert_not_called()
+    apply_decisions.assert_called_once_with([detected], [])
+    build_reconstruction.assert_called_once()
+    refine_objects.assert_called_once()
     extract_layers.assert_called_once()
     generate_background.assert_called_once()
+    assert extract_layers.call_args.args[-1] is inpaint
+    assert generate_background.call_args.args[-1] is inpaint
 
 
 def test_process_image_returns_original_when_nothing_detected(
     monkeypatch, rgb_image
 ):
-    monkeypatch.setattr(pipeline, "_extract_objects", Mock(return_value=[]))
-    refine_masks = Mock()
-    monkeypatch.setattr(pipeline, "_refine_masks", refine_masks)
+    manager = Mock()
+    extract_objects = Mock(return_value=[])
     monkeypatch.setattr(
-        pipeline, "_image_to_base64", Mock(return_value="original-image")
+        pipeline_orchestrator, "extract_objects", extract_objects
+    )
+    monkeypatch.setattr(
+        pipeline_orchestrator,
+        "_image_to_base64",
+        Mock(return_value="original-image"),
     )
 
-    result = pipeline.process_image(rgb_image, ["missing"])
+    result = pipeline_orchestrator.process_image(
+        rgb_image, ["missing"], manager=manager
+    )
 
     assert result.background_base64 == "original-image"
     assert result.layers == []
-    refine_masks.assert_not_called()
+    manager.get_matting_model.assert_not_called()
 
 
 def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
@@ -601,28 +634,25 @@ def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
     completion_model.complete.return_value = [person_amodal, chair_amodal]
 
     monkeypatch.setattr(
-        pipeline, "_extract_objects", Mock(return_value=[person, chair, lamp])
+        pipeline_orchestrator,
+        "extract_objects",
+        Mock(return_value=[person, chair, lamp]),
     )
     monkeypatch.setattr(
-        pipeline,
-        "_link_overlap_partners",
+        pipeline_orchestrator,
+        "link_overlap_partners",
         Mock(return_value=[("person-1", "chair-1")]),
     )
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_completion_model",
-        Mock(return_value=completion_model),
-    )
+    manager = Mock()
+    manager.get_completion_model.return_value = completion_model
     matting_getter = Mock()
     inpainting_getter = Mock()
-    monkeypatch.setattr(
-        pipeline.model_manager, "get_matting_model", matting_getter
-    )
-    monkeypatch.setattr(
-        pipeline.model_manager, "get_inpainting_model", inpainting_getter
-    )
+    manager.get_matting_model = matting_getter
+    manager.get_inpainting_model = inpainting_getter
 
-    masks = pipeline.process_masks(rgb_image, ["person", "chair", "lamp"])
+    masks = pipeline_orchestrator.process_masks(
+        rgb_image, ["person", "chair", "lamp"], manager=manager
+    )
 
     assert masks == [person_amodal, chair_amodal, lamp.modal_mask]
     assert all(mask.shape == (6, 8) for mask in masks)
@@ -638,19 +668,20 @@ def test_process_masks_skips_completion_model_without_overlap(
     person.modal_mask = np.zeros((6, 8), dtype=np.uint8)
     person.modal_mask[0:4, 0:4] = 255
     monkeypatch.setattr(
-        pipeline, "_extract_objects", Mock(return_value=[person])
+        pipeline_orchestrator,
+        "extract_objects",
+        Mock(return_value=[person]),
     )
     monkeypatch.setattr(
-        pipeline, "_link_overlap_partners", Mock(return_value=[])
+        pipeline_orchestrator, "link_overlap_partners", Mock(return_value=[])
     )
     completion_getter = Mock()
-    monkeypatch.setattr(
-        pipeline.model_manager,
-        "get_completion_model",
-        completion_getter,
-    )
+    manager = Mock()
+    manager.get_completion_model = completion_getter
 
-    masks = pipeline.process_masks(rgb_image, ["person"])
+    masks = pipeline_orchestrator.process_masks(
+        rgb_image, ["person"], manager=manager
+    )
 
     assert masks == [person.modal_mask]
     completion_getter.assert_not_called()

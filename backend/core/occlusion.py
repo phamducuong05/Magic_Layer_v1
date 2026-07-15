@@ -24,6 +24,7 @@ class PairDecision:
 
     first_id: str
     second_id: str
+    # occluded_id and occluder_id can only have value of first_id or second_id
     occluded_id: Optional[str]
     occluder_id: Optional[str]
 

@@ -35,6 +35,8 @@ def _preserve_unmasked_pixels(
     blend_mask = blend_mask.convert("L").resize(
         original.size, Image.Resampling.BILINEAR
     )
+    # Where blend mask is 255, use the inpainted image. Where it is 0, use the original image. 
+    # Where it is between 0 and 255, blend the two images.
     return Image.composite(inpainted, original, blend_mask)
 
 
@@ -44,7 +46,9 @@ def _prepare_inpaint_masks(
     composition_expansion: int = 11,
     feather_radius: float = 2.0,
 ) -> tuple[Image.Image, Image.Image]:
-    """Create a wide model mask and a smaller feathered composition mask."""
+    """Create a wide model mask and a smaller feathered composition mask.
+    The output of this function is used in lama.py and sdxl.py
+    """
     if generation_expansion < composition_expansion:
         raise ValueError("generation_expansion must cover composition_expansion")
     if generation_expansion < 1 or generation_expansion % 2 == 0:
@@ -57,12 +61,16 @@ def _prepare_inpaint_masks(
     binary_mask = mask.convert("L").point(
         lambda value: 255 if value > 127 else 0
     )
+    # Generation masks are used to provide a large enough area for the model to
+    # generate new pixels. Composition masks are used to blend the generated
+    # pixels with the original image.
     generation_mask = binary_mask.filter(
         ImageFilter.MaxFilter(generation_expansion)
     )
     composition_core = binary_mask.filter(
         ImageFilter.MaxFilter(composition_expansion)
     )
+    # Blend mask to smooth edges
     blend_mask = composition_core.filter(
         ImageFilter.GaussianBlur(feather_radius)
     )
@@ -114,6 +122,14 @@ def _merge_overlapping_masks(masks: List[np.ndarray]) -> List[np.ndarray]:
 
     This function is intended for masks produced by one text keyword. Callers
     should not mix masks from different keywords.
+
+    This function return the list of union masks.
+    Example:
+    masks = [mask1, mask2, mask3, mask4, mask5]
+    _merge_overlapping_masks(masks) -> [mask1_union_mask2, mask3_union_mask4_union_mask5]
+
+    NOTICE: This function is only for masks by one text keyword. 
+    Don't mix masks from different keywords.
     """
     if len(masks) < 2:
         return masks
