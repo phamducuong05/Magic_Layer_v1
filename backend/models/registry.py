@@ -6,7 +6,8 @@ class ModelRegistry:
     """
     _registry: Dict[str, Dict[str, Type]] = {
         "matting": {},
-        "inpainting": {},
+        "background_inpainting": {},
+        "object_reconstruction": {},
         "segmentation": {},
         "completion": {},
     }

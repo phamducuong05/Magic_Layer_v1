@@ -61,7 +61,7 @@ def build_reconstruction_masks(
 def reconstruct_objects(
     image: Image.Image,
     objects: Sequence[DetectedObject],
-    inpaint: Callable[[Image.Image, Image.Image, str], Image.Image],
+    reconstruct: Callable[[Image.Image, Image.Image, str], Image.Image],
     *,
     context_ratio: float,
 ) -> None:
@@ -87,7 +87,7 @@ def reconstruct_objects(
             f"Continue the hidden parts of the {detected.semantic_class}, "
             "preserving its visible appearance and surrounding context."
         )
-        reconstructed = inpaint(source_crop, mask_image, prompt)
+        reconstructed = reconstruct(source_crop, mask_image, prompt)
         expected_size = (roi.size, roi.size)
         if reconstructed.size != expected_size:
             reconstructed = reconstructed.resize(

@@ -72,9 +72,14 @@ def test_completion_adapter_can_register_and_be_retrieved():
 
 
 def test_existing_registry_categories_remain_available():
-    assert {"matting", "inpainting", "segmentation", "completion"}.issubset(
-        ModelRegistry._registry
-    )
+    assert {
+        "matting",
+        "background_inpainting",
+        "object_reconstruction",
+        "segmentation",
+        "completion",
+    }.issubset(ModelRegistry._registry)
+    assert "inpainting" not in ModelRegistry._registry
 
 
 def test_unknown_completion_model_has_clear_error():

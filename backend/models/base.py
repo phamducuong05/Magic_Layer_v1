@@ -23,13 +23,28 @@ class BaseMattingModel(BaseModel):
         pass
 
 
-class BaseInpaintingModel(BaseModel):
+class BaseBackgroundInpaintingModel(BaseModel):
+    """Interface for removing objects and filling background RGB only."""
+
     @abstractmethod
     def process(
         self,
         image: Image.Image,
         mask: Image.Image,
         prompt: str = "",
+    ) -> Image.Image:
+        pass
+
+
+class BaseObjectReconstructionModel(BaseModel):
+    """Interface for reconstructing hidden RGB belonging to one object."""
+
+    @abstractmethod
+    def reconstruct(
+        self,
+        image: Image.Image,
+        mask: Image.Image,
+        object_context: str = "",
     ) -> Image.Image:
         pass
 

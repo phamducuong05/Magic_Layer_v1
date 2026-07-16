@@ -6,7 +6,7 @@ pipeline:
     minimum_hole_area_pixels: 16
     minimum_hole_area_ratio: 0.01
     tie_tolerance_ratio: 0.1
-  reconstruction:
+  object_reconstruction:
     context_ratio: 0.25
 models:
   matting:
@@ -15,7 +15,9 @@ models:
       model_id: "ZhengPeng7/BiRefNet"
       trust_remote_code: true
       resolution: [1024, 1024]
-  inpainting:
+  object_reconstruction:
+    active: null
+  background_inpainting:
     active: lama
     lama:
       # SimpleLama tự động quản lý trọng số

@@ -123,14 +123,17 @@ def test_matting_attaches_alpha_using_the_supplied_callable():
     assert np.allclose(detected.soft_alpha, 0.75)
 
 
-def test_rendering_stages_require_explicit_inpainting_callable():
-    from backend.pipeline import background, layers, matting
+def test_reconstruction_and_background_use_distinct_callable_contracts():
+    from backend.pipeline import background, layers, matting, reconstruction
 
-    assert "inpaint" in inspect.signature(
+    assert "background_inpaint" in inspect.signature(
         layers.extract_object_layers
     ).parameters
-    assert "inpaint" in inspect.signature(
+    assert "background_inpaint" in inspect.signature(
         background.generate_final_background
+    ).parameters
+    assert "reconstruct" in inspect.signature(
+        reconstruction.reconstruct_objects
     ).parameters
     for module in (matting, layers, background):
         assert "model_manager" not in inspect.getsource(module)
@@ -165,7 +168,9 @@ def test_process_masks_does_not_resolve_completion_without_candidates(
     manager.get_completion_model.assert_not_called()
 
 
-def test_process_image_reuses_one_explicit_inpainting_callable(monkeypatch):
+def test_process_image_uses_background_inpainter_without_reconstruction(
+    monkeypatch,
+):
     from backend.pipeline import orchestrator
     from backend.pipeline.types import DetectedObject
 
@@ -178,8 +183,11 @@ def test_process_image_reuses_one_explicit_inpainting_callable(monkeypatch):
     manager.get_segmentation_model.return_value.get_processor.return_value = (
         Mock()
     )
-    inpaint = Mock()
-    manager.get_inpainting_model.return_value.process = inpaint
+    manager.has_object_reconstruction_model.return_value = False
+    background_inpaint = Mock()
+    manager.get_background_inpainting_model.return_value.process = (
+        background_inpaint
+    )
     monkeypatch.setattr(
         orchestrator, "extract_objects", Mock(return_value=[detected])
     )
@@ -204,6 +212,7 @@ def test_process_image_reuses_one_explicit_inpainting_callable(monkeypatch):
     assert result.original_width == 4
     assert result.original_height == 3
     manager.get_completion_model.assert_not_called()
-    manager.get_inpainting_model.assert_called_once()
-    assert extract_layers.call_args.args[-1] is inpaint
-    assert generate_background.call_args.args[-1] is inpaint
+    manager.get_object_reconstruction_model.assert_not_called()
+    manager.get_background_inpainting_model.assert_called_once()
+    assert extract_layers.call_args.args[-1] is background_inpaint
+    assert generate_background.call_args.args[-1] is background_inpaint

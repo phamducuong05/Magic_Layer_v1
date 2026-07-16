@@ -1,22 +1,30 @@
 import logging
+
 import torch
-from PIL import Image
 from diffusers import AutoPipelineForInpainting
+from PIL import Image
 
 from ...core.helpers import _prepare_inpaint_masks, _preserve_unmasked_pixels
-from ..base import BaseInpaintingModel
+from ..base import BaseBackgroundInpaintingModel
 from ..registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
-@ModelRegistry.register("inpainting", "sdxl")
-class SDXLInpaintingModel(BaseInpaintingModel):
+
+@ModelRegistry.register("background_inpainting", "sdxl")
+class SDXLBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
+    """Remove objects and generate background-only content with SDXL."""
+
     def _load_model(self):
-        model_id = self.config.get("model_id", "runwayml/stable-diffusion-inpainting")
+        model_id = self.config.get(
+            "model_id", "runwayml/stable-diffusion-inpainting"
+        )
         use_xformers = self.config.get("use_xformers", True)
         cpu_offload = self.config.get("cpu_offload", True)
         self.strength = float(self.config.get("strength", 0.75))
-        self.num_inference_steps = int(self.config.get("num_inference_steps", 30))
+        self.num_inference_steps = int(
+            self.config.get("num_inference_steps", 30)
+        )
         self.guidance_scale = float(self.config.get("guidance_scale", 5.0))
         self.generation_mask_expansion = int(
             self.config.get("generation_mask_expansion", 17)
@@ -36,10 +44,8 @@ class SDXLInpaintingModel(BaseInpaintingModel):
             "new detail, artifact, blur, distorted pattern",
         )
 
-        logger.info(f"[SDXL] Loading Inpainting model on {self.device}...")
-        
+        logger.info("[SDXL] Loading background model on %s...", self.device)
         dtype = torch.float16 if self.device == "cuda" else torch.float32
-
         self.model = AutoPipelineForInpainting.from_pretrained(
             model_id,
             torch_dtype=dtype,
@@ -50,13 +56,12 @@ class SDXLInpaintingModel(BaseInpaintingModel):
                 self.model.enable_model_cpu_offload()
             else:
                 self.model = self.model.to("cuda")
-
             if use_xformers:
                 self.model.enable_xformers_memory_efficient_attention()
         else:
             self.model = self.model.to("cpu")
 
-        logger.info("[SDXL] Model loaded successfully.")
+        logger.info("[SDXL] Background model loaded successfully.")
 
     def process(
         self,
@@ -65,9 +70,8 @@ class SDXLInpaintingModel(BaseInpaintingModel):
         prompt: str = "",
     ) -> Image.Image:
         source = image.convert("RGB")
-        binary_mask = mask.convert("L")
         generation_mask, blend_mask = _prepare_inpaint_masks(
-            binary_mask,
+            mask.convert("L"),
             generation_expansion=self.generation_mask_expansion,
             composition_expansion=self.composition_mask_expansion,
             feather_radius=self.feather_radius,
@@ -81,5 +85,4 @@ class SDXLInpaintingModel(BaseInpaintingModel):
             num_inference_steps=self.num_inference_steps,
             guidance_scale=self.guidance_scale,
         ).images[0]
-        composited = _preserve_unmasked_pixels(source, result, blend_mask)
-        return composited
+        return _preserve_unmasked_pixels(source, result, blend_mask)

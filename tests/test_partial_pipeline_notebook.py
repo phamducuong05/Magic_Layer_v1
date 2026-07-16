@@ -59,6 +59,11 @@ def test_notebook_matches_current_process_image_stage_order():
     assert "minimum_hole_area_ratio" in source
     assert "tie_tolerance_ratio=" in source
     assert "effective_completion_hole_area" in source
+    assert "has_object_reconstruction_model()" in source
+    assert "get_background_inpainting_model().process" in source
+    assert '"background_inpainting"' in source
+    assert '"object_reconstruction"' in source
+    assert "get_inpainting_model" not in source
     assert "from backend.pipeline.segmentation import extract_objects" in source
     assert "from backend.pipeline.completion import" in source
     assert "from backend.pipeline.reconstruction import" in source

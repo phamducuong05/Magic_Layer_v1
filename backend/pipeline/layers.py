@@ -1,4 +1,4 @@
-"""RGBA object-layer rendering with an explicit inpainting callable."""
+"""RGBA object-layer rendering with a background-only inpainter."""
 
 import logging
 from collections.abc import Callable, Sequence
@@ -24,7 +24,7 @@ def extract_layers(
     soft_alphas: Sequence[np.ndarray],
     labels: Sequence[str],
     kernel_size: tuple[int, int],
-    inpaint: Callable[[Image.Image, Image.Image], Image.Image],
+    background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> list[ObjectLayer]:
     """Create RGBA crops from aligned alpha and label sequences."""
     layers: list[ObjectLayer] = []
@@ -39,7 +39,7 @@ def extract_layers(
         mask_image = Image.fromarray(
             (inpaint_mask > 0).astype(np.uint8) * 255, mode="L"
         )
-        component_background = inpaint(image, mask_image)
+        component_background = background_inpaint(image, mask_image)
         if component_background.size != image.size:
             component_background = component_background.resize(
                 image.size, Image.Resampling.LANCZOS
@@ -89,7 +89,7 @@ def extract_object_layers(
     image_np: np.ndarray,
     objects: Sequence[DetectedObject],
     kernel_size: tuple[int, int],
-    inpaint: Callable[[Image.Image, Image.Image], Image.Image],
+    background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> list[ObjectLayer]:
     """Render objects that have a stored soft alpha."""
     ready_objects = [
@@ -101,5 +101,5 @@ def extract_object_layers(
         [detected.soft_alpha for detected in ready_objects],
         [detected.display_label for detected in ready_objects],
         kernel_size,
-        inpaint,
+        background_inpaint,
     )

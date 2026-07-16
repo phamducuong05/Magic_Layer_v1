@@ -1,0 +1,1 @@
+"""Background-only inpainting adapters."""

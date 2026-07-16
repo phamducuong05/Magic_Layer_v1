@@ -683,10 +683,10 @@ def test_reconstruct_objects_inpaints_only_nonempty_masks(rgb_image):
     assert ordinary.reconstruction_roi is None
 
 
-def test_reconstruction_context_ratio_is_configured():
+def test_object_reconstruction_context_ratio_is_configured():
     from backend.config import config
 
-    assert config.get_pipeline_config("reconstruction") == {
+    assert config.get_pipeline_config("object_reconstruction") == {
         "context_ratio": 0.25
     }
 
@@ -817,16 +817,17 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     manager.get_segmentation_model.return_value.get_processor.return_value = (
         processor
     )
+    manager.has_object_reconstruction_model.return_value = False
     matte = manager.get_matting_model.return_value.process
-    inpaint = manager.get_inpainting_model.return_value.process
+    background_inpaint = (
+        manager.get_background_inpainting_model.return_value.process
+    )
     extract_objects = Mock(return_value=[detected])
     link_overlaps = Mock(return_value=[])
     apply_decisions = Mock()
     build_reconstruction = Mock()
     events = []
-    reconstruct_objects = Mock(
-        side_effect=lambda *_args, **_kwargs: events.append("reconstruct")
-    )
+    reconstruct_objects = Mock()
 
     def attach_alpha(_image_np, objects, supplied_matte):
         events.append("matte")
@@ -885,22 +886,18 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     assert prepared_image.size == rgb_image.size
     assert prepared_keywords == ["component"]
     assert supplied_processor is processor
-    link_overlaps.assert_called_once_with([detected])
+    link_overlaps.assert_not_called()
     manager.get_completion_model.assert_not_called()
-    apply_decisions.assert_called_once_with([detected], [])
-    build_reconstruction.assert_called_once()
-    reconstruct_objects.assert_called_once_with(
-        prepared_image,
-        [detected],
-        inpaint,
-        context_ratio=0.25,
-    )
-    assert events[:2] == ["reconstruct", "matte"]
+    manager.get_object_reconstruction_model.assert_not_called()
+    apply_decisions.assert_not_called()
+    build_reconstruction.assert_not_called()
+    reconstruct_objects.assert_not_called()
+    assert events == ["matte"]
     refine_objects.assert_called_once()
     extract_layers.assert_called_once()
     generate_background.assert_called_once()
-    assert extract_layers.call_args.args[-1] is inpaint
-    assert generate_background.call_args.args[-1] is inpaint
+    assert extract_layers.call_args.args[-1] is background_inpaint
+    assert generate_background.call_args.args[-1] is background_inpaint
 
 
 def test_process_image_returns_original_when_nothing_detected(
@@ -958,11 +955,12 @@ def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
         Mock(return_value=[("person-1", "chair-1")]),
     )
     manager = Mock()
+    manager.has_object_reconstruction_model.return_value = True
     manager.get_completion_model.return_value = completion_model
     matting_getter = Mock()
-    inpainting_getter = Mock()
+    background_inpainting_getter = Mock()
     manager.get_matting_model = matting_getter
-    manager.get_inpainting_model = inpainting_getter
+    manager.get_background_inpainting_model = background_inpainting_getter
 
     masks = pipeline_orchestrator.process_masks(
         rgb_image, ["person", "chair", "lamp"], manager=manager
@@ -975,7 +973,34 @@ def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
     assert all(mask.shape == (6, 8) for mask in masks)
     completion_model.complete.assert_called_once()
     matting_getter.assert_not_called()
-    inpainting_getter.assert_not_called()
+    background_inpainting_getter.assert_not_called()
+
+
+def test_process_masks_bypasses_amodal_branch_without_reconstruction_model(
+    monkeypatch, rgb_image
+):
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    monkeypatch.setattr(
+        pipeline_orchestrator,
+        "extract_objects",
+        Mock(return_value=[person, chair]),
+    )
+    link_overlaps = Mock(return_value=[("person-1", "chair-1")])
+    monkeypatch.setattr(
+        pipeline_orchestrator, "link_overlap_partners", link_overlaps
+    )
+    manager = Mock()
+    manager.has_object_reconstruction_model.return_value = False
+
+    masks = pipeline_orchestrator.process_masks(
+        rgb_image, ["person", "chair"], manager=manager
+    )
+
+    assert masks == [person.modal_mask, chair.modal_mask]
+    link_overlaps.assert_not_called()
+    manager.get_completion_model.assert_not_called()
+    manager.get_object_reconstruction_model.assert_not_called()
 
 
 def test_process_masks_skips_completion_model_without_overlap(

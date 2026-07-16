@@ -100,6 +100,9 @@ def process_masks(
     if not objects:
         return []
 
+    if not manager.has_object_reconstruction_model():
+        return [detected.modal_mask for detected in objects]
+
     link_overlap_partners(objects)
     _complete_candidates(image, objects, manager)
     return [
@@ -132,44 +135,62 @@ def process_image(
             original_height=height,
         )
 
-    overlap_pairs = link_overlap_partners(objects)
-    _complete_candidates(image, objects, manager)
-    completion_config = config.get_pipeline_config("completion")
-    effective_hole_areas = _effective_hole_areas(
-        objects,
-        minimum_pixels=int(completion_config["minimum_hole_area_pixels"]),
-        minimum_modal_ratio=float(
-            completion_config["minimum_hole_area_ratio"]
-        ),
-    )
-    pair_decisions = assign_pair_roles(
-        overlap_pairs,
-        effective_hole_areas,
-        tie_tolerance_ratio=float(
-            completion_config["tie_tolerance_ratio"]
-        ),
-    )
-    apply_pair_decisions(objects, pair_decisions)
     kernel_size = _calc_kernel_size(image_np, 0.0075)
-    build_reconstruction_masks(objects, kernel_size)
+    if manager.has_object_reconstruction_model():
+        overlap_pairs = link_overlap_partners(objects)
+        _complete_candidates(image, objects, manager)
+        completion_config = config.get_pipeline_config("completion")
+        effective_hole_areas = _effective_hole_areas(
+            objects,
+            minimum_pixels=int(
+                completion_config["minimum_hole_area_pixels"]
+            ),
+            minimum_modal_ratio=float(
+                completion_config["minimum_hole_area_ratio"]
+            ),
+        )
+        pair_decisions = assign_pair_roles(
+            overlap_pairs,
+            effective_hole_areas,
+            tie_tolerance_ratio=float(
+                completion_config["tie_tolerance_ratio"]
+            ),
+        )
+        apply_pair_decisions(objects, pair_decisions)
+        build_reconstruction_masks(objects, kernel_size)
 
-    inpaint = manager.get_inpainting_model().process
-    reconstruction_config = config.get_pipeline_config("reconstruction")
-    reconstruct_objects(
-        image,
-        objects,
-        inpaint,
-        context_ratio=float(reconstruction_config["context_ratio"]),
-    )
+        if any(
+            detected.reconstruction_mask is not None
+            and np.any(detected.reconstruction_mask)
+            for detected in objects
+        ):
+            reconstruction_model = (
+                manager.get_object_reconstruction_model()
+            )
+            if reconstruction_model is not None:
+                reconstruction_config = config.get_pipeline_config(
+                    "object_reconstruction"
+                )
+                reconstruct_objects(
+                    image,
+                    objects,
+                    reconstruction_model.reconstruct,
+                    context_ratio=float(
+                        reconstruction_config["context_ratio"]
+                    ),
+                )
 
     matte = manager.get_matting_model().process
     refine_objects(image_np, objects, matte)
 
+    background_inpaint = (
+        manager.get_background_inpainting_model().process
+    )
     layers = extract_object_layers(
-        image, image_np, objects, kernel_size, inpaint
+        image, image_np, objects, kernel_size, background_inpaint
     )
     background = generate_final_background(
-        image, objects, kernel_size, inpaint
+        image, objects, kernel_size, background_inpaint
     )
 
     return ProcessResult(

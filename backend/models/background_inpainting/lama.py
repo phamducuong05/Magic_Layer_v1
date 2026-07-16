@@ -1,15 +1,19 @@
 import logging
+
 from PIL import Image
 from simple_lama_inpainting import SimpleLama
 
 from ...core.helpers import _prepare_inpaint_masks, _preserve_unmasked_pixels
-from ..base import BaseInpaintingModel
+from ..base import BaseBackgroundInpaintingModel
 from ..registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
-@ModelRegistry.register("inpainting", "lama")
-class LamaInpaintingModel(BaseInpaintingModel):
+
+@ModelRegistry.register("background_inpainting", "lama")
+class LamaBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
+    """Remove objects and extend surrounding background with LaMa."""
+
     def _load_model(self):
         self.generation_mask_expansion = int(
             self.config.get("generation_mask_expansion", 17)
@@ -18,9 +22,9 @@ class LamaInpaintingModel(BaseInpaintingModel):
             self.config.get("composition_mask_expansion", 11)
         )
         self.feather_radius = float(self.config.get("feather_radius", 2.0))
-        logger.info(f"[LaMa] Loading LaMa model on {self.device}...")
+        logger.info("[LaMa] Loading background model on %s...", self.device)
         self.model = SimpleLama(device=self.device)
-        logger.info("[LaMa] Model loaded successfully.")
+        logger.info("[LaMa] Background model loaded successfully.")
 
     def process(
         self,
@@ -28,6 +32,7 @@ class LamaInpaintingModel(BaseInpaintingModel):
         mask: Image.Image,
         prompt: str = "",
     ) -> Image.Image:
+        del prompt
         source = image.convert("RGB")
         binary_mask = mask.convert("L")
         generation_mask, blend_mask = _prepare_inpaint_masks(
@@ -37,5 +42,4 @@ class LamaInpaintingModel(BaseInpaintingModel):
             feather_radius=self.feather_radius,
         )
         result = self.model(source, generation_mask)
-        composited = _preserve_unmasked_pixels(source, result, blend_mask)
-        return composited
+        return _preserve_unmasked_pixels(source, result, blend_mask)

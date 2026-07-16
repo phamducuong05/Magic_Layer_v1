@@ -1,4 +1,4 @@
-"""Final background removal with an explicit inpainting callable."""
+"""Final background removal with a background-only inpainter."""
 
 from collections.abc import Callable, Sequence
 
@@ -16,7 +16,7 @@ def generate_background_from_masks(
     raw_masks: Sequence[np.ndarray],
     soft_alphas: Sequence[np.ndarray],
     kernel_size: tuple[int, int],
-    inpaint: Callable[[Image.Image, Image.Image], Image.Image],
+    background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> Image.Image:
     """Inpaint all components using hard masks and soft-alpha coverage."""
     union_mask = np.logical_or.reduce([mask > 0 for mask in raw_masks])
@@ -25,7 +25,7 @@ def generate_background_from_masks(
     union_mask = expand_mask(union_mask, kernel_size).astype(bool)
     final_mask = Image.fromarray(union_mask.astype(np.uint8) * 255, mode="L")
 
-    background = inpaint(image, final_mask)
+    background = background_inpaint(image, final_mask)
     if background.size != image.size:
         background = background.resize(image.size, Image.Resampling.LANCZOS)
 
@@ -43,7 +43,7 @@ def generate_final_background(
     image: Image.Image,
     objects: Sequence[DetectedObject],
     kernel_size: tuple[int, int],
-    inpaint: Callable[[Image.Image, Image.Image], Image.Image],
+    background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> Image.Image:
     """Generate a background from per-object modal masks and soft alphas."""
     return generate_background_from_masks(
@@ -55,5 +55,5 @@ def generate_final_background(
             if detected.soft_alpha is not None
         ],
         kernel_size,
-        inpaint,
+        background_inpaint,
     )

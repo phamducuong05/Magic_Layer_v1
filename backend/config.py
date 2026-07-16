@@ -43,6 +43,14 @@ class ConfigManager:
         specific_config = cat_config.get(active_name, {})
         return {"name": active_name, **specific_config}
 
+    def has_active_model(self, category: str) -> bool:
+        """Return whether a model category has a concrete active adapter."""
+        category_config = self.config_dict.get("models", {}).get(category, {})
+        return bool(
+            isinstance(category_config, dict)
+            and category_config.get("active")
+        )
+
     def get_pipeline_config(self, stage: str) -> Dict[str, Any]:
         """Return configuration owned by one image-pipeline stage."""
         stage_config = self.config_dict.get("pipeline", {}).get(stage, {})

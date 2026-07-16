@@ -4,15 +4,16 @@ from typing import Optional
 from ..config import config
 from .registry import ModelRegistry
 from .base import (
+    BaseBackgroundInpaintingModel,
     BaseCompletionModel,
-    BaseInpaintingModel,
     BaseMattingModel,
+    BaseObjectReconstructionModel,
     BaseSegmentationModel,
 )
 
 from .segmentation import sam3
 from .matting import birefnet
-from .inpainting import lama, sdxl
+from .background_inpainting import lama, sdxl
 from .completion import adapter
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,12 @@ class ModelManager:
         if not hasattr(self, '_initialized'):
             self._segmentation_model: Optional[BaseSegmentationModel] = None
             self._matting_model: Optional[BaseMattingModel] = None
-            self._inpainting_model: Optional[BaseInpaintingModel] = None
+            self._background_inpainting_model: Optional[
+                BaseBackgroundInpaintingModel
+            ] = None
+            self._object_reconstruction_model: Optional[
+                BaseObjectReconstructionModel
+            ] = None
             self._completion_model: Optional[BaseCompletionModel] = None
             self._initialized = True
 
@@ -57,10 +63,27 @@ class ModelManager:
             self._matting_model = self._get_model_instance("matting")
         return self._matting_model
 
-    def get_inpainting_model(self) -> BaseInpaintingModel:
-        if self._inpainting_model is None:
-            self._inpainting_model = self._get_model_instance("inpainting")
-        return self._inpainting_model
+    def get_background_inpainting_model(self) -> BaseBackgroundInpaintingModel:
+        if self._background_inpainting_model is None:
+            self._background_inpainting_model = self._get_model_instance(
+                "background_inpainting"
+            )
+        return self._background_inpainting_model
+
+    def has_object_reconstruction_model(self) -> bool:
+        """Report configuration availability without loading model weights."""
+        return config.has_active_model("object_reconstruction")
+
+    def get_object_reconstruction_model(
+        self,
+    ) -> Optional[BaseObjectReconstructionModel]:
+        if not self.has_object_reconstruction_model():
+            return None
+        if self._object_reconstruction_model is None:
+            self._object_reconstruction_model = self._get_model_instance(
+                "object_reconstruction"
+            )
+        return self._object_reconstruction_model
 
     def get_completion_model(self) -> BaseCompletionModel:
         if self._completion_model is None:
@@ -72,7 +95,7 @@ class ModelManager:
         logger.info("Warming up all active models...")
         self.get_segmentation_model()
         self.get_matting_model()
-        self.get_inpainting_model()
+        self.get_background_inpainting_model()
         logger.info(f"Models are ready on device: {config.device}")
 
 # Export global instance

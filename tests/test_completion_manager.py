@@ -17,7 +17,7 @@ sys.modules["backend.models"] = models_package
 for category, adapter_names in {
     "segmentation": ["sam3"],
     "matting": ["birefnet"],
-    "inpainting": ["lama", "sdxl"],
+    "background_inpainting": ["lama", "sdxl"],
 }.items():
     package_name = f"backend.models.{category}"
     package = types.ModuleType(package_name)
@@ -69,18 +69,112 @@ def test_warmup_does_not_load_completion(monkeypatch):
     manager = _new_manager()
     monkeypatch.setattr(manager, "get_segmentation_model", Mock())
     monkeypatch.setattr(manager, "get_matting_model", Mock())
-    monkeypatch.setattr(manager, "get_inpainting_model", Mock())
+    monkeypatch.setattr(manager, "get_background_inpainting_model", Mock())
     completion_getter = Mock()
+    object_reconstruction_getter = Mock()
     monkeypatch.setattr(
         manager,
         "get_completion_model",
         completion_getter,
         raising=False,
     )
+    monkeypatch.setattr(
+        manager,
+        "get_object_reconstruction_model",
+        object_reconstruction_getter,
+    )
 
     manager.warmup_all()
 
     completion_getter.assert_not_called()
+    object_reconstruction_getter.assert_not_called()
+
+
+def test_background_inpainting_model_uses_its_own_category(monkeypatch):
+    created = []
+
+    class FakeBackgroundInpainter:
+        def __init__(self, config, device):
+            created.append((config, device))
+
+    fake_config = Mock()
+    fake_config.device = "cpu"
+    fake_config.get_model_config.return_value = {
+        "name": "lama",
+        "feather_radius": 2.0,
+    }
+    monkeypatch.setattr(manager_module, "config", fake_config)
+    get_class = Mock(return_value=FakeBackgroundInpainter)
+    monkeypatch.setattr(manager_module.ModelRegistry, "get_class", get_class)
+
+    manager = _new_manager()
+    first = manager.get_background_inpainting_model()
+    second = manager.get_background_inpainting_model()
+
+    assert first is second
+    assert created == [({"feather_radius": 2.0}, "cpu")]
+    get_class.assert_called_once_with("background_inpainting", "lama")
+
+
+def test_missing_object_reconstruction_model_is_reported_without_loading(
+    monkeypatch,
+):
+    fake_config = Mock()
+    fake_config.has_active_model.return_value = False
+    monkeypatch.setattr(manager_module, "config", fake_config)
+    get_class = Mock()
+    monkeypatch.setattr(manager_module.ModelRegistry, "get_class", get_class)
+
+    manager = _new_manager()
+
+    assert manager.has_object_reconstruction_model() is False
+    assert manager.get_object_reconstruction_model() is None
+    get_class.assert_not_called()
+
+
+def test_configured_object_reconstruction_uses_only_its_own_category(
+    monkeypatch,
+):
+    class FakeObjectReconstructor:
+        def __init__(self, config, device):
+            self.config = config
+            self.device = device
+
+    fake_config = Mock()
+    fake_config.device = "cuda"
+    fake_config.has_active_model.return_value = True
+    fake_config.get_model_config.return_value = {
+        "name": "future_adapter",
+        "input_size": 512,
+    }
+    monkeypatch.setattr(manager_module, "config", fake_config)
+    get_class = Mock(return_value=FakeObjectReconstructor)
+    monkeypatch.setattr(manager_module.ModelRegistry, "get_class", get_class)
+
+    manager = _new_manager()
+    model = manager.get_object_reconstruction_model()
+
+    assert model.config == {"input_size": 512}
+    assert model.device == "cuda"
+    get_class.assert_called_once_with(
+        "object_reconstruction", "future_adapter"
+    )
+
+
+def test_inpainting_configuration_has_two_isolated_categories():
+    from backend.config import config as runtime_config
+
+    config_path = Path(__file__).resolve().parents[1] / "backend" / "config.yaml"
+    with config_path.open("r", encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+
+    models = config["models"]
+    assert "inpainting" not in models
+    assert models["object_reconstruction"] == {"active": None}
+    assert models["background_inpainting"]["active"] == "lama"
+    assert {"lama", "sdxl"} <= set(models["background_inpainting"])
+    assert runtime_config.has_active_model("object_reconstruction") is False
+    assert runtime_config.has_active_model("background_inpainting") is True
 
 
 def test_completion_configuration_contains_initial_adapter_settings():
