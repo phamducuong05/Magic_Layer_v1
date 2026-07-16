@@ -149,26 +149,35 @@ def _merge_overlapping_masks(masks: List[np.ndarray]) -> List[np.ndarray]:
         if first_root != second_root:
             parents[second_root] = first_root
 
-    def boxes_overlap(
-        first: Tuple[int, int, int, int] | None,
-        second: Tuple[int, int, int, int] | None,
-    ) -> bool:
-        if first is None or second is None:
+    def masks_overlap(first_index: int, second_index: int) -> bool:
+        first_box = boxes[first_index]
+        second_box = boxes[second_index]
+        
+        if first_box is None or second_box is None:
             return False
-        first_x, first_y, first_width, first_height = first
-        second_x, second_y, second_width, second_height = second
-        return (
+            
+        first_x, first_y, first_width, first_height = first_box
+        second_x, second_y, second_width, second_height = second_box
+        
+        # Fast path: check if bounding boxes overlap first
+        boxes_do_overlap = (
             max(first_x, second_x)
             < min(first_x + first_width, second_x + second_width)
             and max(first_y, second_y)
             < min(first_y + first_height, second_y + second_height)
         )
+        
+        if not boxes_do_overlap:
+            return False
+            
+        # Slow path: check actual pixel overlap if bounding boxes intersect
+        return bool(np.any((masks[first_index] > 0) & (masks[second_index] > 0)))
 
     # Build connected groups. Union-find makes overlap transitive even when the
     # first and last boxes in a chain do not directly overlap each other.
     for first_index in range(len(masks)):
         for second_index in range(first_index + 1, len(masks)):
-            if boxes_overlap(boxes[first_index], boxes[second_index]):
+            if masks_overlap(first_index, second_index):
                 union(first_index, second_index)
 
     grouped_indices: dict[int, List[int]] = {}
