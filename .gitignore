@@ -130,6 +130,7 @@ dmypy.json
 weights/
 checkpoints/
 backend/models/completion/checkpoints/
+backend/models/object_reconstruction/checkpoints/
 sam3_logs/
 
 # Data files

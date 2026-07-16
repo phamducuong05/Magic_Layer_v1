@@ -16,7 +16,30 @@ models:
       trust_remote_code: true
       resolution: [1024, 1024]
   object_reconstruction:
-    active: null
+    active: hd_painter
+    hd_painter:
+      model_id: ds8_inp
+      method: painta+rasg
+      input_size: 512
+      num_steps: 50
+      guidance_scale: 7.5
+      rasg_eta: 0.1
+      seed: 1
+      positive_prompt: "high quality, coherent object continuation"
+      negative_prompt: "artifact, duplicate parts, malformed geometry, text, watermark"
+      fp16: true
+      auto_download: true
+      checkpoint_root: checkpoints
+      super_resolution:
+        enabled: true
+        target_size: 2048
+        noise_level: 20
+        denoising_stride: 50
+        guidance_scale: 7.5
+        blend_trick: true
+        blend_output: true
+        use_sam_mask: false
+        prompt_suffix: "high resolution professional photo"
   background_inpainting:
     active: lama
     lama:

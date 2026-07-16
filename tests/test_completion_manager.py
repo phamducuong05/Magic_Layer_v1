@@ -170,10 +170,11 @@ def test_inpainting_configuration_has_two_isolated_categories():
 
     models = config["models"]
     assert "inpainting" not in models
-    assert models["object_reconstruction"] == {"active": None}
+    assert models["object_reconstruction"]["active"] == "hd_painter"
+    assert "hd_painter" in models["object_reconstruction"]
     assert models["background_inpainting"]["active"] == "lama"
     assert {"lama", "sdxl"} <= set(models["background_inpainting"])
-    assert runtime_config.has_active_model("object_reconstruction") is False
+    assert runtime_config.has_active_model("object_reconstruction") is True
     assert runtime_config.has_active_model("background_inpainting") is True
 
 

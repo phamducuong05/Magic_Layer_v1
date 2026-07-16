@@ -15,3 +15,12 @@ simple-lama-inpainting>=0.1.2
 diffusers>=0.31
 accelerate>=1.0
 safetensors>=0.4
+# HD-Painter object reconstruction (kept compatible with the main Torch stack)
+xformers>=0.0.28
+omegaconf>=2.3
+open-clip-torch>=2.29
+pytorch-lightning>=2.4
+einops>=0.8
+scipy>=1.13
+tqdm>=4.66
+requests>=2.32

@@ -73,9 +73,11 @@ global depth ordering.
 - The model architecture now has separate `object_reconstruction` and
   `background_inpainting` categories. LaMa and SDXL are background-only
   adapters; neither can silently serve as hidden-object reconstruction.
-- No concrete object-reconstruction adapter has been selected or integrated.
-  Until that future checkpoint is implemented, raw objects that require hidden
-  RGB reconstruction must take a safe modal/original-RGB fallback.
+- HD-Painter has now been selected and its research source/configuration tree
+  has been copied under `backend/models/object_reconstruction/hd-painter/`, but
+  no application adapter is registered or active yet. Until Step 27 is
+  implemented and verified, raw objects that require hidden RGB reconstruction
+  must continue taking the safe modal/original-RGB fallback.
 - The segmentation stage now preserves raw instances, and cross-class overlap
   detection/completion runs on their immutable original modal bounding boxes
   before any same-class grouping.
@@ -466,6 +468,31 @@ Step 26 consolidates the individual-object depth stage behind
 - The orchestrator now calls this explicit raw-object boundary instead of
   assembling effective areas, decisions, and masks piecemeal.
 
+### 3.23 HD-Painter source availability — Not integrated
+
+**[NEW - HD-Painter Integration]** The copied model source currently contains:
+
+- `backend/models/object_reconstruction/hd-painter/src/smplfusion/`: the
+  custom DDIM, UNet/VAE/text-encoder implementation, global denoising state,
+  and PAIntA attention/transformer patches.
+- `backend/models/object_reconstruction/hd-painter/src/models/`: loaders for
+  `ds8_inp`, `sd15_inp`, `sd2_inp`, the optional Stable Diffusion x4
+  super-resolution model, automatic weight download, and model caching.
+- `backend/models/object_reconstruction/hd-painter/src/methods/`: baseline,
+  PAIntA, RASG, PAIntA+RASG, and optional HD super-resolution inference.
+- `backend/models/object_reconstruction/hd-painter/src/utils/`: `IImage`,
+  tokenization, resizing, mask dilation, and Poisson blending utilities.
+- `backend/models/object_reconstruction/hd-painter/config/`: DDPM, VAE,
+  encoder, inpainting-UNet, and upscaler-UNet YAML definitions.
+
+The copied source is not yet application-safe: its directory name is not a
+valid Python package name, imports assume a top-level package named `src`,
+weights/config paths are derived from source location, several operations use
+hardcoded `.cuda()`/`cuda:0`, PAIntA/RASG mutate module-global router and mask
+state, and its original dependency pins conflict with the newer backend
+runtime. These are Step 27 integration concerns; none changes the pipeline
+order defined in Section 1.
+
 ## 4. Important Gaps in the Current Implementation
 
 The following requirements are not complete and must not be treated as
@@ -488,8 +515,12 @@ finished:
 
 ### 4.3 Individual depth and reconstruction gaps
 
-- A concrete object-reconstruction model adapter has not been selected or
-  added. LaMa and SDXL must remain background-only.
+- HD-Painter is selected and its source is present, but an import-safe,
+  registered `BaseObjectReconstructionModel` adapter has not been added.
+  LaMa and SDXL must remain background-only.
+- HD-Painter dependency compatibility, CUDA-device propagation, global-state
+  serialization, checkpoint placement, preprocessing, prompt construction,
+  optional super-resolution, and output alignment have not been integrated.
 - Reconstruction-output validation and per-object modal/original-RGB fallback
   are incomplete.
 
@@ -711,9 +742,297 @@ Stop after Step 26 and obtain user verification before continuing.
 - Do not change or reuse background-inpainting configuration while integrating
   this model.
 
+#### **[NEW - HD-Painter Integration] Step 27.1: Freeze the adapter boundary and preserve pipeline order**
+
+- Keep the existing runtime position unchanged: HD-Painter is called only
+  after raw-mask completion, amodal validation, retained-pair filtering,
+  individual depth decisions, and hard reconstruction-mask creation, and
+  before Step 29 same-class grouping.
+- Keep `backend/pipeline/reconstruction.py::reconstruct_objects()` as the
+  caller. It continues providing one square RGB `PIL.Image` crop, one aligned
+  binary `PIL.Image` mask, and one semantic object-context string per eligible
+  raw object.
+- Keep the application-facing adapter contract exactly:
+  `reconstruct(image, mask, object_context) -> PIL.Image`.
+- Do not pass full-image arrays, amodal masks, soft alpha, background prompts,
+  or the background-inpainting adapter into HD-Painter.
+- Do not change completion eligibility or depth logic. HD-Painter may run only
+  for objects whose existing `reconstruction_mask` is non-empty.
+- Continue storing only the aligned reconstructed square crop and its existing
+  `reconstruction_roi`; do not allocate a reconstructed full-image copy.
+
+#### **[NEW - HD-Painter Integration] Step 27.2: Make the copied source import-safe**
+
+- Rename the non-importable `hd-painter` package directory to the Python-safe
+  name `hd_painter`, preserving its `config/` and `src/` relative layout.
+- Add package initializers for `backend/models/object_reconstruction/`,
+  `hd_painter/`, and `hd_painter/src/` where absent.
+- Replace ambiguous absolute imports beginning with `src.` by package-relative
+  imports rooted at
+  `backend.models.object_reconstruction.hd_painter.src`. Do not insert the
+  HD-Painter directory into global `sys.path`, because that could collide with
+  another package named `src` in the web process or test runner.
+- Update dynamic class loading in `src/models/common.py::get_obj_from_str()` so
+  YAML `__class__` values resolve inside the HD-Painter package rather than
+  falling back to a process-global `src` module.
+- Preserve the source-location rule that places `config/` and `checkpoints/`
+  beside `src/`, but expose the resolved paths through the adapter and log them
+  once at model initialization for deployment diagnostics.
+- Add an import-only test proving that registering the adapter does not import
+  or initialize the heavy DDIM, inpainting, or super-resolution weights.
+
+#### **[NEW - HD-Painter Integration] Step 27.3: Reconcile runtime dependencies without downgrading the application**
+
+- Compare the copied research pins (`torch==2.1.1`, `torchvision==0.16.1`,
+  `numpy==1.24.1`, `Pillow==9.4.0`) against the current backend requirements
+  (`torch>=2.5`, `torchvision>=0.20`, `numpy>=1.26,<2`, `Pillow>=10`).
+- Do not downgrade the existing backend stack merely to reproduce the research
+  environment. First run import and inference-smoke checks with the existing
+  versions, then constrain only packages with demonstrated incompatibilities.
+- Add the missing inference dependencies explicitly to
+  `backend/requirements.txt`: a Torch/CUDA-compatible `xformers`,
+  `omegaconf`, `open-clip-torch`, the CLIP tokenizer package expected by the
+  copied source, `pytorch-lightning`, `einops`, `scipy`, `tqdm`, and
+  `requests`.
+- Keep optional SAM refinement dependencies excluded because the planned
+  object-reconstruction path sets `use_sam_mask=False` and already receives a
+  validated pipeline mask.
+- Verify `xformers` against the deployed Torch and CUDA versions before
+  enabling its attention path. Fail initialization with a dependency-specific
+  message when the installed build is incompatible; do not silently fall back
+  to a background model.
+- Record the tested Python, Torch, torchvision, CUDA, xformers, and GPU versions
+  in the real-model acceptance results.
+
+#### **[NEW - HD-Painter Integration] Step 27.4: Add isolated HD-Painter configuration**
+
+- Register the adapter name `hd_painter` only under
+  `models.object_reconstruction` and make it the active object-reconstruction
+  model only when Step 27 deterministic tests are passing.
+- Keep the existing pipeline-owned `object_reconstruction.context_ratio` for
+  construction of the square source ROI.
+- Add model-owned configuration for: inpainting model ID (`ds8_inp`,
+  `sd15_inp`, or `sd2_inp`), method (`baseline`, `painta`, `rasg`, or
+  `painta+rasg`), low-resolution inference size `512`, DDIM step count,
+  guidance scale, RASG eta, seed, positive prompt suffix, negative prompt,
+  fp16 policy, automatic checkpoint download permission, and checkpoint root.
+- Add a nested super-resolution configuration containing: enabled/disabled,
+  target size `2048`, noise level, denoising stride, guidance scale,
+  `blend_trick`, `blend_output`, and `use_sam_mask=False`.
+- Default to `ds8_inp` with `painta+rasg` and enable the x4 super-resolution
+  stage for the documented two-stage HD-Painter quality path. Keep the
+  512-only path configurable for memory/performance evaluation, but do not
+  reinterpret it as background inpainting.
+- Validate all enums and numeric ranges before loading weights. Reject an
+  unsupported method/model combination, non-positive step count, invalid
+  guidance scale, a step count that cannot produce a safe positive DDIM stride
+  through the 1000-step schedule, or super-resolution request without CUDA
+  with a clear object-reconstruction initialization error.
+- Do not copy generation, expansion, blending, prompt, or model-selection
+  settings from `background_inpainting`.
+
+#### **[NEW - HD-Painter Integration] Step 27.5: Implement lazy model initialization and weight ownership**
+
+- Add an HD-Painter adapter implementing `BaseObjectReconstructionModel` and
+  decorate it with `ModelRegistry.register("object_reconstruction",
+  "hd_painter")`.
+- Import the lightweight adapter module from
+  `backend/models/object_reconstruction/__init__.py`, then import that package
+  from `backend/models/manager.py` so registry discovery follows the existing
+  model pattern.
+- Keep all HD-Painter research-module imports inside `_load_model()` or later
+  so application startup, no-overlap requests, and requests without a
+  reconstruction mask do not import CUDA-heavy modules or download weights.
+- In `_load_model()`, require a CUDA device because the copied implementation
+  is CUDA-only; report the configured and detected device when this condition
+  is not met.
+- Load the selected inpainting DDIM exactly once through
+  `load_inpainting_model(model_id, device=selected_device, cache=True)`.
+- Load the Stable Diffusion x4 upscaler exactly once only when the
+  super-resolution option is enabled. Keep `sam_predictor=None` and do not load
+  the optional SAM ViT-H checkpoint.
+- Keep auto-downloaded weights exclusively under the HD-Painter checkpoint
+  root, which is already ignored by the repository's checkpoint rules. Never
+  write weights inside completion or background-inpainting directories.
+- Preserve `ModelManager` lazy caching: no reconstruction mask means no
+  `get_object_reconstruction_model()` call, no HD-Painter construction, and no
+  weight download.
+
+#### **[NEW - HD-Painter Integration] Step 27.6: Remove hardcoded CUDA placement and propagate the selected device**
+
+- Audit `src/models/common.py`, the text encoders, `src/methods/rasg.py`,
+  `src/methods/sd.py`, `src/methods/sr.py`, and smplfusion utilities for
+  `.cuda()`, `cuda:0`, CUDA-only tensor construction, and unqualified
+  autocast.
+- Replace those hardcoded placements with the adapter-selected CUDA device so
+  a configured device such as `cuda:1` does not split models and tensors across
+  GPUs.
+- Create timestep, latent, noise-level, mask, and conditioning tensors on the
+  same device as their owning DDIM/UNet/VAE tensors.
+- Scope autocast to the selected CUDA device and configured fp16 policy.
+- Preserve gradients for `rasg` and `painta+rasg`; do not wrap those methods in
+  a global `torch.no_grad()` context. Keep inference-only no-grad scopes around
+  VAE/text operations where the research implementation already permits them.
+- After each call, release per-call tensors and clear gradients held by RASG;
+  do not call `torch.cuda.empty_cache()` unconditionally on every object unless
+  measured memory behavior requires it.
+
+#### **[NEW - HD-Painter Integration] Step 27.7: Preprocess the pipeline crop and hard mask**
+
+- Convert the supplied square source crop to RGB and record its exact original
+  `(width, height)` before HD-Painter resizing.
+- Convert the supplied mask to `L`, resize it with nearest-neighbor sampling
+  only when alignment is required, threshold it to a strict binary `0/255`
+  mask, and assert that its size matches the source crop.
+- Interpret white (`255`) as the region HD-Painter may reconstruct. Never
+  invert the pipeline reconstruction mask and never substitute
+  `amodal_mask`, `modal_mask`, or `soft_alpha`.
+- Return the unchanged RGB crop immediately for an empty hard mask; this guard
+  must not initialize or execute HD-Painter.
+- Resize the square RGB crop to `512x512` with a high-quality image filter and
+  resize the hard mask to `512x512` with nearest-neighbor sampling. Re-threshold
+  after resizing so diffusion never receives fractional mask values.
+- Convert the resized inputs to HD-Painter `IImage` instances. Supply an RGB
+  mask representation only at the research API boundary that expects it while
+  retaining the canonical binary `L` mask for application validation and
+  output restoration.
+- Do not perform another semantic crop inside HD-Painter; the existing square
+  `reconstruction_roi` is the authoritative memory-saving crop and coordinate
+  transform.
+
+#### **[NEW - HD-Painter Integration] Step 27.8: Build object-specific prompt context**
+
+- Treat the non-empty `object_context` supplied by
+  `reconstruct_objects()` as the base prompt describing continuation of the
+  hidden part of the current semantic object.
+- Append only the HD-Painter object-reconstruction positive suffix from its own
+  configuration; apply the HD-Painter negative prompt separately.
+- Ensure the base prompt remains non-empty because HD-Painter token selection
+  searches for the end-of-text token and PAIntA/RASG requires valid object
+  tokens.
+- Do not reuse SDXL background prompts such as “empty background,” because
+  they would train the reconstruction call to erase rather than continue the
+  object.
+- Record prompt templates and configuration values in diagnostics, but never
+  log full user images, masks, latent tensors, or attention maps.
+
+#### **[NEW - HD-Painter Integration] Step 27.9: Execute the selected 512px inpainting method**
+
+- Route `baseline` and `painta` through `src/methods/sd.py::run()` and route
+  `rasg` and `painta+rasg` through `src/methods/rasg.py::run()`.
+- Pass the cached inpainting DDIM, selected method, object prompt, resized RGB
+  `IImage`, resized binary-mask `IImage`, seed, RASG eta, positive/negative
+  prompt additions, step count, and guidance scale from the isolated
+  object-reconstruction configuration.
+- Keep one HD-Painter inference call per raw object with a non-empty
+  reconstruction mask. Multiple assigned occluders remain represented by the
+  single union mask constructed in Step 26 and must not cause multiple model
+  calls.
+- Convert the returned `IImage` to one RGB PIL image and reject multi-sample or
+  non-image results at the adapter boundary rather than silently selecting an
+  arbitrary sample.
+- Preserve the original crop and hard mask throughout inference so Step 28 can
+  verify unchanged pixels outside the permitted reconstruction/blend region.
+
+#### **[NEW - HD-Painter Integration] Step 27.10: Execute optional HD super-resolution**
+
+- When super-resolution is disabled, use the 512px inpainting result as the
+  generated source and continue directly to crop-size restoration.
+- When enabled, call `src/methods/sr.py::run()` with the cached x4 upscaler,
+  `sam_predictor=None`, the 512px inpainting result, the original square RGB
+  crop, the original aligned binary hard mask, the object prompt plus the
+  HD-specific high-resolution suffix, configured noise level, blend settings,
+  denoising stride, seed, guidance scale, negative prompt, and
+  `use_sam_mask=False`.
+- Treat HD-Painter's internal `2048` resize, mask dilation, latent blend, and
+  optional Poisson blend as model-internal generation behavior. Do not let it
+  change the full-image reconstruction ROI or create a new draggable-object
+  geometry.
+- Measure the additional x4-upscaler memory and latency separately. Keep the
+  512-only mode available if the 2048 intermediate exceeds the deployment GPU
+  budget, but never fall back to LaMa or SDXL background inpainting.
+
+#### **[NEW - HD-Painter Integration] Step 27.11: Restore adapter output to the pipeline contract**
+
+- Convert the selected 512px or HD result to RGB and resize it back to the
+  exact original square crop dimensions recorded before preprocessing.
+- Use a high-quality RGB resize; do not resize the hard mask with a continuous
+  filter and do not change `reconstruction_roi`.
+- Return exactly one RGB `PIL.Image` with the same size as the input crop.
+- Leave application-level protection of pixels outside the permitted
+  reconstruction/blend region and completion-hole usability checks to Step 28,
+  which owns reconstruction validation and fallback.
+- On model download, initialization, inference, conversion, or restoration
+  failure, propagate a reconstruction-specific failure to the per-object
+  validation/fallback boundary. Do not invoke a background-inpainting backend.
+
+#### **[NEW - HD-Painter Integration] Step 27.12: Serialize mutable HD-Painter global state**
+
+- Treat smplfusion `share`, attention router functions, PAIntA token indices,
+  timestep state, stored cross-attention similarities, and model gradients as
+  shared mutable state.
+- Protect the complete HD-Painter call—including method routing, denoising,
+  optional super-resolution, and router cleanup—with one adapter-owned lock so
+  concurrent web requests cannot mix masks, prompts, timesteps, or attention
+  patches.
+- Reset router/PAIntA/shared per-call state in a `finally` path after both
+  success and failure. Do not unload cached model weights during cleanup.
+- Keep raw-object calls sequential inside one request unless the research
+  implementation is later refactored to hold all state per inference object.
+- Add a deterministic concurrency test with mocked model methods proving that
+  two calls cannot overlap the global-state critical section.
+
+#### **[NEW - HD-Painter Integration] Step 27.13: Add deterministic adapter and orchestration tests**
+
+- Test registry discovery and manager lazy caching for
+  `object_reconstruction/hd_painter` without loading real weights.
+- Test that no-overlap, rejected-pair, ambiguous-pair, empty-mask, and missing-
+  model cases never construct or call HD-Painter.
+- Test RGB conversion, exact crop/mask alignment, nearest-neighbor binary-mask
+  resizing, white-is-reconstruct semantics, empty-mask bypass, non-empty prompt
+  construction, and exact output-size restoration.
+- Parameterize method dispatch across `baseline`, `painta`, `rasg`, and
+  `painta+rasg`, asserting that the correct research method receives every
+  configured inference argument.
+- Test optional SR disabled/enabled behavior, absence of SAM loading, original
+  crop/mask forwarding to SR, and exact resizing from the HD result back to the
+  reconstruction ROI.
+- Test CUDA-unavailable initialization, invalid config, dependency/import
+  failure, weight-download failure, 512 inference failure, and SR failure.
+- Test that HD-Painter is never registered or requested as
+  `background_inpainting`, and that LaMa/SDXL are never called after an
+  HD-Painter failure.
+- Test one raw object with multiple occluders still produces one adapter call,
+  while independent eligible raw objects each receive one call and retain
+  separate reconstruction canvases/ROIs.
+- Keep all deterministic tests weight-free by mocking HD-Painter loaders and
+  inference functions at the adapter boundary.
+
+#### **[NEW - HD-Painter Integration] Step 27.14: Run a gated real-model smoke test**
+
+- On a CUDA host with network access or pre-populated checkpoints, run one
+  fixed square crop and binary reconstruction mask through the selected 512px
+  method before enabling super-resolution.
+- Confirm automatic weights are stored under the HD-Painter checkpoint root,
+  the source crop/mask remain aligned, the result is RGB, and the adapter output
+  exactly matches the input crop size.
+- Repeat with super-resolution enabled and `use_sam_mask=False`; measure
+  inpainting latency, SR latency, peak allocated/reserved GPU memory, and total
+  adapter latency separately.
+- Inspect the hidden object continuation, boundary consistency, preservation
+  of visible modal pixels, and absence of background-only content inside the
+  object reconstruction region.
+- Do not mark Step 27 complete until deterministic tests pass and at least one
+  real-checkpoint result has been manually reviewed.
+
 Step 27 is intentionally blocked until the user selects/provides the concrete
 model and its inference contract. Do not substitute LaMa or SDXL. Stop and
 request those model details when this checkpoint is reached.
+
+**[NEW - HD-Painter Integration] Blocker update:** HD-Painter has now been
+selected and its source/inference guide has been provided, so the model-
+selection blocker is resolved. Step 27 remains an implementation checkpoint
+and must not begin until Step 26 is verified and this detailed plan is approved.
 
 ### Step 28: Validate individual reconstruction and provide modal fallback
 
@@ -728,6 +1047,26 @@ request those model details when this checkpoint is reached.
 - Add tests for invalid types/sizes, changes outside the permitted region,
   unusable completion-hole RGB, independent per-object failure, and the missing-
   model modal fallback.
+
+**[NEW - HD-Painter Integration]** Extend Step 28 validation without changing
+its fallback semantics:
+
+- Record whether the failed result came from 512px generation, optional SR,
+  crop-size restoration, or permitted-region validation.
+- Reject non-PIL, multi-sample, non-finite, empty, wrong-channel, or wrong-size
+  HD-Painter results before they can reach grouping.
+- Compare the returned crop against the original source outside the configured
+  reconstruction/blend allowance, including the larger internal dilation used
+  by the optional SR/Poisson path.
+- Require usable RGB variation in the completion-hole region while allowing
+  deterministic valid low-texture objects; avoid a simplistic “non-black” test
+  as the only quality criterion.
+- On any rejection, clear the HD-Painter canvas/ROI result for only that raw
+  object, retain its validated mask diagnostics, and route it through the
+  existing original-RGB/modal fallback. Do not retry with LaMa or SDXL.
+- Add HD-Painter-specific tests for 512-only and SR outputs, Poisson-blend
+  boundary changes, per-object failure isolation, and recovery after a failed
+  call so the adapter lock/global state is reusable.
 
 Stop after Step 28 and obtain user verification before continuing.
 
@@ -1009,6 +1348,24 @@ The integration is complete only when all of the following are true:
   layers.
 - Deterministic tests pass and real-checkpoint acceptance scenes have been
   manually reviewed.
+- **[NEW - HD-Painter Integration]** HD-Painter is registered exclusively as
+  `object_reconstruction/hd_painter`, is lazily loaded only for non-empty raw
+  reconstruction masks, and never initializes on no-overlap/rejected/ambiguous
+  paths.
+- **[NEW - HD-Painter Integration]** The adapter consumes the existing square
+  RGB crop plus aligned binary white-is-reconstruct mask, runs the configured
+  512px method and optional 2048px SR path, and returns one RGB crop with the
+  exact original ROI size.
+- **[NEW - HD-Painter Integration]** All HD-Painter tensors and models use the
+  configured CUDA device; RASG retains required gradient scopes; mutable
+  smplfusion router/share state is serialized and reset after every call.
+- **[NEW - HD-Painter Integration]** HD-Painter dependencies coexist with the
+  current backend runtime without downgrading unrelated models, checkpoints
+  remain isolated under the HD-Painter model root, and optional SAM refinement
+  is not loaded.
+- **[NEW - HD-Painter Integration]** 512-only and optional SR failure paths
+  produce the existing per-object modal/original-RGB fallback and never invoke
+  LaMa or SDXL as hidden-object reconstruction substitutes.
 
 ## 7. Local Verification Command
 
