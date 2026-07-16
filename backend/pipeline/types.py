@@ -29,13 +29,15 @@ class ProcessResult:
 
 @dataclass
 class DetectedObject:
-    """One same-class grouped object in full-image coordinates."""
+    """One raw or grouped object in full-image coordinates."""
 
     object_id: str
     semantic_class: str
     display_label: str
     modal_mask: np.ndarray
     bbox: tuple[int, int, int, int]
+    segmentation_index: int = 0
+    _original_modal_bbox: tuple[int, int, int, int] = field(init=False, repr=False)
     overlap_partner_ids: set[str] = field(default_factory=set)
     occluder_ids: set[str] = field(default_factory=set)
     amodal_mask: Optional[np.ndarray] = None
@@ -46,3 +48,12 @@ class DetectedObject:
     reconstruction_canvas: Optional[Image.Image] = None
     reconstruction_roi: Optional[SquareROI] = None
     soft_alpha: Optional[np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        """Snapshot immutable raw geometry before later stages change ``bbox``."""
+        self._original_modal_bbox = tuple(self.bbox)
+
+    @property
+    def original_modal_bbox(self) -> tuple[int, int, int, int]:
+        """Return the tight bbox captured from the original raw modal mask."""
+        return self._original_modal_bbox

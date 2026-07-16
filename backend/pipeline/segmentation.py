@@ -1,4 +1,4 @@
-"""Text-guided segmentation and same-class grouping."""
+"""Text-guided extraction of individual raw SAM3 masks."""
 
 import logging
 from typing import Any, Sequence
@@ -9,7 +9,6 @@ from PIL import Image
 from ..core.helpers import (
     _bbox_from_mask,
     _inference_context,
-    _merge_overlapping_masks,
     _normalise_mask,
 )
 from .types import DetectedObject
@@ -17,10 +16,10 @@ from .types import DetectedObject
 logger = logging.getLogger(__name__)
 
 
-def extract_objects(
+def extract_raw_objects(
     image: Image.Image, keywords: Sequence[str], processor: Any
 ) -> list[DetectedObject]:
-    """Run the supplied segmentation processor and group same-class masks."""
+    """Return one stable object record per non-empty raw SAM3 mask."""
     objects: list[DetectedObject] = []
 
     with torch.inference_mode(), _inference_context():
@@ -40,13 +39,12 @@ def extract_objects(
             keyword_masks = [
                 _normalise_mask(mask, image.size) for mask in masks
             ]
-            keyword_masks = _merge_overlapping_masks(keyword_masks)
 
             for index, mask in enumerate(keyword_masks):
                 bbox = _bbox_from_mask(mask)
                 if bbox is None:
                     logger.warning(
-                        "[SAM3] Ignoring empty grouped mask for '%s'", keyword
+                        "[SAM3] Ignoring empty raw mask for '%s'", keyword
                     )
                     continue
 
@@ -62,8 +60,14 @@ def extract_objects(
                         display_label=display_label,
                         modal_mask=mask,
                         bbox=bbox,
+                        segmentation_index=len(objects),
                     )
                 )
-                logger.info("[SAM3] grouped instance '%s'", display_label)
+                logger.info("[SAM3] raw instance '%s'", display_label)
 
     return objects
+
+
+# Transitional notebook compatibility. Production orchestration uses the
+# explicit raw-object name; the notebook migrates in its later parity step.
+extract_objects = extract_raw_objects

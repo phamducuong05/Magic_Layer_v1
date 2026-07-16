@@ -169,11 +169,11 @@ def test_prepare_inpaint_masks_generates_beyond_blend_boundary():
     assert blend_array[15, 15] >= 250
 
 
-def test_extract_objects_uses_each_nonempty_prompt(monkeypatch, rgb_image):
+def test_extract_raw_objects_uses_each_nonempty_prompt(monkeypatch, rgb_image):
     processor = FakeSamProcessor()
     del monkeypatch
 
-    objects = segmentation_stage.extract_objects(
+    objects = segmentation_stage.extract_raw_objects(
         rgb_image, [" component ", "", "missing"], processor
     )
 
@@ -186,12 +186,16 @@ def test_extract_objects_uses_each_nonempty_prompt(monkeypatch, rgb_image):
     assert detected.semantic_class == "component"
     assert detected.display_label == "component"
     assert detected.bbox == (2, 1, 4, 4)
+    assert detected.original_modal_bbox == (2, 1, 4, 4)
+    assert detected.segmentation_index == 0
     assert detected.modal_mask.shape == (6, 8)
     assert detected.modal_mask.dtype == np.uint8
     assert set(np.unique(detected.modal_mask)) == {0, 255}
 
 
-def test_extract_objects_merges_before_calculating_bbox(monkeypatch, rgb_image):
+def test_extract_raw_objects_keeps_overlapping_same_class_masks_separate(
+    monkeypatch, rgb_image
+):
     processor = FakeSamProcessor()
 
     def two_masks(state, prompt):
@@ -205,20 +209,33 @@ def test_extract_objects_merges_before_calculating_bbox(monkeypatch, rgb_image):
     processor.set_text_prompt = two_masks
     del monkeypatch
 
-    objects = segmentation_stage.extract_objects(
+    objects = segmentation_stage.extract_raw_objects(
         rgb_image, ["button"], processor
     )
 
-    assert len(objects) == 1
-    detected = objects[0]
-    assert detected.semantic_class == "button"
-    assert detected.display_label == "button"
-    assert detected.bbox == (1, 1, 5, 4)
-    assert np.all(detected.modal_mask[1:4, 1:4] == 255)
-    assert np.all(detected.modal_mask[2:5, 3:6] == 255)
+    assert len(objects) == 2
+    assert [detected.object_id for detected in objects] == [
+        "object-0",
+        "object-1",
+    ]
+    assert [detected.segmentation_index for detected in objects] == [0, 1]
+    assert [detected.display_label for detected in objects] == [
+        "button_0",
+        "button_1",
+    ]
+    assert [detected.bbox for detected in objects] == [
+        (1, 1, 3, 3),
+        (3, 2, 3, 3),
+    ]
+    assert [detected.original_modal_bbox for detected in objects] == [
+        (1, 1, 3, 3),
+        (3, 2, 3, 3),
+    ]
+    assert np.count_nonzero(objects[0].modal_mask) == 9
+    assert np.count_nonzero(objects[1].modal_mask) == 9
 
 
-def test_extract_objects_keeps_nonoverlapping_same_keyword(
+def test_extract_raw_objects_keeps_nonoverlapping_same_keyword(
     monkeypatch, rgb_image
 ):
     processor = FakeSamProcessor()
@@ -234,7 +251,7 @@ def test_extract_objects_keeps_nonoverlapping_same_keyword(
     processor.set_text_prompt = two_masks
     del monkeypatch
 
-    objects = segmentation_stage.extract_objects(
+    objects = segmentation_stage.extract_raw_objects(
         rgb_image, ["button"], processor
     )
 
@@ -259,6 +276,19 @@ def test_extract_objects_keeps_nonoverlapping_same_keyword(
 def test_link_overlap_partners_records_cross_class_relationship():
     person = _detected_object("person-1", "person", (0, 0, 10, 10))
     chair = _detected_object("chair-1", "chair", (5, 5, 10, 10))
+
+    pairs = completion_stage.link_overlap_partners([person, chair])
+
+    assert pairs == [("person-1", "chair-1")]
+    assert person.overlap_partner_ids == {"chair-1"}
+    assert chair.overlap_partner_ids == {"person-1"}
+
+
+def test_link_overlap_partners_uses_immutable_original_modal_bboxes():
+    person = _detected_object("person-1", "person", (0, 0, 10, 10))
+    chair = _detected_object("chair-1", "chair", (5, 5, 10, 10))
+    person.bbox = (0, 0, 1, 1)
+    chair.bbox = (18, 18, 1, 1)
 
     pairs = completion_stage.link_overlap_partners([person, chair])
 
@@ -297,6 +327,70 @@ def test_link_overlap_partners_keeps_multiple_partners_unique():
     assert person.overlap_partner_ids == {"chair-1", "table-1"}
     assert chair.overlap_partner_ids == {"person-1", "table-1"}
     assert table.overlap_partner_ids == {"person-1", "chair-1"}
+
+
+def test_filter_pairs_keeps_only_positive_validated_amodal_overlap(caplog):
+    caplog.set_level("INFO")
+    person = _detected_object("person-1", "person", (0, 0, 4, 4))
+    chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    lamp = _detected_object("lamp-1", "lamp", (6, 0, 2, 2))
+    person.amodal_mask = person.modal_mask > 0
+    chair.amodal_mask = chair.modal_mask > 0
+    lamp.amodal_mask = lamp.modal_mask > 0
+    person.overlap_partner_ids.update({"chair-1", "lamp-1"})
+
+    retained = completion_stage.filter_pairs_by_amodal_overlap(
+        [person, chair, lamp],
+        [("person-1", "chair-1"), ("person-1", "lamp-1")],
+    )
+
+    assert retained == [("person-1", "chair-1")]
+    assert person.overlap_partner_ids == {"chair-1", "lamp-1"}
+    assert np.array_equal(person.amodal_mask, person.modal_mask > 0)
+    assert "person-1" in caplog.text
+    assert "lamp-1" in caplog.text
+    assert "do not overlap" in caplog.text
+
+
+def test_filter_pairs_rejects_modal_fallback_without_pixel_overlap():
+    first = _detected_object("first", "person", (0, 0, 4, 4))
+    second = _detected_object("second", "chair", (3, 3, 4, 4))
+    first.amodal_mask = first.modal_mask > 0
+    second.amodal_mask = second.modal_mask > 0
+    second.amodal_mask[3, 3] = False
+
+    retained = completion_stage.filter_pairs_by_amodal_overlap(
+        [first, second], [("first", "second")]
+    )
+
+    assert retained == []
+
+
+def test_disconnected_completion_artifact_cannot_preserve_false_pair(
+    rgb_image,
+):
+    person = _detected_object("person-1", "person", (0, 0, 2, 2))
+    chair = _detected_object("chair-1", "chair", (4, 0, 2, 2))
+    person_output = person.modal_mask.copy()
+    person_output[0:2, 4:6] = 255
+    completion_model = Mock()
+    completion_model.complete.return_value = [
+        person_output,
+        chair.modal_mask.copy(),
+    ]
+
+    completion_stage.complete_objects(
+        rgb_image,
+        [person, chair],
+        completion_model,
+        **COMPLETION_LIMITS,
+    )
+    retained = completion_stage.filter_pairs_by_amodal_overlap(
+        [person, chair], [("person-1", "chair-1")]
+    )
+
+    assert retained == []
+    assert not np.any(person.amodal_mask & chair.amodal_mask)
 
 
 def test_complete_overlapping_objects_skips_model_without_overlap(
@@ -361,11 +455,11 @@ def test_complete_overlapping_objects_counts_only_newly_completed_pixels(
     chair.overlap_partner_ids.add(person.object_id)
 
     person_amodal = person.modal_mask.astype(bool)
-    person_amodal[10, 10] = True
+    person_amodal[4, 3] = True
     chair.modal_mask = (chair.modal_mask > 0).astype(np.uint8)
     chair_amodal = chair.modal_mask.copy()
-    chair_amodal[10, 10] = 1
-    chair_amodal[10, 11] = 1
+    chair_amodal[6, 4] = 1
+    chair_amodal[6, 5] = 1
 
     completion_model = Mock()
     completion_model.complete.return_value = [person_amodal, chair_amodal]
@@ -555,13 +649,16 @@ def test_effective_hole_areas_are_attached_without_overwriting_raw_areas():
     person.completion_hole_area = 15
     chair.completion_hole_area = 20
 
-    effective_areas = pipeline_orchestrator._effective_hole_areas(
+    decisions = reconstruction_stage.prepare_raw_reconstruction_masks(
         [person, chair],
-        minimum_pixels=16,
-        minimum_modal_ratio=0.01,
+        [],
+        (3, 3),
+        minimum_hole_area_pixels=16,
+        minimum_hole_area_ratio=0.01,
+        tie_tolerance_ratio=0.1,
     )
 
-    assert effective_areas == {"person-1": 0, "chair-1": 20}
+    assert decisions == []
     assert person.completion_hole_area == 15
     assert chair.completion_hole_area == 20
     assert person.effective_completion_hole_area == 0
@@ -639,6 +736,46 @@ def test_build_reconstruction_masks_constrains_assigned_occluders():
     assert first_occluder.reconstruction_mask is None
     assert second_occluder.reconstruction_mask is None
     assert distant_occluder.reconstruction_mask is None
+
+
+def test_prepare_raw_reconstruction_masks_aggregates_pairwise_occluders_once():
+    hidden = _detected_object("hidden", "person", (4, 4, 4, 4))
+    chair = _detected_object("chair", "chair", (5, 5, 4, 4))
+    table = _detected_object("table", "table", (3, 5, 4, 4))
+    objects = [hidden, chair, table]
+
+    for detected, raw_area in zip(objects, [30, 10, 4]):
+        detected.amodal_mask = detected.modal_mask > 0
+        detected.completion_hole_mask = np.zeros_like(
+            detected.modal_mask, dtype=bool
+        )
+        detected.completion_hole_area = raw_area
+    hidden.completion_hole_mask[4, 8] = True
+    hidden.amodal_mask |= hidden.completion_hole_mask
+
+    decisions = reconstruction_stage.prepare_raw_reconstruction_masks(
+        objects,
+        [("hidden", "chair"), ("hidden", "table")],
+        (3, 3),
+        minimum_hole_area_pixels=5,
+        minimum_hole_area_ratio=0.0,
+        tie_tolerance_ratio=0.1,
+    )
+
+    assert [
+        (decision.occluded_id, decision.occluder_id)
+        for decision in decisions
+    ] == [("hidden", "chair"), ("hidden", "table")]
+    assert [detected.completion_hole_area for detected in objects] == [30, 10, 4]
+    assert [
+        detected.effective_completion_hole_area for detected in objects
+    ] == [30, 10, 0]
+    assert hidden.occluder_ids == {"chair", "table"}
+    assert hidden.reconstruction_mask is not None
+    assert hidden.reconstruction_mask.dtype == bool
+    assert sum(
+        detected.reconstruction_mask is not None for detected in objects
+    ) == 1
 
 
 def test_reconstruct_objects_inpaints_only_nonempty_masks(rgb_image):
@@ -822,10 +959,9 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     background_inpaint = (
         manager.get_background_inpainting_model.return_value.process
     )
-    extract_objects = Mock(return_value=[detected])
+    extract_raw_objects = Mock(return_value=[detected])
     link_overlaps = Mock(return_value=[])
-    apply_decisions = Mock()
-    build_reconstruction = Mock()
+    prepare_reconstruction = Mock()
     events = []
     reconstruct_objects = Mock()
 
@@ -839,18 +975,15 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     generate_background = Mock(return_value=expected_background)
     encode = Mock(side_effect=lambda image, fmt="PNG": f"encoded-{image.size}")
     monkeypatch.setattr(
-        pipeline_orchestrator, "extract_objects", extract_objects
+        pipeline_orchestrator, "extract_raw_objects", extract_raw_objects
     )
     monkeypatch.setattr(
         pipeline_orchestrator, "link_overlap_partners", link_overlaps
     )
     monkeypatch.setattr(
-        pipeline_orchestrator, "apply_pair_decisions", apply_decisions
-    )
-    monkeypatch.setattr(
         pipeline_orchestrator,
-        "build_reconstruction_masks",
-        build_reconstruction,
+        "prepare_raw_reconstruction_masks",
+        prepare_reconstruction,
     )
     monkeypatch.setattr(
         pipeline_orchestrator,
@@ -878,19 +1011,18 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     assert result.original_height == 6
     assert result.background_base64 == "encoded-(8, 6)"
     assert result.layers == [expected_layer]
-    extract_objects.assert_called_once()
+    extract_raw_objects.assert_called_once()
     prepared_image, prepared_keywords, supplied_processor = (
-        extract_objects.call_args.args
+        extract_raw_objects.call_args.args
     )
     assert prepared_image.mode == "RGB"
     assert prepared_image.size == rgb_image.size
     assert prepared_keywords == ["component"]
     assert supplied_processor is processor
-    link_overlaps.assert_not_called()
+    link_overlaps.assert_called_once_with([detected])
     manager.get_completion_model.assert_not_called()
     manager.get_object_reconstruction_model.assert_not_called()
-    apply_decisions.assert_not_called()
-    build_reconstruction.assert_not_called()
+    prepare_reconstruction.assert_not_called()
     reconstruct_objects.assert_not_called()
     assert events == ["matte"]
     refine_objects.assert_called_once()
@@ -904,9 +1036,9 @@ def test_process_image_returns_original_when_nothing_detected(
     monkeypatch, rgb_image
 ):
     manager = Mock()
-    extract_objects = Mock(return_value=[])
+    extract_raw_objects = Mock(return_value=[])
     monkeypatch.setattr(
-        pipeline_orchestrator, "extract_objects", extract_objects
+        pipeline_orchestrator, "extract_raw_objects", extract_raw_objects
     )
     monkeypatch.setattr(
         pipeline_orchestrator,
@@ -946,7 +1078,7 @@ def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
 
     monkeypatch.setattr(
         pipeline_orchestrator,
-        "extract_objects",
+        "extract_raw_objects",
         Mock(return_value=[person, chair, lamp]),
     )
     monkeypatch.setattr(
@@ -976,30 +1108,34 @@ def test_process_masks_returns_completed_and_bypass_masks_in_object_order(
     background_inpainting_getter.assert_not_called()
 
 
-def test_process_masks_bypasses_amodal_branch_without_reconstruction_model(
+def test_process_masks_completes_candidates_without_reconstruction_model(
     monkeypatch, rgb_image
 ):
     person = _detected_object("person-1", "person", (0, 0, 4, 4))
     chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    person_amodal = person.modal_mask.copy()
+    person_amodal[4, 3] = 255
+    chair_amodal = chair.modal_mask.copy()
+    chair_amodal[1, 3] = 255
+    completion_model = Mock()
+    completion_model.complete.return_value = [person_amodal, chair_amodal]
     monkeypatch.setattr(
         pipeline_orchestrator,
-        "extract_objects",
+        "extract_raw_objects",
         Mock(return_value=[person, chair]),
-    )
-    link_overlaps = Mock(return_value=[("person-1", "chair-1")])
-    monkeypatch.setattr(
-        pipeline_orchestrator, "link_overlap_partners", link_overlaps
     )
     manager = Mock()
     manager.has_object_reconstruction_model.return_value = False
+    manager.get_completion_model.return_value = completion_model
 
     masks = pipeline_orchestrator.process_masks(
         rgb_image, ["person", "chair"], manager=manager
     )
 
-    assert masks == [person.modal_mask, chair.modal_mask]
-    link_overlaps.assert_not_called()
-    manager.get_completion_model.assert_not_called()
+    assert np.array_equal(masks[0], person_amodal > 0)
+    assert np.array_equal(masks[1], chair_amodal > 0)
+    completion_model.complete.assert_called_once()
+    manager.has_object_reconstruction_model.assert_not_called()
     manager.get_object_reconstruction_model.assert_not_called()
 
 
@@ -1011,7 +1147,7 @@ def test_process_masks_skips_completion_model_without_overlap(
     person.modal_mask[0:4, 0:4] = 255
     monkeypatch.setattr(
         pipeline_orchestrator,
-        "extract_objects",
+        "extract_raw_objects",
         Mock(return_value=[person]),
     )
     monkeypatch.setattr(

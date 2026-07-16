@@ -21,12 +21,13 @@ def test_pipeline_types_preserve_contract_and_add_per_object_alpha():
     )
 
     assert detected.soft_alpha is None
+    assert detected.original_modal_bbox == (0, 0, 4, 3)
     assert ObjectLayer("person", "png", 0, 0, 4, 3).keyword == "person"
     assert ProcessResult("background", 4, 3).layers == []
 
 
 def test_segmentation_uses_the_supplied_processor():
-    from backend.pipeline.segmentation import extract_objects
+    from backend.pipeline.segmentation import extract_raw_objects
 
     processor = Mock()
     processor.set_image.return_value = {}
@@ -34,7 +35,7 @@ def test_segmentation_uses_the_supplied_processor():
     mask[1:, 1:3] = 1
     processor.set_text_prompt.return_value = {"masks": [mask]}
 
-    objects = extract_objects(
+    objects = extract_raw_objects(
         Image.new("RGB", (4, 3)), [" person "], processor
     )
 
@@ -43,6 +44,14 @@ def test_segmentation_uses_the_supplied_processor():
     assert objects[0].bbox == (1, 1, 2, 2)
     processor.set_image.assert_called_once()
     processor.set_text_prompt.assert_called_once()
+
+
+def test_segmentation_does_not_group_during_raw_extraction():
+    from backend.pipeline import segmentation
+
+    source = inspect.getsource(segmentation.extract_raw_objects)
+
+    assert "_merge_overlapping_masks" not in source
 
 
 def test_completion_candidates_and_model_are_explicit_and_ordered():
@@ -154,7 +163,7 @@ def test_process_masks_does_not_resolve_completion_without_candidates(
         Mock()
     )
     monkeypatch.setattr(
-        orchestrator, "extract_objects", Mock(return_value=[detected])
+        orchestrator, "extract_raw_objects", Mock(return_value=[detected])
     )
     monkeypatch.setattr(
         orchestrator, "link_overlap_partners", Mock(return_value=[])
@@ -168,7 +177,7 @@ def test_process_masks_does_not_resolve_completion_without_candidates(
     manager.get_completion_model.assert_not_called()
 
 
-def test_process_image_uses_background_inpainter_without_reconstruction(
+def test_process_image_completes_overlap_without_reconstruction_model(
     monkeypatch,
 ):
     from backend.pipeline import orchestrator
@@ -178,24 +187,37 @@ def test_process_image_uses_background_inpainter_without_reconstruction(
     detected = DetectedObject(
         "object-0", "person", "person", mask, (0, 0, 4, 3)
     )
+    occluder = DetectedObject(
+        "object-1", "chair", "chair", mask, (0, 0, 4, 3)
+    )
     detected.soft_alpha = mask.astype(np.float64)
+    occluder.soft_alpha = mask.astype(np.float64)
     manager = Mock()
     manager.get_segmentation_model.return_value.get_processor.return_value = (
         Mock()
     )
     manager.has_object_reconstruction_model.return_value = False
+    completion_model = manager.get_completion_model.return_value
+    completion_model.complete.return_value = [mask, mask]
     background_inpaint = Mock()
     manager.get_background_inpainting_model.return_value.process = (
         background_inpaint
     )
     monkeypatch.setattr(
-        orchestrator, "extract_objects", Mock(return_value=[detected])
+        orchestrator,
+        "extract_raw_objects",
+        Mock(return_value=[detected, occluder]),
     )
+    filter_pairs = Mock(return_value=[])
     monkeypatch.setattr(
-        orchestrator, "link_overlap_partners", Mock(return_value=[])
+        orchestrator, "filter_pairs_by_amodal_overlap", filter_pairs
     )
-    monkeypatch.setattr(orchestrator, "apply_pair_decisions", Mock())
-    monkeypatch.setattr(orchestrator, "build_reconstruction_masks", Mock())
+    prepare_reconstruction = Mock()
+    monkeypatch.setattr(
+        orchestrator,
+        "prepare_raw_reconstruction_masks",
+        prepare_reconstruction,
+    )
     monkeypatch.setattr(orchestrator, "refine_objects", Mock())
     extract_layers = Mock(return_value=[])
     monkeypatch.setattr(orchestrator, "extract_object_layers", extract_layers)
@@ -211,7 +233,11 @@ def test_process_image_uses_background_inpainter_without_reconstruction(
 
     assert result.original_width == 4
     assert result.original_height == 3
-    manager.get_completion_model.assert_not_called()
+    completion_model.complete.assert_called_once()
+    filter_pairs.assert_called_once_with(
+        [detected, occluder], [("object-0", "object-1")]
+    )
+    prepare_reconstruction.assert_not_called()
     manager.get_object_reconstruction_model.assert_not_called()
     manager.get_background_inpainting_model.assert_called_once()
     assert extract_layers.call_args.args[-1] is background_inpaint

@@ -66,22 +66,19 @@ global depth ordering.
 
 ## 2. Current Verified State
 
-- Steps 19 through 21 are implemented and were accepted as completed roadmap
+- Steps 19 through 25 are implemented and were accepted as completed roadmap
   checkpoints.
-- Step 22 is implemented in the current working tree and deterministically
-  tested, but remains an uncommitted/user-verification checkpoint. The latest
-  focused/full deterministic verification produced **109 passing tests when
-  the one known stale checkpoint-path expectation is excluded**.
+- Step 26 is implemented in the current working tree and awaits user
+  verification.
 - The model architecture now has separate `object_reconstruction` and
   `background_inpainting` categories. LaMa and SDXL are background-only
   adapters; neither can silently serve as hidden-object reconstruction.
 - No concrete object-reconstruction adapter has been selected or integrated.
   Until that future checkpoint is implemented, raw objects that require hidden
   RGB reconstruction must take a safe modal/original-RGB fallback.
-- The current segmentation stage still groups same-class masks before
-  completion. The next pipeline-order refactor must preserve raw instances,
-  complete, validate, depth-order, and reconstruct them individually, and only
-  then group same-class objects for downstream processing.
+- The segmentation stage now preserves raw instances, and cross-class overlap
+  detection/completion runs on their immutable original modal bounding boxes
+  before any same-class grouping.
 - Same-class merging now has a two-stage bounding-box-plus-mask overlap check.
   This reflects the current code only. The target workflow removes the
   pixel-level condition and groups same-class raw objects purely from their
@@ -89,13 +86,10 @@ global depth ordering.
 - Completion validation now filters disconnected predicted components that do
   not overlap the corresponding source modal mask and logs invalid-output
   reasons before applying modal fallback.
-- `build_reconstruction_masks()` does not currently verify that both validated
-  amodal masks in a candidate cross-class pair overlap. Its expanded-support
-  intersection is not equivalent, so this pair gate is still missing.
-- The current orchestrator gates the whole completion/depth branch on the
-  availability of an object-reconstruction model. The revised workflow instead
-  requires raw completion and pair reasoning for bbox-overlap candidates first;
-  only the actual hidden-RGB model call is conditional on model availability.
+- Potential bbox pairs are now filtered by positive overlap between both
+  validated amodal masks before depth ordering or reconstruction-mask logic.
+- Completion and pair reasoning are no longer gated by object-reconstruction
+  model availability; only the actual hidden-RGB model call is conditional.
 - BiRefNet still processes the original image and modal masks for every object.
 - Matting and per-layer background estimation still run on full-image inputs;
   expanded square per-object ROIs have not been implemented yet.
@@ -380,27 +374,97 @@ Step 22 is implemented in the current working tree:
 - Notebook examples and deterministic architecture tests were updated to prove
   role isolation.
 
-This section records implemented working-tree behavior, not approval to proceed
-past the Step 22 verification checkpoint.
+This section records the Step 22 behavior verified by the user.
 
 ### 3.18 Current behaviors intentionally scheduled for replacement
 
 The following implemented behaviors are transitional rather than target
 requirements:
 
-- SAM3 masks are grouped before `DetectedObject` records and raw bounding boxes
-  are created.
-- Same-class grouping currently requires bbox overlap plus modal-mask pixel
-  overlap.
-- Cross-class completion/depth reasoning currently operates on already grouped
-  objects.
-- The orchestrator skips the entire amodal branch when no object-reconstruction
-  model is configured.
+- The old same-class helper still implements bbox-plus-modal-pixel overlap, but
+  Step 23 no longer invokes it during segmentation; final bbox-only grouping is
+  not implemented yet.
+- Candidate cross-class pairs are not yet filtered by validated-amodal overlap.
 - BiRefNet and layer extraction always use the original full image and modal
   masks, even when a reconstruction canvas exists.
 
 The remaining steps below replace these behaviors incrementally; they must not
 be mistaken for finished parts of the revised workflow.
+
+### 3.19 Immutable raw SAM-object extraction
+
+Step 23 now establishes the revised pipeline boundary:
+
+- `extract_raw_objects()` returns one `DetectedObject` per non-empty SAM3 raw
+  mask without same-class grouping.
+- Overlapping same-class raw masks remain separate records.
+- Each record stores stable global `segmentation_index`/`object_id` ordering and
+  an `original_modal_bbox` snapshot calculated from its own normalized modal
+  mask.
+- `original_modal_bbox` remains available independently if a later stage
+  changes the working `bbox`.
+- Production orchestration calls the explicit raw-object extractor, while a
+  temporary `extract_objects` alias keeps the partial notebook compatible until
+  its scheduled parity step.
+- Focused tests prove raw ordering, labels, mask normalization, individual
+  bboxes, absence of grouping, and orchestration-boundary use.
+
+During Step 23 verification, the recently added completion logger was also
+corrected to use the existing `display_label` contract rather than the
+nonexistent `label` attribute. Its existing validation tests cover the fix.
+
+### 3.20 Raw cross-class candidate completion
+
+Step 24 establishes completion before reconstruction-model selection:
+
+- `link_overlap_partners()` detects positive-area cross-class overlaps from
+  each raw object's immutable `original_modal_bbox` and stores partner IDs in
+  deterministic raw-object order.
+- `get_completion_candidates()` continues to batch every participating raw
+  object once, even when it belongs to several potential pairs.
+- Both `process_masks()` and `process_image()` now link and complete candidates
+  regardless of whether an object-reconstruction model is configured.
+- Empty candidate sets still bypass completion-model resolution, so DIFT and
+  SDAmodal are not loaded when no cross-class bbox overlap exists.
+- Existing completion validation, disconnected-component filtering, and
+  per-object modal fallback remain the completion boundary.
+- Only the later hidden-RGB reconstruction call checks
+  `has_object_reconstruction_model()`; LaMa and SDXL remain background-only.
+
+### 3.21 Validated-amodal pair filtering
+
+Step 25 adds the explicit pair gate before depth ordering:
+
+- `filter_pairs_by_amodal_overlap()` preserves potential bbox-pair order and
+  returns a separate retained-pair list only when both validated/fallback
+  amodal masks share at least one positive pixel.
+- Rejected pairs log both object IDs and explicitly skip depth ordering and
+  reconstruction for that relationship.
+- Potential `overlap_partner_ids` and each object's validated completion result
+  remain unchanged, including when an object participates in both retained and
+  rejected pairs.
+- Modal-fallback pairs with no pixel intersection and disconnected completion
+  artifacts are rejected safely.
+- `process_image()` passes only retained pairs into effective-area comparison,
+  role assignment, occluder aggregation, and reconstruction-mask creation.
+
+### 3.22 Individual raw-object depth and reconstruction masks
+
+Step 26 consolidates the individual-object depth stage behind
+`prepare_raw_reconstruction_masks()`:
+
+- Raw completion-hole areas remain unchanged while noise-filtered effective
+  areas are stored independently on each raw object.
+- Only Step 25 retained pairs enter pairwise depth decisions, preserving the
+  configured noise floor, tie tolerance, ambiguous ties, and independent
+  mixed roles without constructing a global depth order.
+- Decisive relationships aggregate unique occluder IDs on the occluded raw
+  object.
+- One pass builds at most one hard boolean reconstruction mask per raw object
+  from its completion hole and the spatially relevant modal pixels of all
+  assigned occluders.
+- The orchestrator now calls this explicit raw-object boundary instead of
+  assembling effective areas, decisions, and masks piecemeal.
 
 ## 4. Important Gaps in the Current Implementation
 
@@ -409,36 +473,25 @@ finished:
 
 ### 4.1 Raw-object extraction and identity gaps
 
-- SAM3 output is still grouped inside `extract_objects()` before raw object
-  records exist.
-- There is no dedicated raw-object contract that preserves segmentation order,
-  immutable original modal bbox, individual completion/depth state, and member
-  provenance through later grouping.
+- Raw extraction now preserves segmentation order and immutable original modal
+  bboxes, but raw and final grouped objects still share one transitional
+  `DetectedObject` type; final-group provenance fields do not exist yet.
+- The final same-class grouping entry point is intentionally absent until Step
+  29; only the unused transitional helper remains.
 - The public/process-mask path has not been redefined for final grouped-object
   output under the revised ordering.
 
 ### 4.2 Completion and cross-class pair gaps
 
-- Potential cross-class pairs are still discovered after same-class grouping,
-  not from individual raw modal bboxes.
-- Completion is still coupled to `has_object_reconstruction_model()` in the
-  orchestrator. The revised flow requires completion/validation reasoning to
-  be independent of whether the later RGB model is configured.
-- There is no explicit positive-pixel overlap gate between both validated
-  amodal masks of a candidate cross-class pair.
-- Non-overlapping completed pairs can currently reach depth decisions because
-  `build_reconstruction_masks()` does not implement that pair-level check.
+- Potential and retained pairs are separate transient lists, but they are not
+  yet exposed in a dedicated diagnostics/result record.
 
 ### 4.3 Individual depth and reconstruction gaps
 
-- Completion-hole areas, pair roles, assigned occluders, and reconstruction
-  masks are not yet guaranteed to remain individual raw-object state.
 - A concrete object-reconstruction model adapter has not been selected or
   added. LaMa and SDXL must remain background-only.
 - Reconstruction-output validation and per-object modal/original-RGB fallback
   are incomplete.
-- The system does not yet prove that every raw object aggregates all assigned
-  occluders and receives at most one reconstruction call.
 
 ### 4.4 Post-reconstruction grouping and compositing gaps
 
@@ -486,10 +539,9 @@ Each step below should remain a separate review checkpoint: present the small
 plan, obtain approval, implement with tests, and wait for verification before
 continuing.
 
-Steps 19-21 are completed historical checkpoints. Step 22 is implemented and
+Steps 19-25 are completed historical checkpoints. Step 26 is implemented and
 tested in the current working tree but still requires the user's checkpoint
-verification. The next new-work checkpoint for the revised workflow is Step
-23; implementing Step 23 must not implicitly implement Step 24 or later.
+verification; Step 27 must not begin until that verification is received.
 
 ### Step 19: Reconstruct hidden RGB — Completed
 
@@ -534,7 +586,7 @@ enter the user-visible matting and layer-output path.
 - Mark equal or near-equal pairs ambiguous.
 - Keep raw areas available for diagnostics.
 
-### Step 22: Separate object reconstruction from background inpainting — Implemented, pending user verification
+### Step 22: Separate object reconstruction from background inpainting — Completed
 
 - Replace the single generic inpainting dependency with two explicit model
   categories and two explicit manager APIs:
@@ -563,7 +615,7 @@ enter the user-visible matting and layer-output path.
 - Update configuration, registry/manager wiring, orchestrator wiring, notebook
   examples, and deterministic tests to prove the two model paths stay isolated.
 
-### Step 23: Extract immutable raw SAM objects — Next
+### Step 23: Extract immutable raw SAM objects — Completed
 
 - Split `pipeline/segmentation.py` into raw mask extraction/normalization and a
   separate grouping entry point; do not call `_merge_overlapping_masks()` while
@@ -581,7 +633,7 @@ enter the user-visible matting and layer-output path.
 
 Stop after Step 23 and obtain user verification before continuing.
 
-### Step 24: Complete raw cross-class bbox candidates
+### Step 24: Complete raw cross-class bbox candidates — Completed
 
 - Run cross-class positive-area bbox-overlap detection on the Step 23 raw
   records. Same-class pairs remain excluded and edge/corner contact remains a
@@ -602,7 +654,7 @@ Stop after Step 23 and obtain user verification before continuing.
 
 Stop after Step 24 and obtain user verification before continuing.
 
-### Step 25: Filter pairs by validated amodal overlap
+### Step 25: Filter pairs by validated amodal overlap — Completed
 
 - After both members have validated/fallback amodal masks, calculate:
 
@@ -627,7 +679,7 @@ Stop after Step 24 and obtain user verification before continuing.
 
 Stop after Step 25 and obtain user verification before continuing.
 
-### Step 26: Decide individual depth and build raw reconstruction masks
+### Step 26: Decide individual depth and build raw reconstruction masks — Implemented, pending user verification
 
 - Calculate completion holes and raw/effective hole areas independently on
   every raw object, never on grouped unions.
@@ -969,7 +1021,7 @@ C:\Users\admin\anaconda3\envs\layer\python.exe -m pytest -q
 Most recent verified result before this documentation update:
 
 ```text
-109 passed with the 1 known stale checkpoint-path expectation deselected
+115 passed with the 1 known stale checkpoint-path expectation deselected
 ```
 
 The remaining failure reflects a stale local expected checkpoint path. The

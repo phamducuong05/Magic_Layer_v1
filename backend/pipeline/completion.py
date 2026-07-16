@@ -31,7 +31,7 @@ def link_overlap_partners(
             ObjectBounds(
                 object_id=detected.object_id,
                 semantic_class=detected.semantic_class,
-                bbox=detected.bbox,
+                bbox=detected.original_modal_bbox,
             )
             for detected in objects
         ]
@@ -49,6 +49,36 @@ def get_completion_candidates(
 ) -> list[DetectedObject]:
     """Return overlapping objects once each, preserving object order."""
     return [detected for detected in objects if detected.overlap_partner_ids]
+
+
+def filter_pairs_by_amodal_overlap(
+    objects: Sequence[DetectedObject],
+    pairs: Sequence[OverlapPair],
+) -> list[OverlapPair]:
+    """Keep pairs whose two validated amodal masks overlap by at least a pixel."""
+    objects_by_id = {detected.object_id: detected for detected in objects}
+    retained: list[OverlapPair] = []
+
+    for first_id, second_id in pairs:
+        first_amodal = objects_by_id[first_id].amodal_mask
+        second_amodal = objects_by_id[second_id].amodal_mask
+        overlaps = (
+            first_amodal is not None
+            and second_amodal is not None
+            and np.any((first_amodal > 0) & (second_amodal > 0))
+        )
+        if overlaps:
+            retained.append((first_id, second_id))
+            continue
+
+        logger.info(
+            "Validated amodal masks for %s and %s do not overlap; "
+            "skipping depth ordering and reconstruction for this pair.",
+            first_id,
+            second_id,
+        )
+
+    return retained
 
 
 def _store_modal_fallback(detected: DetectedObject) -> None:
@@ -77,7 +107,7 @@ def _validated_amodal_mask(
     max_bbox_growth_ratio: float,
 ) -> np.ndarray | None:
     """Return a canonical mask when one model output passes all limits."""
-    label = detected.label
+    label = detected.display_label
     if not isinstance(output, np.ndarray):
         logger.warning(
             "[%s] Amodal output rejected: not a numpy array (got %s)",

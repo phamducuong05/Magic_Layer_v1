@@ -8,21 +8,20 @@ from PIL import Image
 
 from ..config import config
 from ..core.helpers import _calc_kernel_size, _image_to_base64
-from ..core.occlusion import assign_pair_roles, effective_hole_area
 from .background import generate_final_background
 from .completion import (
     complete_objects,
+    filter_pairs_by_amodal_overlap,
     get_completion_candidates,
     link_overlap_partners,
 )
 from .layers import extract_object_layers
 from .matting import refine_objects
 from .reconstruction import (
-    apply_pair_decisions,
-    build_reconstruction_masks,
+    prepare_raw_reconstruction_masks,
     reconstruct_objects,
 )
-from .segmentation import extract_objects
+from .segmentation import extract_raw_objects
 from .types import ProcessResult
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,7 @@ def _segment(
     image: Image.Image, keywords: Sequence[str], manager: Any
 ):
     processor = manager.get_segmentation_model().get_processor()
-    return extract_objects(image, keywords, processor)
+    return extract_raw_objects(image, keywords, processor)
 
 
 def _complete_candidates(
@@ -63,31 +62,6 @@ def _complete_candidates(
         )
 
 
-def _effective_hole_areas(
-    objects: Sequence,
-    *,
-    minimum_pixels: int,
-    minimum_modal_ratio: float,
-) -> dict[str, int]:
-    """Attach noise-filtered areas while retaining raw completion diagnostics."""
-    areas: dict[str, int] = {}
-    for detected in objects:
-        raw_area = detected.completion_hole_area
-        if raw_area is None:
-            continue
-
-        effective_area = effective_hole_area(
-            raw_area,
-            int(np.count_nonzero(detected.modal_mask)),
-            minimum_pixels=minimum_pixels,
-            minimum_modal_ratio=minimum_modal_ratio,
-        )
-        detected.effective_completion_hole_area = effective_area
-        areas[detected.object_id] = effective_area
-
-    return areas
-
-
 def process_masks(
     image: Image.Image,
     keywords: Sequence[str],
@@ -99,9 +73,6 @@ def process_masks(
     objects = _segment(image, keywords, manager)
     if not objects:
         return []
-
-    if not manager.has_object_reconstruction_model():
-        return [detected.modal_mask for detected in objects]
 
     link_overlap_partners(objects)
     _complete_candidates(image, objects, manager)
@@ -136,34 +107,33 @@ def process_image(
         )
 
     kernel_size = _calc_kernel_size(image_np, 0.0075)
-    if manager.has_object_reconstruction_model():
-        overlap_pairs = link_overlap_partners(objects)
-        _complete_candidates(image, objects, manager)
+    potential_overlap_pairs = link_overlap_partners(objects)
+    _complete_candidates(image, objects, manager)
+    overlap_pairs = filter_pairs_by_amodal_overlap(
+        objects, potential_overlap_pairs
+    )
+    if overlap_pairs:
         completion_config = config.get_pipeline_config("completion")
-        effective_hole_areas = _effective_hole_areas(
+        prepare_raw_reconstruction_masks(
             objects,
-            minimum_pixels=int(
+            overlap_pairs,
+            kernel_size,
+            minimum_hole_area_pixels=int(
                 completion_config["minimum_hole_area_pixels"]
             ),
-            minimum_modal_ratio=float(
+            minimum_hole_area_ratio=float(
                 completion_config["minimum_hole_area_ratio"]
             ),
-        )
-        pair_decisions = assign_pair_roles(
-            overlap_pairs,
-            effective_hole_areas,
             tie_tolerance_ratio=float(
                 completion_config["tie_tolerance_ratio"]
             ),
         )
-        apply_pair_decisions(objects, pair_decisions)
-        build_reconstruction_masks(objects, kernel_size)
 
         if any(
             detected.reconstruction_mask is not None
             and np.any(detected.reconstruction_mask)
             for detected in objects
-        ):
+        ) and manager.has_object_reconstruction_model():
             reconstruction_model = (
                 manager.get_object_reconstruction_model()
             )

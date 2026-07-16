@@ -6,7 +6,12 @@ import numpy as np
 from PIL import Image
 
 from ..core.layerd_refine import expand_mask
-from ..core.occlusion import PairDecision
+from ..core.occlusion import (
+    OverlapPair,
+    PairDecision,
+    assign_pair_roles,
+    effective_hole_area,
+)
 from .roi import crop_array, crop_image, square_roi_from_support
 from .types import DetectedObject
 
@@ -56,6 +61,41 @@ def build_reconstruction_masks(
         detected.reconstruction_mask = (
             detected.completion_hole_mask | relevant_occluder
         )
+
+
+def prepare_raw_reconstruction_masks(
+    objects: Sequence[DetectedObject],
+    retained_pairs: Sequence[OverlapPair],
+    kernel_size: tuple[int, int],
+    *,
+    minimum_hole_area_pixels: int,
+    minimum_hole_area_ratio: float,
+    tie_tolerance_ratio: float,
+) -> list[PairDecision]:
+    """Decide pairwise depth and build one reconstruction mask per raw object."""
+    effective_areas: dict[str, int] = {}
+    for detected in objects:
+        raw_area = detected.completion_hole_area
+        if raw_area is None:
+            continue
+
+        effective_area = effective_hole_area(
+            raw_area,
+            int(np.count_nonzero(detected.modal_mask)),
+            minimum_pixels=minimum_hole_area_pixels,
+            minimum_modal_ratio=minimum_hole_area_ratio,
+        )
+        detected.effective_completion_hole_area = effective_area
+        effective_areas[detected.object_id] = effective_area
+
+    decisions = assign_pair_roles(
+        retained_pairs,
+        effective_areas,
+        tie_tolerance_ratio=tie_tolerance_ratio,
+    )
+    apply_pair_decisions(objects, decisions)
+    build_reconstruction_masks(objects, kernel_size)
+    return decisions
 
 
 def reconstruct_objects(
