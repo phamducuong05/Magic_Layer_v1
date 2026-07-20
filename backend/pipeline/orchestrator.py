@@ -16,7 +16,7 @@ from .completion import (
     link_overlap_partners,
 )
 from .layers import extract_object_layers
-from .grouping import group_reconstructed_objects
+from .grouping import compose_group_sources, group_reconstructed_objects
 from .matting import refine_objects
 from .reconstruction import (
     prepare_raw_reconstruction_masks,
@@ -155,6 +155,7 @@ def process_image(
                 )
 
     final_groups = group_reconstructed_objects(objects)
+    compose_group_sources(image, final_groups)
 
     matte = manager.get_matting_model().process
     refine_objects(image_np, final_groups, matte)

@@ -3,6 +3,7 @@ from unittest.mock import Mock
 import numpy as np
 from PIL import Image
 
+from backend.pipeline.roi import SquareROI
 from backend.pipeline.types import DetectedObject
 
 
@@ -121,6 +122,83 @@ def test_grouped_amodal_union_uses_modal_fallback_per_member():
     assert group.members[1].reconstruction_failure_stage == "generation_512"
 
 
+def test_group_rgb_composition_maps_rois_and_applies_conflict_priority():
+    from backend.pipeline.grouping import (
+        compose_group_sources,
+        group_reconstructed_objects,
+    )
+
+    image = Image.new("RGB", (6, 6), (10, 20, 30))
+    first = _detected(
+        "first",
+        "person",
+        (0, 0, 4, 4),
+        segmentation_index=0,
+        shape=(6, 6),
+    )
+    second = _detected(
+        "second",
+        "person",
+        (2, 0, 4, 4),
+        segmentation_index=1,
+        shape=(6, 6),
+    )
+    first.reconstruction_roi = SquareROI(0, 0, 4, 6, 6)
+    first.reconstruction_canvas = Image.new("RGB", (4, 4), "red")
+    first.reconstruction_mask = np.zeros((6, 6), dtype=bool)
+    first.reconstruction_mask[0, 2] = True  # Protected by second's modal mask.
+    first.reconstruction_mask[1, 2] = True  # Wins reconstruction overlap.
+    second.reconstruction_roi = SquareROI(2, 0, 4, 6, 6)
+    second.reconstruction_canvas = Image.new("RGB", (4, 4), "blue")
+    second.reconstruction_mask = np.zeros((6, 6), dtype=bool)
+    second.reconstruction_mask[1, 2] = True
+    second.reconstruction_mask[1, 4] = True
+    group = group_reconstructed_objects([second, first])[0]
+
+    compose_group_sources(image, [group])
+
+    assert group.composed_source is not None
+    assert group.composed_roi is not None
+
+    def pixel(x, y):
+        return group.composed_source.getpixel(
+            (x - group.composed_roi.x, y - group.composed_roi.y)
+        )
+
+    assert pixel(2, 0) == (10, 20, 30)  # Original modal RGB wins.
+    assert pixel(2, 1) == (255, 0, 0)  # First reconstruction wins.
+    assert pixel(4, 1) == (0, 0, 255)  # Later non-conflicting RGB is used.
+    assert pixel(1, 1) == (10, 20, 30)  # Untouched source is preserved.
+
+
+def test_group_rgb_composition_initializes_fallback_group_from_original():
+    from backend.pipeline.grouping import (
+        compose_group_sources,
+        group_reconstructed_objects,
+    )
+
+    image_array = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
+    image = Image.fromarray(image_array, mode="RGB")
+    detected = _detected(
+        "ordinary",
+        "chair",
+        (2, 1, 3, 3),
+        segmentation_index=0,
+        shape=(6, 8),
+    )
+    group = group_reconstructed_objects([detected])[0]
+
+    compose_group_sources(image, [group])
+
+    assert group.has_reconstruction is False
+    assert group.composed_source is not None
+    assert group.composed_roi is not None
+    assert np.array_equal(
+        np.asarray(group.composed_source),
+        np.asarray(image.crop(group.composed_roi.box)),
+    )
+
+
 def test_orchestrator_groups_after_reconstruction_before_downstream(
     monkeypatch,
 ):
@@ -174,6 +252,17 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         raising=False,
     )
 
+    def compose(_image, supplied):
+        assert supplied == final_groups
+        events.append("compose")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "compose_group_sources",
+        Mock(side_effect=compose),
+        raising=False,
+    )
+
     def matte(_image, supplied, _matte):
         assert supplied == final_groups
         events.append("matte")
@@ -205,4 +294,4 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         Image.new("RGB", (10, 8)), ["person", "chair"], manager=manager
     )
 
-    assert events == ["reconstruct", "group", "matte", "layers"]
+    assert events == ["reconstruct", "group", "compose", "matte", "layers"]

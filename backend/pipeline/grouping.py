@@ -3,8 +3,10 @@
 from collections.abc import Sequence
 
 import numpy as np
+from PIL import Image
 
 from ..core.helpers import _bbox_from_mask
+from .roi import crop_image, square_roi_from_support
 from .types import DetectedObject, GroupedObject
 
 
@@ -104,3 +106,118 @@ def group_reconstructed_objects(
             )
         )
     return groups
+
+
+def compose_group_sources(
+    image: Image.Image, groups: Sequence[GroupedObject]
+) -> None:
+    """Attach one conflict-resolved RGB source crop to every final group."""
+    source = image.convert("RGB")
+    source_width, source_height = source.size
+
+    for group in groups:
+        roi = square_roi_from_support(
+            group.amodal_mask > 0,
+            context_ratio=0.0,
+        )
+        if roi.image_size != source.size:
+            raise ValueError(
+                "group masks must match the source image dimensions"
+            )
+
+        composed = np.asarray(crop_image(source, roi), dtype=np.uint8).copy()
+        protected_modal = np.zeros((roi.size, roi.size), dtype=bool)
+        filled_reconstruction = np.zeros_like(protected_modal)
+
+        group_left, group_top, group_right, group_bottom = roi.box
+        clipped_left, clipped_top, clipped_right, clipped_bottom = (
+            roi.clipped_box
+        )
+        protected_modal[
+            clipped_top - group_top : clipped_bottom - group_top,
+            clipped_left - group_left : clipped_right - group_left,
+        ] = (
+            group.modal_mask[
+                clipped_top:clipped_bottom,
+                clipped_left:clipped_right,
+            ]
+            > 0
+        )
+
+        for member in group.members:
+            canvas = member.reconstruction_canvas
+            member_roi = member.reconstruction_roi
+            reconstruction_mask = member.reconstruction_mask
+            if canvas is None and member_roi is None:
+                continue
+            if (
+                canvas is None
+                or member_roi is None
+                or reconstruction_mask is None
+            ):
+                raise ValueError(
+                    f"incomplete reconstruction record for {member.object_id}"
+                )
+            if member_roi.image_size != source.size:
+                raise ValueError(
+                    f"reconstruction ROI for {member.object_id} does not "
+                    "match the source image"
+                )
+            if canvas.size != (member_roi.size, member_roi.size):
+                raise ValueError(
+                    f"reconstruction canvas for {member.object_id} does not "
+                    "match its ROI"
+                )
+            if reconstruction_mask.shape != (source_height, source_width):
+                raise ValueError(
+                    f"reconstruction mask for {member.object_id} does not "
+                    "match the source image"
+                )
+
+            member_left, member_top, member_right, member_bottom = (
+                member_roi.box
+            )
+            overlap_left = max(0, group_left, member_left)
+            overlap_top = max(0, group_top, member_top)
+            overlap_right = min(source_width, group_right, member_right)
+            overlap_bottom = min(source_height, group_bottom, member_bottom)
+            if (
+                overlap_left >= overlap_right
+                or overlap_top >= overlap_bottom
+            ):
+                continue
+
+            destination_y = slice(
+                overlap_top - group_top,
+                overlap_bottom - group_top,
+            )
+            destination_x = slice(
+                overlap_left - group_left,
+                overlap_right - group_left,
+            )
+            canvas_y = slice(
+                overlap_top - member_top,
+                overlap_bottom - member_top,
+            )
+            canvas_x = slice(
+                overlap_left - member_left,
+                overlap_right - member_left,
+            )
+            permitted = reconstruction_mask[
+                overlap_top:overlap_bottom,
+                overlap_left:overlap_right,
+            ].astype(bool)
+            writable = (
+                permitted
+                & ~protected_modal[destination_y, destination_x]
+                & ~filled_reconstruction[destination_y, destination_x]
+            )
+            destination = composed[destination_y, destination_x]
+            candidate = np.asarray(canvas.convert("RGB"), dtype=np.uint8)[
+                canvas_y, canvas_x
+            ]
+            destination[writable] = candidate[writable]
+            filled_reconstruction[destination_y, destination_x] |= writable
+
+        group.composed_source = Image.fromarray(composed, mode="RGB")
+        group.composed_roi = roi

@@ -74,6 +74,8 @@ class GroupedObject:
     amodal_mask: np.ndarray
     bbox: tuple[int, int, int, int]
     segmentation_index: int
+    composed_source: Optional[Image.Image] = None
+    composed_roi: Optional[SquareROI] = None
     soft_alpha: Optional[np.ndarray] = None
 
     @property
