@@ -29,7 +29,7 @@ class ProcessResult:
 
 @dataclass
 class DetectedObject:
-    """One raw or grouped object in full-image coordinates."""
+    """One raw segmentation object in full-image coordinates."""
 
     object_id: str
     semantic_class: str
@@ -47,6 +47,8 @@ class DetectedObject:
     reconstruction_mask: Optional[np.ndarray] = None
     reconstruction_canvas: Optional[Image.Image] = None
     reconstruction_roi: Optional[SquareROI] = None
+    reconstruction_failure_stage: Optional[str] = None
+    reconstruction_failure_reason: Optional[str] = None
     soft_alpha: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
@@ -57,3 +59,31 @@ class DetectedObject:
     def original_modal_bbox(self) -> tuple[int, int, int, int]:
         """Return the tight bbox captured from the original raw modal mask."""
         return self._original_modal_bbox
+
+
+@dataclass
+class GroupedObject:
+    """One final draggable group with ordered raw-member provenance."""
+
+    group_id: str
+    semantic_class: str
+    display_label: str
+    member_ids: tuple[str, ...]
+    members: tuple[DetectedObject, ...]
+    modal_mask: np.ndarray
+    amodal_mask: np.ndarray
+    bbox: tuple[int, int, int, int]
+    segmentation_index: int
+    soft_alpha: Optional[np.ndarray] = None
+
+    @property
+    def object_id(self) -> str:
+        """Expose a common identity attribute for downstream diagnostics."""
+        return self.group_id
+
+    @property
+    def has_reconstruction(self) -> bool:
+        """Report whether any member retained accepted reconstructed RGB."""
+        return any(
+            member.reconstruction_canvas is not None for member in self.members
+        )

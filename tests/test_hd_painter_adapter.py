@@ -1,3 +1,5 @@
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -93,6 +95,38 @@ def test_registration_is_lightweight_and_object_reconstruction_only():
         ModelRegistry.get_class("background_inpainting", "hd_painter")
 
 
+def test_model_package_import_does_not_require_unused_segment_anything(tmp_path):
+    project_root = Path(__file__).resolve().parents[1]
+    script = f"""
+import importlib.abc
+import sys
+import types
+
+class BlockSegmentAnything(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] == 'segment_anything':
+            raise ModuleNotFoundError(fullname)
+        return None
+
+sys.meta_path.insert(0, BlockSegmentAnything())
+models_package = types.ModuleType("backend.models")
+models_package.__path__ = [r"{MODELS_PATH}"]
+sys.modules["backend.models"] = models_package
+import backend.models.object_reconstruction.hd_painter.src.models
+assert 'backend.models.object_reconstruction.hd_painter.src.models.sam' not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(project_root)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_empty_mask_returns_rgb_without_running_inference(monkeypatch):
     runtime, calls, reset_calls = make_runtime()
     model = build_adapter(monkeypatch, runtime=runtime)
@@ -185,6 +219,40 @@ def test_optional_super_resolution_uses_original_crop_and_mask(monkeypatch):
     assert sr_kwargs["hr_mask"].pil().mode == "RGB"
     assert result.size == image.size
     assert result.getpixel((0, 0)) == (70, 80, 90)
+
+
+@pytest.mark.parametrize(
+    ("failing_call", "expected_stage"),
+    [
+        ("rasg_run", "generation_512"),
+        ("run_sr", "super_resolution"),
+    ],
+)
+def test_inference_errors_report_the_failed_hd_painter_stage(
+    monkeypatch, failing_call, expected_stage
+):
+    from backend.models.object_reconstruction import adapter as module
+
+    runtime, _, reset_calls = make_runtime()
+
+    def fail(**_kwargs):
+        raise RuntimeError("synthetic stage failure")
+
+    if failing_call == "rasg_run":
+        runtime.rasg_run = fail
+        config = {"super_resolution": {"enabled": False}}
+    else:
+        runtime.sr_run = fail
+        config = {"super_resolution": {"enabled": True}}
+    model = build_adapter(monkeypatch, config=config, runtime=runtime)
+    mask = Image.new("L", (32, 32), 255)
+
+    with pytest.raises(module.ObjectReconstructionError) as error:
+        model.reconstruct(Image.new("RGB", (32, 32)), mask, "object")
+
+    assert error.value.stage == expected_stage
+    assert "synthetic stage failure" in str(error.value)
+    assert reset_calls == [True]
 
 
 @pytest.mark.parametrize(

@@ -784,13 +784,23 @@ def test_reconstruct_objects_inpaints_only_nonempty_masks(rgb_image):
     ordinary = _detected_object("ordinary", "table", (0, 4, 4, 4))
     hidden.reconstruction_mask = np.zeros((6, 8), dtype=bool)
     hidden.reconstruction_mask[2:4, 3:5] = True
+    hidden.modal_mask = np.zeros((6, 8), dtype=np.uint8)
+    hidden.modal_mask[1:5, 2:3] = 255
     hidden.amodal_mask = np.zeros((6, 8), dtype=bool)
     hidden.amodal_mask[1:5, 2:6] = True
+    hidden.completion_hole_mask = hidden.reconstruction_mask.copy()
+    hidden.completion_hole_area = int(
+        np.count_nonzero(hidden.completion_hole_mask)
+    )
     empty.reconstruction_mask = np.zeros((6, 8), dtype=bool)
     empty.amodal_mask = empty.reconstruction_mask.copy()
 
-    reconstructed = Image.new("RGBA", (2, 2), (10, 20, 30, 255))
-    inpaint = Mock(return_value=reconstructed)
+    def reconstruct(source, mask, _prompt):
+        reconstructed = np.asarray(source.convert("RGB")).copy()
+        reconstructed[np.asarray(mask) > 0] = (10, 20, 30)
+        return Image.fromarray(reconstructed, mode="RGB")
+
+    inpaint = Mock(side_effect=reconstruct)
 
     reconstruction_stage.reconstruct_objects(
         rgb_image,
@@ -824,7 +834,8 @@ def test_object_reconstruction_context_ratio_is_configured():
     from backend.config import config
 
     assert config.get_pipeline_config("object_reconstruction") == {
-        "context_ratio": 0.25
+        "context_ratio": 0.25,
+        "blend_allowance_ratio": 0.012,
     }
 
 

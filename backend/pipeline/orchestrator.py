@@ -16,6 +16,7 @@ from .completion import (
     link_overlap_partners,
 )
 from .layers import extract_object_layers
+from .grouping import group_reconstructed_objects
 from .matting import refine_objects
 from .reconstruction import (
     prepare_raw_reconstruction_masks,
@@ -148,19 +149,24 @@ def process_image(
                     context_ratio=float(
                         reconstruction_config["context_ratio"]
                     ),
+                    blend_allowance_ratio=float(
+                        reconstruction_config["blend_allowance_ratio"]
+                    ),
                 )
 
+    final_groups = group_reconstructed_objects(objects)
+
     matte = manager.get_matting_model().process
-    refine_objects(image_np, objects, matte)
+    refine_objects(image_np, final_groups, matte)
 
     background_inpaint = (
         manager.get_background_inpainting_model().process
     )
     layers = extract_object_layers(
-        image, image_np, objects, kernel_size, background_inpaint
+        image, image_np, final_groups, kernel_size, background_inpaint
     )
     background = generate_final_background(
-        image, objects, kernel_size, background_inpaint
+        image, final_groups, kernel_size, background_inpaint
     )
 
     return ProcessResult(

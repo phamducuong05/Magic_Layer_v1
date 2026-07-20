@@ -1,2 +1,6 @@
-from . import sd2_sr, sam
-from .inpainting import load_inpainting_model, pre_download_inpainting_models
+"""HD-Painter model modules.
+
+Keep this package initializer lightweight. The application adapter imports
+inpainting, super-resolution, and optional SAM modules only when required by
+the selected runtime configuration.
+"""

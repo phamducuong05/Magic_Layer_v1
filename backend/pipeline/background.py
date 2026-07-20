@@ -8,7 +8,7 @@ from PIL import Image
 from ..core.layerd_refine import expand_mask, refine_background
 from .layers import BG_REFINE_NUM_COLORS, BG_REFINE_OUTER_RATIO
 from .matting import THRESHOLD_ALPHA
-from .types import DetectedObject
+from .types import DetectedObject, GroupedObject
 
 
 def generate_background_from_masks(
@@ -41,7 +41,7 @@ def generate_background_from_masks(
 
 def generate_final_background(
     image: Image.Image,
-    objects: Sequence[DetectedObject],
+    objects: Sequence[DetectedObject | GroupedObject],
     kernel_size: tuple[int, int],
     background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> Image.Image:

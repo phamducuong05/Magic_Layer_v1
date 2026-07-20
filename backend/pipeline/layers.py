@@ -10,7 +10,7 @@ from ..core.helpers import _bbox_from_mask, _image_to_base64
 from ..core.layerd_refine import refine_background
 from ..core.refine import build_inpaint_mask, refine_alpha_with_colors
 from .matting import THRESHOLD_ALPHA
-from .types import DetectedObject, ObjectLayer
+from .types import DetectedObject, GroupedObject, ObjectLayer
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ def extract_layers(
 def extract_object_layers(
     image: Image.Image,
     image_np: np.ndarray,
-    objects: Sequence[DetectedObject],
+    objects: Sequence[DetectedObject | GroupedObject],
     kernel_size: tuple[int, int],
     background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> list[ObjectLayer]:

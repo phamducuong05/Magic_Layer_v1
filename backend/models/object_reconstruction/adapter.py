@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 class ObjectReconstructionError(RuntimeError):
     """Raised when HD-Painter cannot produce an application-valid crop."""
 
+    def __init__(self, message: str, *, stage: str = "inference"):
+        super().__init__(message)
+        self.stage = stage
+
 
 @dataclass(frozen=True)
 class _Runtime:
@@ -289,6 +293,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
         ).convert("RGB")
 
         with self._inference_lock:
+            active_stage = "generation_512"
             try:
                 runner = (
                     self._runtime.rasg_run
@@ -312,6 +317,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
 
                 sr = self._settings["super_resolution"]
                 if sr["enabled"]:
+                    active_stage = "super_resolution"
                     if self._runtime.sr_run is None or self._sr_model is None:
                         raise ObjectReconstructionError(
                             "HD-Painter super-resolution was enabled but not loaded."
@@ -341,18 +347,29 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                             use_sam_mask=False,
                         )
                     )
-            except ObjectReconstructionError:
-                raise
+            except ObjectReconstructionError as exc:
+                if exc.stage != "inference":
+                    raise
+                raise ObjectReconstructionError(
+                    str(exc), stage=active_stage
+                ) from exc
             except Exception as exc:
                 raise ObjectReconstructionError(
-                    f"HD-Painter inference failed: {exc}"
+                    f"HD-Painter {active_stage} failed: {exc}",
+                    stage=active_stage,
                 ) from exc
             finally:
                 self._runtime.reset_state()
 
-        return result.convert("RGB").resize(
-            original_size, Image.Resampling.LANCZOS
-        )
+        try:
+            return result.convert("RGB").resize(
+                original_size, Image.Resampling.LANCZOS
+            )
+        except Exception as exc:
+            raise ObjectReconstructionError(
+                f"HD-Painter crop-size restoration failed: {exc}",
+                stage="crop_size_restoration",
+            ) from exc
 
     @staticmethod
     def _to_single_pil(value: Any) -> Image.Image:

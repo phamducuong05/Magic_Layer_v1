@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 
 from ..core.helpers import _inference_context
-from .types import DetectedObject
+from .types import DetectedObject, GroupedObject
 
 THRESHOLD_ALPHA = 0.005
 
@@ -43,7 +43,7 @@ def refine_masks(
 
 def refine_objects(
     image_np: np.ndarray,
-    objects: Sequence[DetectedObject],
+    objects: Sequence[DetectedObject | GroupedObject],
     matte: Callable[[Image.Image], torch.Tensor],
 ) -> None:
     """Attach one modal soft alpha to each object in input order."""

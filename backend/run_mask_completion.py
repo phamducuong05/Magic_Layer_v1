@@ -1,7 +1,7 @@
 """Run and visualize raw SAM3 masks through validated amodal completion.
 
-This is a diagnostic command. Its same-class grouping output previews the
-planned post-reconstruction grouping policy without changing production state.
+This is a diagnostic command. Its same-class grouping visualization uses the
+same post-reconstruction grouping policy as the production pipeline.
 """
 
 import argparse
@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backend.pipeline.grouping import group_reconstructed_objects
+
 COLORS = [
     (239, 83, 80),
     (66, 165, 245),
@@ -36,7 +38,7 @@ COLORS = [
 
 @dataclass
 class DiagnosticGroup:
-    """One diagnostic-only same-class bbox group."""
+    """Visualization fields projected from one production final group."""
 
     semantic_class: str
     member_ids: list[str]
@@ -107,84 +109,17 @@ def _mask_image(mask: Any) -> Image.Image:
     return Image.fromarray(binary.astype(np.uint8) * 255, mode="L")
 
 
-def _bbox_overlap(
-    first: tuple[int, int, int, int],
-    second: tuple[int, int, int, int],
-) -> bool:
-    first_x, first_y, first_width, first_height = first
-    second_x, second_y, second_width, second_height = second
-    return (
-        max(first_x, second_x)
-        < min(first_x + first_width, second_x + second_width)
-        and max(first_y, second_y)
-        < min(first_y + first_height, second_y + second_height)
-    )
-
-
-def _union_bbox(
-    bboxes: Sequence[tuple[int, int, int, int]],
-) -> tuple[int, int, int, int]:
-    x0 = min(bbox[0] for bbox in bboxes)
-    y0 = min(bbox[1] for bbox in bboxes)
-    x1 = max(bbox[0] + bbox[2] for bbox in bboxes)
-    y1 = max(bbox[1] + bbox[3] for bbox in bboxes)
-    return x0, y0, x1 - x0, y1 - y0
-
-
 def build_diagnostic_groups(objects: Sequence[Any]) -> list[DiagnosticGroup]:
-    """Preview stable same-class groups using original bbox overlap only."""
-    parents = list(range(len(objects)))
-
-    def find(index: int) -> int:
-        while parents[index] != index:
-            parents[index] = parents[parents[index]]
-            index = parents[index]
-        return index
-
-    def union(first: int, second: int) -> None:
-        first_root = find(first)
-        second_root = find(second)
-        if first_root != second_root:
-            parents[second_root] = first_root
-
-    for first_index, first in enumerate(objects):
-        for second_index in range(first_index + 1, len(objects)):
-            second = objects[second_index]
-            if (
-                first.semantic_class == second.semantic_class
-                and _bbox_overlap(
-                    first.original_modal_bbox,
-                    second.original_modal_bbox,
-                )
-            ):
-                union(first_index, second_index)
-
-    grouped_indices: dict[int, list[int]] = {}
-    for index in range(len(objects)):
-        grouped_indices.setdefault(find(index), []).append(index)
-
-    groups: list[DiagnosticGroup] = []
-    for indices in grouped_indices.values():
-        members = [objects[index] for index in indices]
-        merged = np.zeros_like(members[0].modal_mask, dtype=bool)
-        for member in members:
-            source_mask = (
-                member.amodal_mask
-                if member.amodal_mask is not None
-                else member.modal_mask
-            )
-            merged |= np.asarray(source_mask) > 0
-        groups.append(
-            DiagnosticGroup(
-                semantic_class=members[0].semantic_class,
-                member_ids=[member.object_id for member in members],
-                mask=merged,
-                bbox=_union_bbox(
-                    [member.original_modal_bbox for member in members]
-                ),
-            )
+    """Project production final groups into visualization-only records."""
+    return [
+        DiagnosticGroup(
+            semantic_class=group.semantic_class,
+            member_ids=list(group.member_ids),
+            mask=group.amodal_mask,
+            bbox=group.bbox,
         )
-    return groups
+        for group in group_reconstructed_objects(objects)
+    ]
 
 
 def _overlay(
@@ -428,8 +363,8 @@ def save_workflow_visualizations(
 
     summary = {
         "note": (
-            "06_diagnostic_groups previews Step 29 bbox-only grouping; it does "
-            "not mutate or replace production pipeline grouping."
+            "06_diagnostic_groups visualizes the production Step 29 "
+            "same-class original-bbox grouping policy."
         ),
         "objects": [
             {

@@ -8,6 +8,8 @@ pipeline:
     tie_tolerance_ratio: 0.1
   object_reconstruction:
     context_ratio: 0.25
+    # HD-Painter Poisson blending dilates its mask by roughly 24/2048 pixels.
+    blend_allowance_ratio: 0.012
 models:
   matting:
     active: birefnet
