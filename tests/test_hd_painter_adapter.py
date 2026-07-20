@@ -244,10 +244,41 @@ def test_optional_super_resolution_uses_original_crop_and_mask(monkeypatch):
     sr_kwargs = next(kwargs for name, kwargs in calls if name == "run_sr")
     assert sr_kwargs["sam_predictor"] is None
     assert sr_kwargs["use_sam_mask"] is False
-    assert sr_kwargs["hr_image"].pil().size == image.size
-    assert sr_kwargs["hr_mask"].pil().mode == "RGB"
+    assert isinstance(sr_kwargs["lr_image"], Image.Image)
+    assert isinstance(sr_kwargs["hr_image"], Image.Image)
+    assert isinstance(sr_kwargs["hr_mask"], Image.Image)
+    assert sr_kwargs["hr_image"].size == image.size
+    assert sr_kwargs["hr_mask"].mode == "RGB"
     assert result.size == image.size
     assert result.getpixel((0, 0)) == (70, 80, 90)
+
+
+def test_super_resolution_receives_pil_images_with_source_metadata(monkeypatch):
+    """The bundled SR runner reads ``hr_image.info`` before wrapping inputs."""
+    runtime, calls, _ = make_runtime()
+
+    def run_sr(**kwargs):
+        # Match the input contract used by HD-Painter's methods/sr.py.
+        assert isinstance(kwargs["lr_image"], Image.Image)
+        assert isinstance(kwargs["hr_image"], Image.Image)
+        assert isinstance(kwargs["hr_mask"], Image.Image)
+        assert kwargs["hr_image"].info["test-metadata"] == "preserved"
+        calls.append(("run_sr", kwargs))
+        return Image.new("RGB", (2048, 2048), (70, 80, 90))
+
+    runtime.sr_run = run_sr
+    model = build_adapter(
+        monkeypatch,
+        config={"super_resolution": {"enabled": True}},
+        runtime=runtime,
+    )
+    image = Image.new("RGB", (45, 45), "blue")
+    image.info["test-metadata"] = "preserved"
+    mask = Image.new("L", image.size, 255)
+
+    result = model.reconstruct(image, mask, "hidden blue object")
+
+    assert result.size == image.size
 
 
 @pytest.mark.parametrize(

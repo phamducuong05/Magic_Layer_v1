@@ -386,11 +386,12 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                         self._runtime.sr_run(
                             ddim=self._sr_model,
                             sam_predictor=None,
-                            lr_image=self._runtime.IImage(result),
-                            hr_image=self._runtime.IImage(source),
-                            hr_mask=self._runtime.IImage(
-                                hard_mask.convert("RGB")
-                            ),
+                            # methods/sr.py expects PIL images here: it reads
+                            # hr_image.info before constructing its own IImage
+                            # wrappers for all three inputs.
+                            lr_image=result,
+                            hr_image=source,
+                            hr_mask=hard_mask.convert("RGB"),
                             prompt=sr_prompt,
                             noise_level=sr["noise_level"],
                             blend_output=sr["blend_output"],
