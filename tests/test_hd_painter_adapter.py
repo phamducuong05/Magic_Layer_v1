@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import subprocess
 import sys
@@ -10,6 +11,8 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
+import torch
+from torch import nn
 from PIL import Image
 
 
@@ -95,6 +98,73 @@ class FakeDDIM:
         self.unet = FakeModule(f"{name}.unet", moves)
         if super_resolution:
             self.low_scale_model = FakeModule(f"{name}.low_scale", moves)
+
+
+class FakeOpenCLIPBlock(nn.Module):
+    def __init__(self, *, batch_first):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=4,
+            num_heads=1,
+            batch_first=batch_first,
+        )
+
+    def forward(self, x, attn_mask=None):
+        return self.attn(x, x, x, attn_mask=attn_mask, need_weights=False)[0]
+
+
+class FakeOpenCLIPModel(nn.Module):
+    def __init__(self, *, batch_first):
+        super().__init__()
+        self.token_embedding = nn.Embedding(16, 4)
+        self.positional_embedding = nn.Parameter(torch.zeros(3, 4))
+        self.transformer = nn.Module()
+        self.transformer.resblocks = nn.ModuleList(
+            [FakeOpenCLIPBlock(batch_first=batch_first)]
+        )
+        self.transformer.grad_checkpointing = False
+        self.register_buffer("attn_mask", torch.zeros(3, 3))
+        self.ln_final = nn.Identity()
+
+
+def load_open_clip_embedder_module(monkeypatch):
+    """Load the vendored encoder without installing its optional dependency."""
+    monkeypatch.setitem(sys.modules, "open_clip", types.ModuleType("open_clip"))
+    module_path = (
+        MODELS_PATH
+        / "object_reconstruction"
+        / "hd_painter"
+        / "src"
+        / "smplfusion"
+        / "models"
+        / "encoders"
+        / "open_clip_embedder.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "test_open_clip_embedder_runtime", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("batch_first", [False, True])
+def test_open_clip_embedder_supports_both_attention_layouts(
+    monkeypatch, batch_first
+):
+    module = load_open_clip_embedder_module(monkeypatch)
+    embedder = module.FrozenOpenCLIPEmbedder.__new__(
+        module.FrozenOpenCLIPEmbedder
+    )
+    nn.Module.__init__(embedder)
+    embedder.model = FakeOpenCLIPModel(batch_first=batch_first)
+    embedder.layer_idx = 0
+    tokens = torch.tensor([[1, 2, 3], [4, 5, 6]])
+
+    encoded = embedder.encode_with_transformer(tokens)
+
+    assert encoded.shape == (2, 3, 4)
 
 
 def build_adapter(monkeypatch, config=None, runtime=None):

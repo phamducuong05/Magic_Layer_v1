@@ -36,9 +36,19 @@ class FrozenOpenCLIPEmbedder(nn.Module):
     def encode_with_transformer(self, text):
         x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
         x = x + self.model.positional_embedding
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        # OpenCLIP < 3 used sequence-first attention while newer releases use
+        # torch MultiheadAttention(batch_first=True). Keep the native layout
+        # expected by the installed version so the 77x77 causal mask always
+        # applies to the token dimension rather than the prompt batch.
+        first_block = self.model.transformer.resblocks[0]
+        batch_first = bool(
+            getattr(getattr(first_block, "attn", None), "batch_first", False)
+        )
+        if not batch_first:
+            x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        if not batch_first:
+            x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.model.ln_final(x)
         return x
 
