@@ -30,6 +30,9 @@ models:
       positive_prompt: "high quality, coherent object continuation"
       negative_prompt: "artifact, duplicate parts, malformed geometry, text, watermark"
       fp16: true
+      # Keep only the active HD-Painter stage on GPU. This preserves the
+      # 512px + 2048px quality path on 16GB cards at the cost of transfer time.
+      sequential_cpu_offload: true
       auto_download: true
       checkpoint_root: checkpoints
       super_resolution:

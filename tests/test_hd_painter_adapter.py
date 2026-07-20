@@ -6,6 +6,7 @@ import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -66,6 +67,34 @@ def make_runtime(*, result_color=(20, 40, 60)):
         reset_state=lambda: reset_calls.append(True),
     )
     return runtime, calls, reset_calls
+
+
+class FakeModule:
+    def __init__(self, name, moves):
+        self.name = name
+        self.device = "cpu"
+        self.moves = moves
+
+    def to(self, device=None, **_kwargs):
+        self.device = str(device)
+        self.moves.append((self.name, self.device))
+        return self
+
+    def requires_grad_(self, _enabled):
+        return self
+
+    def zero_grad(self, **_kwargs):
+        return None
+
+
+class FakeDDIM:
+    def __init__(self, name, moves, *, super_resolution=False):
+        self.name = name
+        self.vae = FakeModule(f"{name}.vae", moves)
+        self.encoder = FakeModule(f"{name}.encoder", moves)
+        self.unet = FakeModule(f"{name}.unet", moves)
+        if super_resolution:
+            self.low_scale_model = FakeModule(f"{name}.low_scale", moves)
 
 
 def build_adapter(monkeypatch, config=None, runtime=None):
@@ -222,14 +251,14 @@ def test_optional_super_resolution_uses_original_crop_and_mask(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("failing_call", "expected_stage"),
+    ("failing_call", "expected_stage", "expected_reset_count"),
     [
-        ("rasg_run", "generation_512"),
-        ("run_sr", "super_resolution"),
+        ("rasg_run", "generation_512", 1),
+        ("run_sr", "super_resolution", 2),
     ],
 )
 def test_inference_errors_report_the_failed_hd_painter_stage(
-    monkeypatch, failing_call, expected_stage
+    monkeypatch, failing_call, expected_stage, expected_reset_count
 ):
     from backend.models.object_reconstruction import adapter as module
 
@@ -252,7 +281,87 @@ def test_inference_errors_report_the_failed_hd_painter_stage(
 
     assert error.value.stage == expected_stage
     assert "synthetic stage failure" in str(error.value)
-    assert reset_calls == [True]
+    assert len(reset_calls) == expected_reset_count
+
+
+def test_sequential_cpu_offload_keeps_only_active_stage_on_cuda(monkeypatch):
+    moves = []
+    calls = []
+    resets = []
+    inpainting_model = FakeDDIM("inpainting", moves)
+    sr_model = FakeDDIM("sr", moves, super_resolution=True)
+    # Simulate research-level cache entries left resident by an older adapter.
+    for model in (inpainting_model, sr_model):
+        for name in ("vae", "encoder", "unet", "low_scale_model"):
+            module = getattr(model, name, None)
+            if module is not None:
+                module.device = "cuda:0"
+
+    def load_inpainting_model(**kwargs):
+        calls.append(("load_inpainting", kwargs))
+        return inpainting_model
+
+    def load_sr_model(**kwargs):
+        calls.append(("load_sr", kwargs))
+        return sr_model
+
+    def rasg_run(**kwargs):
+        assert kwargs["ddim"] is inpainting_model
+        assert inpainting_model.unet.device == "cuda:0"
+        assert sr_model.unet.device == "cpu"
+        calls.append(("generation", {}))
+        return FakeIImage(Image.new("RGB", (512, 512), "green"))
+
+    def sr_run(**kwargs):
+        assert kwargs["ddim"] is sr_model
+        assert inpainting_model.unet.device == "cpu"
+        assert sr_model.unet.device == "cuda:0"
+        calls.append(("super_resolution", {}))
+        return Image.new("RGB", (2048, 2048), "blue")
+
+    runtime = SimpleNamespace(
+        IImage=FakeIImage,
+        load_inpainting_model=load_inpainting_model,
+        load_sr_model=load_sr_model,
+        sd_run=rasg_run,
+        rasg_run=rasg_run,
+        sr_run=sr_run,
+        reset_state=lambda: resets.append(len(calls)),
+    )
+    from backend.models.object_reconstruction import adapter as module
+
+    monkeypatch.setattr(module, "_load_runtime", lambda **_kwargs: runtime)
+    monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
+    empty_cache = Mock()
+    monkeypatch.setattr(module.torch.cuda, "empty_cache", empty_cache)
+    model = module.HDPainterObjectReconstruction(
+        config={
+            "sequential_cpu_offload": True,
+            "super_resolution": {"enabled": True},
+        },
+        device="cuda:0",
+    )
+
+    assert calls[0][1]["device"] == "cpu"
+    assert calls[1][1]["device"] == "cpu"
+    assert inpainting_model.unet.device == "cpu"
+    assert sr_model.unet.device == "cpu"
+
+    result = model.reconstruct(
+        Image.new("RGB", (64, 64)),
+        Image.new("L", (64, 64), 255),
+        "hidden object",
+    )
+
+    assert result.size == (64, 64)
+    assert [name for name, _ in calls[-2:]] == [
+        "generation",
+        "super_resolution",
+    ]
+    assert len(resets) >= 2
+    assert inpainting_model.unet.device == "cpu"
+    assert sr_model.unet.device == "cpu"
+    assert empty_cache.call_count >= 2
 
 
 @pytest.mark.parametrize(

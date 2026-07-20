@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import importlib
 import logging
 import threading
@@ -26,6 +27,35 @@ class ObjectReconstructionError(RuntimeError):
     def __init__(self, message: str, *, stage: str = "inference"):
         super().__init__(message)
         self.stage = stage
+
+
+def _move_ddim_model(model: Any, device: str) -> None:
+    """Move every module owned by the research DDIM container."""
+    for name in ("vae", "encoder", "unet", "low_scale_model"):
+        module = getattr(model, name, None)
+        if module is not None and hasattr(module, "to"):
+            module.to(device=device)
+    encoder = getattr(model, "encoder", None)
+    if encoder is not None and hasattr(encoder, "device"):
+        encoder.device = device
+
+
+def _offload_ddim_model(model: Any) -> None:
+    """Drop gradients and move one DDIM model out of CUDA memory."""
+    unet = getattr(model, "unet", None)
+    if unet is not None:
+        if hasattr(unet, "zero_grad"):
+            unet.zero_grad(set_to_none=True)
+        if hasattr(unet, "requires_grad_"):
+            unet.requires_grad_(False)
+    _move_ddim_model(model, "cpu")
+
+
+def _release_cuda_cache() -> None:
+    """Release inactive allocations at the measured stage boundary."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 @dataclass(frozen=True)
@@ -159,13 +189,23 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             auto_download=self._settings["auto_download"],
         )
         dtype = torch.float16 if self._settings["fp16"] else torch.float32
+        load_device = (
+            "cpu"
+            if self._settings["sequential_cpu_offload"]
+            else self.device
+        )
         try:
             self._inpainting_model = self._runtime.load_inpainting_model(
                 model_id=self._settings["model_id"],
                 dtype=dtype,
-                device=self.device,
+                device=load_device,
                 cache=True,
             )
+            if self._settings["sequential_cpu_offload"]:
+                # The research cache ignores the requested device when it
+                # returns an existing model, so enforce CPU residency here.
+                _offload_ddim_model(self._inpainting_model)
+                _release_cuda_cache()
             self._sr_model = None
             if self._settings["super_resolution"]["enabled"]:
                 if self._runtime.load_sr_model is None:
@@ -174,8 +214,11 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                     )
                 self._sr_model = self._runtime.load_sr_model(
                     dtype=dtype,
-                    device=self.device,
+                    device=load_device,
                 )
+                if self._settings["sequential_cpu_offload"]:
+                    _offload_ddim_model(self._sr_model)
+                    _release_cuda_cache()
         except ObjectReconstructionError:
             raise
         except Exception as exc:
@@ -197,6 +240,9 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             "positive_prompt": str(raw.get("positive_prompt", "")),
             "negative_prompt": str(raw.get("negative_prompt", "")),
             "fp16": bool(raw.get("fp16", True)),
+            "sequential_cpu_offload": bool(
+                raw.get("sequential_cpu_offload", True)
+            ),
             "auto_download": bool(raw.get("auto_download", True)),
             "checkpoint_root": str(raw.get("checkpoint_root", "checkpoints")),
             "super_resolution": {
@@ -295,6 +341,8 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
         with self._inference_lock:
             active_stage = "generation_512"
             try:
+                if self._settings["sequential_cpu_offload"]:
+                    _move_ddim_model(self._inpainting_model, self.device)
                 runner = (
                     self._runtime.rasg_run
                     if self._settings["method"] in {"rasg", "painta+rasg"}
@@ -322,6 +370,15 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                         raise ObjectReconstructionError(
                             "HD-Painter super-resolution was enabled but not loaded."
                         )
+                    if self._settings["sequential_cpu_offload"]:
+                        # RASG stores mask/attention tensors in module globals.
+                        # Clear them before moving its model off GPU so SR does
+                        # not overlap with either the model or stage tensors.
+                        self._runtime.reset_state()
+                        _offload_ddim_model(self._inpainting_model)
+                        generated = None
+                        _release_cuda_cache()
+                        _move_ddim_model(self._sr_model, self.device)
                     sr_prompt = prompt
                     if sr["prompt_suffix"]:
                         sr_prompt = f"{prompt}, {sr['prompt_suffix']}"
@@ -360,6 +417,11 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                 ) from exc
             finally:
                 self._runtime.reset_state()
+                if self._settings["sequential_cpu_offload"]:
+                    _offload_ddim_model(self._inpainting_model)
+                    if self._sr_model is not None:
+                        _offload_ddim_model(self._sr_model)
+                    _release_cuda_cache()
 
         try:
             return result.convert("RGB").resize(
