@@ -67,6 +67,7 @@ class _Runtime:
     rasg_run: Callable[..., Any]
     sr_run: Callable[..., Any] | None
     reset_state: Callable[[], None]
+    clear_model_cache: Callable[[], None]
 
 
 def _reset_research_state(
@@ -149,6 +150,7 @@ def _load_runtime(
         rasg_run=rasg_method.run,
         sr_run=sr_run,
         reset_state=lambda: _reset_research_state(router, share, painta),
+        clear_model_cache=inpainting.model_cache.clear,
     )
 
 
@@ -433,6 +435,23 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                 f"HD-Painter crop-size restoration failed: {exc}",
                 stage="crop_size_restoration",
             ) from exc
+
+    def unload(self) -> None:
+        """Remove HD-Painter weights, including its module-level SD cache."""
+        with self._inference_lock:
+            runtime = getattr(self, "_runtime", None)
+            if runtime is not None:
+                runtime.reset_state()
+            inpainting_model = getattr(self, "_inpainting_model", None)
+            if inpainting_model is not None:
+                _offload_ddim_model(inpainting_model)
+            sr_model = getattr(self, "_sr_model", None)
+            if sr_model is not None:
+                _offload_ddim_model(sr_model)
+            if runtime is not None:
+                runtime.clear_model_cache()
+            super().unload()
+            _release_cuda_cache()
 
     @staticmethod
     def _to_single_pil(value: Any) -> Image.Image:

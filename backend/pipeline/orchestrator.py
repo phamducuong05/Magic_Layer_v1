@@ -1,6 +1,8 @@
 """Lazy model resolution and end-to-end image pipeline orchestration."""
 
 import logging
+import threading
+from functools import wraps
 from typing import Any, Sequence
 
 import numpy as np
@@ -33,6 +35,24 @@ from .segmentation import extract_raw_objects
 from .types import ProcessResult
 
 logger = logging.getLogger(__name__)
+_PIPELINE_LOCK = threading.RLock()
+
+
+def _serialized_pipeline(function):
+    """Prevent concurrent requests from unloading each other's GPU model."""
+    @wraps(function)
+    def serialized(*args, **kwargs):
+        with _PIPELINE_LOCK:
+            return function(*args, **kwargs)
+
+    return serialized
+
+
+def _release_stage_model(manager: Any, category: str) -> None:
+    """Release a stage model when supported by the supplied manager."""
+    release = getattr(manager, "release_model", None)
+    if callable(release):
+        release(category)
 
 
 def _get_diagnostics_config() -> dict[str, bool]:
@@ -96,6 +116,7 @@ def _complete_candidates(
         )
 
 
+@_serialized_pipeline
 def process_masks(
     image: Image.Image,
     keywords: Sequence[str],
@@ -104,12 +125,19 @@ def process_masks(
     """Run segmentation and conditional completion, returning masks only."""
     manager = _resolve_manager(manager)
     image = image.convert("RGB")
-    objects = _segment(image, keywords, manager)
+    try:
+        objects = _segment(image, keywords, manager)
+    finally:
+        _release_stage_model(manager, "segmentation")
     if not objects:
         return []
 
     link_overlap_partners(objects)
-    _complete_candidates(image, objects, manager)
+    if get_completion_candidates(objects):
+        try:
+            _complete_candidates(image, objects, manager)
+        finally:
+            _release_stage_model(manager, "completion")
     return [
         detected.amodal_mask
         if detected.amodal_mask is not None
@@ -118,6 +146,7 @@ def process_masks(
     ]
 
 
+@_serialized_pipeline
 def process_image(
     image: Image.Image,
     keywords: Sequence[str],
@@ -136,7 +165,10 @@ def process_image(
         and bool(diagnostics_config["track_peak_gpu_memory"])
     )
 
-    objects = _segment(image, keywords, manager)
+    try:
+        objects = _segment(image, keywords, manager)
+    finally:
+        _release_stage_model(manager, "segmentation")
     if not objects:
         logger.warning(
             "No objects were detected; returning the original background."
@@ -165,8 +197,12 @@ def process_image(
     kernel_size = _calc_kernel_size(image_np, 0.0075)
     potential_overlap_pairs = link_overlap_partners(objects)
     completion_candidate_count = len(get_completion_candidates(objects))
-    with timings.measure("completion"):
-        _complete_candidates(image, objects, manager)
+    if completion_candidate_count:
+        try:
+            with timings.measure("completion"):
+                _complete_candidates(image, objects, manager)
+        finally:
+            _release_stage_model(manager, "completion")
     overlap_pairs = filter_pairs_by_amodal_overlap(
         objects, potential_overlap_pairs
     )
@@ -195,57 +231,81 @@ def process_image(
         )
         if needs_reconstruction:
             if manager.has_object_reconstruction_model():
-                reconstruction_model = (
-                    manager.get_object_reconstruction_model()
-                )
-            else:
                 reconstruction_model = None
-            if reconstruction_model is None:
-                _mark_missing_reconstruction_model(objects)
-            else:
-                reconstruction_config = config.get_pipeline_config(
-                    "object_reconstruction"
-                )
-                with timings.measure("object_reconstruction"):
-                    reconstruct_objects(
-                        image,
-                        objects,
-                        reconstruction_model.reconstruct,
-                        context_ratio=float(
-                            reconstruction_config["context_ratio"]
-                        ),
-                        blend_allowance_ratio=float(
-                            reconstruction_config["blend_allowance_ratio"]
-                        ),
+                try:
+                    reconstruction_model = (
+                        manager.get_object_reconstruction_model()
                     )
+                    if reconstruction_model is None:
+                        _mark_missing_reconstruction_model(objects)
+                    else:
+                        reconstruction_config = config.get_pipeline_config(
+                            "object_reconstruction"
+                        )
+                        with timings.measure("object_reconstruction"):
+                            reconstruct_objects(
+                                image,
+                                objects,
+                                reconstruction_model.reconstruct,
+                                context_ratio=float(
+                                    reconstruction_config["context_ratio"]
+                                ),
+                                blend_allowance_ratio=float(
+                                    reconstruction_config[
+                                        "blend_allowance_ratio"
+                                    ]
+                                ),
+                            )
+                finally:
+                    reconstruction_model = None
+                    _release_stage_model(
+                        manager, "object_reconstruction"
+                    )
+            else:
+                _mark_missing_reconstruction_model(objects)
 
     with timings.measure("group_composition"):
         final_groups = group_reconstructed_objects(objects)
         compose_group_sources(image, final_groups)
 
-    matte = manager.get_matting_model().process
     matting_config = config.get_pipeline_config("matting")
-    with timings.measure("matting"):
-        refine_objects(
-            image,
-            final_groups,
-            matte,
-            context_ratio=float(matting_config["context_ratio"]),
-            support_dilation_pixels=int(
-                matting_config["support_dilation_pixels"]
-            ),
-        )
+    matting_model = None
+    matte = None
+    try:
+        matting_model = manager.get_matting_model()
+        matte = matting_model.process
+        with timings.measure("matting"):
+            refine_objects(
+                image,
+                final_groups,
+                matte,
+                context_ratio=float(matting_config["context_ratio"]),
+                support_dilation_pixels=int(
+                    matting_config["support_dilation_pixels"]
+                ),
+            )
+    finally:
+        matte = None
+        matting_model = None
+        _release_stage_model(manager, "matting")
 
-    background_inpaint = timings.wrap(
-        "background_inpainting",
-        manager.get_background_inpainting_model().process,
-    )
-    layers = extract_object_layers(
-        final_groups, kernel_size, background_inpaint
-    )
-    background = generate_final_background(
-        image, final_groups, kernel_size, background_inpaint
-    )
+    background_model = None
+    background_inpaint = None
+    try:
+        background_model = manager.get_background_inpainting_model()
+        background_inpaint = timings.wrap(
+            "background_inpainting", background_model.process
+        )
+        layers = extract_object_layers(
+            final_groups, kernel_size, background_inpaint
+        )
+        background = generate_final_background(
+            image, final_groups, kernel_size, background_inpaint
+        )
+    finally:
+        background_inpaint = None
+        background_model = None
+        _release_stage_model(manager, "background_inpainting")
 
     diagnostics = build_pipeline_diagnostics(
         raw_objects=objects,

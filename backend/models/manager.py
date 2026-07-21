@@ -1,5 +1,8 @@
+import gc
 import logging
 from typing import Optional
+
+import torch
 
 from ..config import config
 from .registry import ModelRegistry
@@ -18,6 +21,18 @@ from .completion import adapter
 from .object_reconstruction import adapter as object_reconstruction_adapter
 
 logger = logging.getLogger(__name__)
+
+
+def _release_cuda_memory() -> None:
+    """Return all unreferenced PyTorch allocations to the CUDA driver."""
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+    except RuntimeError:
+        logger.warning("CUDA synchronization failed during model release.")
+    torch.cuda.empty_cache()
 
 class ModelManager:
     """
@@ -91,13 +106,54 @@ class ModelManager:
             self._completion_model = self._get_model_instance("completion")
         return self._completion_model
 
+    def release_model(self, category: str) -> bool:
+        """Unload one lazy model and make its next access reload weights."""
+        attributes = {
+            "segmentation": "_segmentation_model",
+            "completion": "_completion_model",
+            "object_reconstruction": "_object_reconstruction_model",
+            "matting": "_matting_model",
+            "background_inpainting": "_background_inpainting_model",
+        }
+        try:
+            attribute = attributes[category]
+        except KeyError as exc:
+            raise ValueError(f"Unknown model category: {category}") from exc
+
+        model = getattr(self, attribute)
+        # Never leave a partially unloaded instance available for reuse.
+        setattr(self, attribute, None)
+        if model is None:
+            # A constructor may have failed after allocating CUDA tensors but
+            # before its instance could be assigned to the manager.
+            _release_cuda_memory()
+            return False
+
+        logger.info("Releasing %s model from memory...", category)
+        try:
+            unload = getattr(model, "unload", None)
+            if callable(unload):
+                unload()
+        except Exception:
+            logger.exception("Failed to cleanly unload %s model.", category)
+        finally:
+            del model
+            _release_cuda_memory()
+        logger.info("Released %s model.", category)
+        return True
+
+    def warmup_first_stage(self) -> None:
+        """Load only SAM3; all later stages remain lazy to protect VRAM."""
+        logger.info("Warming up the first pipeline stage...")
+        self.get_segmentation_model()
+        logger.info("First-stage model is ready on device: %s", config.device)
+
     def warmup_all(self):
         """Khởi tạo tất cả các model được cấu hình là active."""
-        logger.info("Warming up all active models...")
-        self.get_segmentation_model()
-        self.get_matting_model()
-        self.get_background_inpainting_model()
-        logger.info(f"Models are ready on device: {config.device}")
+        logger.warning(
+            "warmup_all() now loads only the first stage to avoid VRAM overlap."
+        )
+        self.warmup_first_stage()
 
 # Export global instance
 model_manager = ModelManager()

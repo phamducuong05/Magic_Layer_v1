@@ -60,7 +60,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     logger.info("Server starting — loading AI models...")
-    model_manager.warmup_all()
+    model_manager.warmup_first_stage()
     logger.info("Server ready.")
 
 

@@ -465,6 +465,30 @@ def test_sequential_cpu_offload_keeps_only_active_stage_on_cuda(monkeypatch):
     assert empty_cache.call_count >= 2
 
 
+def test_unload_clears_hd_painter_runtime_cache_and_owned_weights(monkeypatch):
+    from backend.models.object_reconstruction import adapter as module
+
+    runtime, _, reset_calls = make_runtime()
+    runtime.clear_model_cache = Mock()
+    model = build_adapter(
+        monkeypatch,
+        config={
+            "sequential_cpu_offload": False,
+            "super_resolution": {"enabled": False},
+        },
+        runtime=runtime,
+    )
+    release_cuda_cache = Mock()
+    monkeypatch.setattr(module, "_release_cuda_cache", release_cuda_cache)
+
+    model.unload()
+
+    assert reset_calls == [True]
+    runtime.clear_model_cache.assert_called_once_with()
+    release_cuda_cache.assert_called_once_with()
+    assert model.__dict__ == {}
+
+
 @pytest.mark.parametrize(
     ("config", "message"),
     [

@@ -15,6 +15,14 @@ class BaseModel(ABC):
     def _load_model(self):
         pass
 
+    def unload(self) -> None:
+        """Drop model-owned references before clearing accelerator caches.
+
+        Adapters with module-level caches or mutable runtime state should
+        override this method, clean those resources, then call ``super()``.
+        """
+        self.__dict__.clear()
+
 
 class BaseMattingModel(BaseModel):
     @abstractmethod

@@ -90,6 +90,102 @@ def test_warmup_does_not_load_completion(monkeypatch):
     object_reconstruction_getter.assert_not_called()
 
 
+def test_release_model_unloads_instance_and_drops_manager_reference(
+    monkeypatch,
+):
+    manager = _new_manager()
+    model = Mock()
+    manager._completion_model = model
+    release_cuda_memory = Mock()
+    monkeypatch.setattr(
+        manager_module,
+        "_release_cuda_memory",
+        release_cuda_memory,
+        raising=False,
+    )
+
+    released = manager.release_model("completion")
+
+    assert released is True
+    model.unload.assert_called_once_with()
+    assert manager._completion_model is None
+    release_cuda_memory.assert_called_once_with()
+
+
+def test_released_model_is_lazily_created_again(monkeypatch):
+    created = []
+
+    class FakeCompletionAdapter:
+        def __init__(self, config, device):
+            created.append(self)
+
+        def unload(self):
+            pass
+
+    fake_config = Mock()
+    fake_config.device = "cuda"
+    fake_config.get_model_config.return_value = {"name": "sdamodal"}
+    monkeypatch.setattr(manager_module, "config", fake_config)
+    monkeypatch.setattr(
+        manager_module.ModelRegistry,
+        "get_class",
+        Mock(return_value=FakeCompletionAdapter),
+    )
+    monkeypatch.setattr(
+        manager_module,
+        "_release_cuda_memory",
+        Mock(),
+        raising=False,
+    )
+    manager = _new_manager()
+
+    first = manager.get_completion_model()
+    manager.release_model("completion")
+    second = manager.get_completion_model()
+
+    assert first is not second
+    assert created == [first, second]
+
+
+def test_release_missing_model_still_flushes_failed_load_allocations(
+    monkeypatch,
+):
+    manager = _new_manager()
+    release_cuda_memory = Mock()
+    monkeypatch.setattr(
+        manager_module,
+        "_release_cuda_memory",
+        release_cuda_memory,
+    )
+
+    released = manager.release_model("completion")
+
+    assert released is False
+    release_cuda_memory.assert_called_once_with()
+
+
+def test_warmup_all_keeps_only_first_pipeline_stage_resident(monkeypatch):
+    manager = _new_manager()
+    segmentation_getter = Mock()
+    matting_getter = Mock()
+    background_getter = Mock()
+    monkeypatch.setattr(
+        manager, "get_segmentation_model", segmentation_getter
+    )
+    monkeypatch.setattr(manager, "get_matting_model", matting_getter)
+    monkeypatch.setattr(
+        manager,
+        "get_background_inpainting_model",
+        background_getter,
+    )
+
+    manager.warmup_all()
+
+    segmentation_getter.assert_called_once_with()
+    matting_getter.assert_not_called()
+    background_getter.assert_not_called()
+
+
 def test_background_inpainting_model_uses_its_own_category(monkeypatch):
     created = []
 
