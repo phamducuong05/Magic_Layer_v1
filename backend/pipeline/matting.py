@@ -110,7 +110,7 @@ def refine_objects(
                         f"reconstructed group {group.group_id} has no "
                         "composed source"
                     )
-                support = group.amodal_mask > 0
+                support = group.effective_support_mask
                 roi = square_roi_from_support(
                     support,
                     context_ratio=context_ratio,

@@ -65,6 +65,7 @@ def test_reconstructed_group_matting_uses_composed_rgb_and_amodal_support():
     group = _group(reconstructed=True)
     group.amodal_mask = group.modal_mask > 0
     group.amodal_mask[8, 8] = True
+    group.members[0].amodal_mask = group.amodal_mask.copy()
     group.composed_roi = SquareROI(4, 4, 5, 12, 12)
     group.composed_source = Image.new("RGB", (5, 5), (20, 180, 60))
     matte = Mock(return_value=torch.ones((7, 7), dtype=torch.float32))
@@ -87,3 +88,47 @@ def test_reconstructed_group_matting_uses_composed_rgb_and_amodal_support():
     assert group.soft_alpha.shape == (12, 12)
     assert group.soft_alpha[8, 8] > 0
     assert group.soft_alpha[2, 2] == 0
+
+
+def test_mixed_group_matting_excludes_failed_members_amodal_hole():
+    from backend.pipeline.matting import refine_objects
+
+    shape = (12, 12)
+    reconstructed_modal = np.zeros(shape, dtype=np.uint8)
+    reconstructed_modal[3:5, 3:5] = 255
+    fallback_modal = np.zeros(shape, dtype=np.uint8)
+    fallback_modal[4:6, 4:6] = 255
+    reconstructed = DetectedObject(
+        object_id="reconstructed",
+        semantic_class="person",
+        display_label="person",
+        modal_mask=reconstructed_modal,
+        bbox=(3, 3, 4, 4),
+    )
+    fallback = DetectedObject(
+        object_id="fallback",
+        semantic_class="person",
+        display_label="person",
+        modal_mask=fallback_modal,
+        bbox=(4, 4, 4, 4),
+    )
+    reconstructed.amodal_mask = reconstructed_modal > 0
+    reconstructed.amodal_mask[7, 7] = True
+    reconstructed.reconstruction_canvas = Image.new("RGB", (5, 5), "red")
+    fallback.amodal_mask = fallback_modal > 0
+    fallback.amodal_mask[8, 8] = True
+
+    group = group_reconstructed_objects([reconstructed, fallback])[0]
+    group.composed_roi = SquareROI(3, 3, 5, 12, 12)
+    group.composed_source = Image.new("RGB", (5, 5), "red")
+
+    refine_objects(
+        Image.new("RGB", (12, 12), "white"),
+        [group],
+        Mock(return_value=torch.ones((5, 5), dtype=torch.float32)),
+        context_ratio=0.0,
+        support_dilation_pixels=0,
+    )
+
+    assert group.soft_alpha[7, 7] > 0
+    assert group.soft_alpha[8, 8] == 0

@@ -94,8 +94,9 @@ def test_invalid_result_contract_uses_modal_fallback(
     assert detected.reconstruction_failure_reason
 
 
-def test_change_outside_permitted_region_is_rejected():
+def test_change_outside_permitted_region_is_restored_to_source():
     detected = _object("person")
+    source = _source_image()
 
     def reconstruct(source, mask, _prompt):
         result = np.asarray(source).copy()
@@ -104,15 +105,30 @@ def test_change_outside_permitted_region_is_rejected():
         return Image.fromarray(result, mode="RGB")
 
     reconstruct_objects(
-        _source_image(),
+        source,
         [detected],
         reconstruct,
         context_ratio=0.0,
         blend_allowance_ratio=0.0,
     )
 
-    assert detected.reconstruction_canvas is None
-    assert detected.reconstruction_failure_stage == "permitted_region"
+    assert detected.reconstruction_canvas is not None
+    assert detected.reconstruction_failure_stage is None
+    assert detected.reconstruction_canvas.getpixel((0, 0)) == source.getpixel(
+        (detected.reconstruction_roi.x, detected.reconstruction_roi.y)
+    )
+    mask_crop = np.asarray(
+        detected.reconstruction_mask[
+            detected.reconstruction_roi.y : detected.reconstruction_roi.y
+            + detected.reconstruction_roi.size,
+            detected.reconstruction_roi.x : detected.reconstruction_roi.x
+            + detected.reconstruction_roi.size,
+        ]
+    )
+    changed_y, changed_x = np.argwhere(mask_crop)[0]
+    assert detected.reconstruction_canvas.getpixel(
+        (int(changed_x), int(changed_y))
+    ) == (70, 80, 90)
 
 
 def test_blend_allowance_accepts_adjacent_boundary_changes():

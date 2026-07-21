@@ -60,6 +60,12 @@ def test_same_class_bbox_overlap_groups_pixel_disjoint_masks():
         group.amodal_mask,
         first.amodal_mask | second.amodal_mask,
     )
+    assert np.array_equal(
+        group.effective_support_mask,
+        (first.modal_mask > 0) | second.amodal_mask,
+    )
+    assert not group.effective_support_mask[1, 1]
+    assert group.effective_support_mask[4, 4]
     assert group.has_reconstruction is True
 
 
@@ -111,14 +117,22 @@ def test_grouped_amodal_union_uses_modal_fallback_per_member():
     )
     completed.amodal_mask = completed.modal_mask > 0
     completed.amodal_mask[1, 1] = True
+    completed.reconstruction_canvas = Image.new("RGB", (4, 4), "red")
+    fallback.amodal_mask = fallback.modal_mask > 0
+    fallback.amodal_mask[4, 4] = True
     fallback.reconstruction_failure_stage = "generation_512"
     fallback.reconstruction_failure_reason = "test failure"
 
     group = group_reconstructed_objects([completed, fallback])[0]
 
+    assert np.array_equal(
+        group.amodal_mask,
+        completed.amodal_mask | fallback.amodal_mask,
+    )
     expected = completed.amodal_mask | (fallback.modal_mask > 0)
-    assert np.array_equal(group.amodal_mask, expected)
-    assert group.has_reconstruction is False
+    assert np.array_equal(group.effective_support_mask, expected)
+    assert not group.effective_support_mask[4, 4]
+    assert group.has_reconstruction is True
     assert group.members[1].reconstruction_failure_stage == "generation_512"
 
 

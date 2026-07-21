@@ -127,12 +127,15 @@ def validate_reconstruction_result(
         hard_mask,
         blend_allowance_ratio=blend_allowance_ratio,
     )
-    protected = real_pixels & ~permitted
-    if np.any(result_array[protected] != source_array[protected]):
-        raise ReconstructionValidationError(
-            "permitted_region",
-            "reconstruction changed source pixels outside the permitted region",
-        )
+
+    # HD-Painter resizes the complete crop during super resolution and applies
+    # Poisson blending around the inpaint mask. Both operations can alter RGB
+    # outside the requested region even when the input hard mask is correct.
+    # Enforce the pipeline contract by restoring those pixels instead of
+    # rejecting an otherwise usable reconstruction.
+    result_array = result_array.copy()
+    result_array[~permitted] = source_array[~permitted]
+    rgb_result = Image.fromarray(result_array, mode="RGB")
 
     usable_hole = completion_hole.astype(bool) & real_pixels
     if not np.any(usable_hole):

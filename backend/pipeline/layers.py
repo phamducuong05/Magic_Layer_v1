@@ -56,11 +56,7 @@ def extract_object_layers(
 
         source_rgb = np.asarray(source, dtype=np.uint8)
         alpha = crop_array(group.soft_alpha, roi).astype(np.float64)
-        selected_support = (
-            group.amodal_mask > 0
-            if group.has_reconstruction
-            else group.modal_mask > 0
-        )
+        selected_support = group.effective_support_mask
         support_crop = crop_array(selected_support, roi).astype(bool)
         hard_mask = support_crop | (alpha > THRESHOLD_ALPHA)
         if not np.any(hard_mask):

@@ -144,9 +144,9 @@ def compose_group_sources(
     source_width, source_height = source.size
 
     for group in groups:
-        # Cover the group's entire amodal support; no extra padding is needed.
+        # Cover only support backed by usable RGB; no extra padding is needed.
         roi = square_roi_from_support(
-            group.amodal_mask > 0,
+            group.effective_support_mask,
             context_ratio=0.0,
         )
         if roi.image_size != source.size:

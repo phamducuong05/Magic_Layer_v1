@@ -100,3 +100,19 @@ class GroupedObject:
         return any(
             member.reconstruction_canvas is not None for member in self.members
         )
+
+    @property
+    def effective_support_mask(self) -> np.ndarray:
+        """Return support backed by reconstructed or visible RGB per member."""
+        support = np.zeros_like(self.modal_mask, dtype=bool)
+        for member in self.members:
+            modal = member.modal_mask > 0
+            support |= (
+                member.amodal_mask > 0
+                if (
+                    member.reconstruction_canvas is not None
+                    and member.amodal_mask is not None
+                )
+                else modal
+            )
+        return support
