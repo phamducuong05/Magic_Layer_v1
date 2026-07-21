@@ -191,3 +191,13 @@ def _merge_overlapping_masks(masks: List[np.ndarray]) -> List[np.ndarray]:
             merged = np.maximum(merged, masks[index].astype(np.uint8))
         merged_masks.append(merged)
     return merged_masks
+
+
+def _bbox_area(mask: np.ndarray) -> int:
+    """Return the tight positive-pixel bounding-box area of a binary mask."""
+    positive_y, positive_x = np.nonzero(mask)
+    if positive_x.size == 0:
+        return 0
+    width = int(positive_x.max() - positive_x.min() + 1)
+    height = int(positive_y.max() - positive_y.min() + 1)
+    return width * height

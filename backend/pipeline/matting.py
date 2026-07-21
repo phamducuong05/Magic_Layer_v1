@@ -100,7 +100,6 @@ def refine_objects(
     dilation_kernel = np.ones(
         (dilation_size, dilation_size), dtype=np.uint8
     )
-
     with torch.inference_mode(), _inference_context():
         for group in objects:
             if group.has_reconstruction:

@@ -67,22 +67,34 @@ def complete_objects(
     if not candidates:
         return
 
+    for detected in candidates:
+        detected.completion_failure_stage = None
+        detected.completion_failure_reason = None
+
     try:
         outputs = completion_model.complete(
             image,
             [detected.modal_mask for detected in candidates],
             [detected.bbox for detected in candidates],
         )
-    except Exception:
+    except Exception as exc:
+        reason = str(exc) or type(exc).__name__
         logger.warning(
             "Shared completion inference failed; using modal fallback.",
             exc_info=True,
         )
         for detected in candidates:
-            _store_modal_fallback(detected)
+            _store_modal_fallback(
+                detected, stage="inference", reason=reason
+            )
         return
 
     if not isinstance(outputs, Sequence) or len(outputs) != len(candidates):
+        reason = (
+            f"returned {len(outputs)} outputs for {len(candidates)} candidates"
+            if isinstance(outputs, Sequence)
+            else "returned a non-sequence output"
+        )
         logger.warning(
             "Completion returned %s outputs for %d candidates; using modal "
             "fallback for the batch.",
@@ -90,7 +102,9 @@ def complete_objects(
             len(candidates),
         )
         for detected in candidates:
-            _store_modal_fallback(detected)
+            _store_modal_fallback(
+                detected, stage="output_contract", reason=reason
+            )
         return
 
     for detected, output in zip(candidates, outputs):

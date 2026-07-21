@@ -13,6 +13,10 @@ pipeline:
   matting:
     context_ratio: 0.25
     support_dilation_pixels: 2
+  diagnostics:
+    enabled: true
+    log_summary: true
+    track_peak_gpu_memory: true
 models:
   matting:
     active: birefnet

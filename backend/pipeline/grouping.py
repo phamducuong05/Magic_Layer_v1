@@ -116,6 +116,7 @@ def compose_group_sources(
     source_width, source_height = source.size
 
     for group in groups:
+        # Cover the group's entire amodal support; no extra padding is needed.
         roi = square_roi_from_support(
             group.amodal_mask > 0,
             context_ratio=0.0,
@@ -125,14 +126,24 @@ def compose_group_sources(
                 "group masks must match the source image dimensions"
             )
 
+        # Initialize the composition from the original source crop.
         composed = np.asarray(crop_image(source, roi), dtype=np.uint8).copy()
+
+        # Visible source pixels must never be overwritten by reconstruction.
         protected_modal = np.zeros((roi.size, roi.size), dtype=bool)
+
+        # Track previous writes for deterministic member conflict resolution.
         filled_reconstruction = np.zeros_like(protected_modal)
+        reconstruction_owner = np.full(
+            protected_modal.shape, -1, dtype=np.int32
+        )
+        conflicts: list[tuple[str, str]] = []
 
         group_left, group_top, group_right, group_bottom = roi.box
         clipped_left, clipped_top, clipped_right, clipped_bottom = (
             roi.clipped_box
         )
+        # Map the group's visible support into crop coordinates.
         protected_modal[
             clipped_top - group_top : clipped_bottom - group_top,
             clipped_left - group_left : clipped_right - group_left,
@@ -144,7 +155,7 @@ def compose_group_sources(
             > 0
         )
 
-        for member in group.members:
+        for member_index, member in enumerate(group.members):
             canvas = member.reconstruction_canvas
             member_roi = member.reconstruction_roi
             reconstruction_mask = member.reconstruction_mask
@@ -174,6 +185,7 @@ def compose_group_sources(
                     "match the source image"
                 )
 
+            # Intersect the group and member reconstruction ROIs.
             member_left, member_top, member_right, member_bottom = (
                 member_roi.box
             )
@@ -187,6 +199,7 @@ def compose_group_sources(
             ):
                 continue
 
+            # Map the intersection into group and member-canvas coordinates.
             destination_y = slice(
                 overlap_top - group_top,
                 overlap_bottom - group_top,
@@ -203,21 +216,41 @@ def compose_group_sources(
                 overlap_left - member_left,
                 overlap_right - member_left,
             )
+            # Restrict writes to pixels the model was allowed to reconstruct.
             permitted = reconstruction_mask[
                 overlap_top:overlap_bottom,
                 overlap_left:overlap_right,
             ].astype(bool)
+            # Preserve visible pixels and reconstruction from earlier members.
             writable = (
                 permitted
                 & ~protected_modal[destination_y, destination_x]
                 & ~filled_reconstruction[destination_y, destination_x]
             )
+
+            conflict = (
+                permitted
+                & ~protected_modal[destination_y, destination_x]
+                & filled_reconstruction[destination_y, destination_x]
+            )
+            owner_crop = reconstruction_owner[destination_y, destination_x]
+            for owner_index in np.unique(owner_crop[conflict]):
+                conflict_record = (
+                    group.members[int(owner_index)].object_id,
+                    member.object_id,
+                )
+                if conflict_record not in conflicts:
+                    conflicts.append(conflict_record)
+            # Overlay the reconstructed pixels onto the composite image
             destination = composed[destination_y, destination_x]
             candidate = np.asarray(canvas.convert("RGB"), dtype=np.uint8)[
                 canvas_y, canvas_x
             ]
             destination[writable] = candidate[writable]
+            # Block later members from overwriting these accepted pixels.
             filled_reconstruction[destination_y, destination_x] |= writable
+            owner_crop[writable] = member_index
 
         group.composed_source = Image.fromarray(composed, mode="RGB")
         group.composed_roi = roi
+        group.reconstruction_conflicts = tuple(conflicts)

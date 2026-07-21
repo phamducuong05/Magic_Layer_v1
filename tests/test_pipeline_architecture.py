@@ -246,5 +246,10 @@ def test_process_image_completes_overlap_without_reconstruction_model(
     prepare_reconstruction.assert_not_called()
     manager.get_object_reconstruction_model.assert_not_called()
     manager.get_background_inpainting_model.assert_called_once()
-    assert extract_layers.call_args.args[-1] is background_inpaint
-    assert generate_background.call_args.args[-1] is background_inpaint
+    assert (
+        extract_layers.call_args.args[-1].__wrapped__ is background_inpaint
+    )
+    assert (
+        generate_background.call_args.args[-1].__wrapped__
+        is background_inpaint
+    )

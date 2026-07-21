@@ -1054,8 +1054,13 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     refine_objects.assert_called_once()
     extract_layers.assert_called_once()
     generate_background.assert_called_once()
-    assert extract_layers.call_args.args[-1] is background_inpaint
-    assert generate_background.call_args.args[-1] is background_inpaint
+    assert (
+        extract_layers.call_args.args[-1].__wrapped__ is background_inpaint
+    )
+    assert (
+        generate_background.call_args.args[-1].__wrapped__
+        is background_inpaint
+    )
 
 
 def test_process_image_returns_original_when_nothing_detected(

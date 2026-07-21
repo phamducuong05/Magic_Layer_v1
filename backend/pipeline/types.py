@@ -1,12 +1,17 @@
 """Shared data contracts for image pipeline stages."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 from PIL import Image
 
 from .roi import SquareROI
+
+if TYPE_CHECKING:
+    from .diagnostics import PipelineDiagnostics
 
 
 @dataclass
@@ -25,6 +30,7 @@ class ProcessResult:
     original_width: int
     original_height: int
     layers: List[ObjectLayer] = field(default_factory=list)
+    diagnostics: Optional[PipelineDiagnostics] = None
 
 
 @dataclass
@@ -49,6 +55,8 @@ class DetectedObject:
     reconstruction_roi: Optional[SquareROI] = None
     reconstruction_failure_stage: Optional[str] = None
     reconstruction_failure_reason: Optional[str] = None
+    completion_failure_stage: Optional[str] = None
+    completion_failure_reason: Optional[str] = None
     soft_alpha: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
@@ -79,6 +87,7 @@ class GroupedObject:
     matting_source: Optional[Image.Image] = None
     matting_roi: Optional[SquareROI] = None
     soft_alpha: Optional[np.ndarray] = None
+    reconstruction_conflicts: tuple[tuple[str, str], ...] = ()
 
     @property
     def object_id(self) -> str:

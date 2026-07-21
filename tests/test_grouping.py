@@ -169,6 +169,7 @@ def test_group_rgb_composition_maps_rois_and_applies_conflict_priority():
     assert pixel(2, 1) == (255, 0, 0)  # First reconstruction wins.
     assert pixel(4, 1) == (0, 0, 255)  # Later non-conflicting RGB is used.
     assert pixel(1, 1) == (10, 20, 30)  # Untouched source is preserved.
+    assert group.reconstruction_conflicts == (("first", "second"),)
 
 
 def test_group_rgb_composition_initializes_fallback_group_from_original():
