@@ -158,13 +158,22 @@ def process_image(
     compose_group_sources(image, final_groups)
 
     matte = manager.get_matting_model().process
-    refine_objects(image_np, final_groups, matte)
+    matting_config = config.get_pipeline_config("matting")
+    refine_objects(
+        image,
+        final_groups,
+        matte,
+        context_ratio=float(matting_config["context_ratio"]),
+        support_dilation_pixels=int(
+            matting_config["support_dilation_pixels"]
+        ),
+    )
 
     background_inpaint = (
         manager.get_background_inpainting_model().process
     )
     layers = extract_object_layers(
-        image, image_np, final_groups, kernel_size, background_inpaint
+        final_groups, kernel_size, background_inpaint
     )
     background = generate_final_background(
         image, final_groups, kernel_size, background_inpaint

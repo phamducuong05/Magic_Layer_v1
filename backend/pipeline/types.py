@@ -76,6 +76,8 @@ class GroupedObject:
     segmentation_index: int
     composed_source: Optional[Image.Image] = None
     composed_roi: Optional[SquareROI] = None
+    matting_source: Optional[Image.Image] = None
+    matting_roi: Optional[SquareROI] = None
     soft_alpha: Optional[np.ndarray] = None
 
     @property

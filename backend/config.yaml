@@ -10,6 +10,9 @@ pipeline:
     context_ratio: 0.25
     # HD-Painter Poisson blending dilates its mask by roughly 24/2048 pixels.
     blend_allowance_ratio: 0.012
+  matting:
+    context_ratio: 0.25
+    support_dilation_pixels: 2
 models:
   matting:
     active: birefnet

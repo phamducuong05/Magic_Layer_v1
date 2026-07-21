@@ -115,21 +115,27 @@ def test_extracted_geometry_stages_do_not_reference_global_model_manager():
 
 
 def test_matting_attaches_alpha_using_the_supplied_callable():
+    from backend.pipeline.grouping import group_reconstructed_objects
     from backend.pipeline.matting import refine_objects
     from backend.pipeline.types import DetectedObject
 
-    mask = np.ones((3, 4), dtype=np.uint8)
+    mask = np.ones((4, 4), dtype=np.uint8)
     detected = DetectedObject(
-        "object-0", "person", "person", mask, (0, 0, 4, 3)
+        "object-0", "person", "person", mask, (0, 0, 4, 4)
     )
-    matte = Mock(return_value=torch.full((3, 4), 0.75))
+    group = group_reconstructed_objects([detected])[0]
+    matte = Mock(return_value=torch.full((4, 4), 0.75))
 
     refine_objects(
-        np.full((3, 4, 3), 127, dtype=np.uint8), [detected], matte
+        Image.new("RGB", (4, 4), (127, 127, 127)),
+        [group],
+        matte,
+        context_ratio=0.0,
+        support_dilation_pixels=0,
     )
 
     matte.assert_called_once()
-    assert np.allclose(detected.soft_alpha, 0.75)
+    assert np.allclose(group.soft_alpha, 0.75)
 
 
 def test_reconstruction_and_background_use_distinct_callable_contracts():

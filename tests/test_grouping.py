@@ -263,8 +263,12 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         raising=False,
     )
 
-    def matte(_image, supplied, _matte):
+    def matte(_image, supplied, _matte, **kwargs):
         assert supplied == final_groups
+        assert kwargs == {
+            "context_ratio": 0.25,
+            "support_dilation_pixels": 2,
+        }
         events.append("matte")
 
     monkeypatch.setattr(
@@ -273,7 +277,7 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         Mock(side_effect=matte),
     )
 
-    def layers(_image, _array, supplied, *_args):
+    def layers(supplied, _kernel_size, _background_inpaint):
         assert supplied == final_groups
         events.append("layers")
         return []

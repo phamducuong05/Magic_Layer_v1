@@ -872,16 +872,28 @@ def test_refine_masks_guides_matting_and_limits_alpha(monkeypatch, rgb_image):
 
 
 def test_extract_object_layers_builds_rgba_crop(monkeypatch, rgb_image):
-    image_np = np.asarray(rgb_image)
     alpha = np.zeros((6, 8), dtype=np.float64)
     alpha[1:5, 2:6] = 0.75
     kernel_size = (1, 1)
+    detected = pipeline.DetectedObject(
+        object_id="object-0",
+        semantic_class="component",
+        display_label="component",
+        modal_mask=(alpha > 0).astype(np.uint8) * 255,
+        bbox=(2, 1, 4, 4),
+    )
+    from backend.pipeline.grouping import group_reconstructed_objects
+
+    group = group_reconstructed_objects([detected])[0]
+    group.matting_roi = roi_stage.SquareROI(0, -1, 8, 8, 6)
+    group.matting_source = rgb_image.crop(group.matting_roi.box)
+    group.soft_alpha = alpha
 
     inpaint = _install_inpainting_fake(
-        monkeypatch, Image.new("RGB", rgb_image.size, (10, 10, 10))
+        monkeypatch, Image.new("RGB", group.matting_source.size, (10, 10, 10))
     )
-    inpaint_mask = np.zeros((6, 8), dtype=bool)
-    inpaint_mask[1:5, 2:6] = True
+    inpaint_mask = np.zeros((8, 8), dtype=bool)
+    inpaint_mask[2:6, 2:6] = True
     build_mask = Mock(return_value=inpaint_mask)
     monkeypatch.setattr(layer_stage, "build_inpaint_mask", build_mask)
     monkeypatch.setattr(
@@ -889,17 +901,15 @@ def test_extract_object_layers_builds_rgba_crop(monkeypatch, rgb_image):
         "refine_background",
         Mock(side_effect=lambda background, *_args, **_kwargs: background),
     )
-    foreground = np.full_like(image_np, 200)
-    refine_alpha = Mock(return_value=(alpha, foreground))
+    alpha_crop = roi_stage.crop_array(alpha, group.matting_roi)
+    foreground = np.full((8, 8, 3), 200, dtype=np.uint8)
+    refine_alpha = Mock(return_value=(alpha_crop, foreground))
     monkeypatch.setattr(
         layer_stage, "refine_alpha_with_colors", refine_alpha
     )
 
-    layers = layer_stage.extract_layers(
-        rgb_image,
-        image_np,
-        [alpha],
-        ["component"],
+    layers = layer_stage.extract_object_layers(
+        [group],
         kernel_size,
         inpaint,
     )
@@ -911,7 +921,7 @@ def test_extract_object_layers_builds_rgba_crop(monkeypatch, rgb_image):
     assert layer.png_base64
     build_mask.assert_called_once()
     inpaint.assert_called_once()
-    assert inpaint.call_args.args[0] is rgb_image
+    assert inpaint.call_args.args[0] is group.matting_source
     assert inpaint.call_args.args[1].mode == "L"
     refine_alpha.assert_called_once()
 
@@ -976,9 +986,14 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     events = []
     reconstruct_objects = Mock()
 
-    def attach_alpha(_image_np, objects, supplied_matte):
+    def attach_alpha(_image, objects, supplied_matte, **kwargs):
         events.append("matte")
+        assert isinstance(_image, Image.Image)
         assert supplied_matte is matte
+        assert kwargs == {
+            "context_ratio": 0.25,
+            "support_dilation_pixels": 2,
+        }
         objects[0].soft_alpha = alpha
 
     refine_objects = Mock(side_effect=attach_alpha)

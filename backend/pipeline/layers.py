@@ -10,7 +10,8 @@ from ..core.helpers import _bbox_from_mask, _image_to_base64
 from ..core.layerd_refine import refine_background
 from ..core.refine import build_inpaint_mask, refine_alpha_with_colors
 from .matting import THRESHOLD_ALPHA
-from .types import DetectedObject, GroupedObject, ObjectLayer
+from .roi import crop_array
+from .types import GroupedObject, ObjectLayer
 
 logger = logging.getLogger(__name__)
 
@@ -18,88 +19,119 @@ BG_REFINE_NUM_COLORS = 10
 BG_REFINE_OUTER_RATIO = 0.2
 
 
-def extract_layers(
-    image: Image.Image,
-    image_np: np.ndarray,
-    soft_alphas: Sequence[np.ndarray],
-    labels: Sequence[str],
+def extract_object_layers(
+    objects: Sequence[GroupedObject],
     kernel_size: tuple[int, int],
     background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> list[ObjectLayer]:
-    """Create RGBA crops from aligned alpha and label sequences."""
+    """Render final groups from their exact matting RGB source and ROI."""
     layers: list[ObjectLayer] = []
 
-    for alpha, label in zip(soft_alphas, labels):
-        hard_mask = alpha > THRESHOLD_ALPHA
-        bbox = _bbox_from_mask(hard_mask.astype(np.uint8))
-        if bbox is None:
+    for group in objects:
+        if group.soft_alpha is None:
+            continue
+        if group.matting_source is None or group.matting_roi is None:
+            raise ValueError(
+                f"group {group.group_id} has alpha but no matting source"
+            )
+
+        roi = group.matting_roi
+        source = (
+            group.matting_source
+            if group.matting_source.mode == "RGB"
+            else group.matting_source.convert("RGB")
+        )
+        if source.size != (roi.size, roi.size):
+            raise ValueError(
+                f"matting source for {group.group_id} does not match its ROI"
+            )
+
+        source_rgb = np.asarray(source, dtype=np.uint8)
+        alpha = crop_array(group.soft_alpha, roi).astype(np.float64)
+        selected_support = (
+            group.amodal_mask > 0
+            if group.has_reconstruction
+            else group.modal_mask > 0
+        )
+        support_crop = crop_array(selected_support, roi).astype(bool)
+        hard_mask = support_crop | (alpha > THRESHOLD_ALPHA)
+        if not np.any(hard_mask):
             continue
 
-        inpaint_mask = build_inpaint_mask(image_np, hard_mask, kernel_size)
+        inpaint_mask = build_inpaint_mask(
+            source_rgb,
+            hard_mask,
+            kernel_size,
+        ).astype(bool)
         mask_image = Image.fromarray(
-            (inpaint_mask > 0).astype(np.uint8) * 255, mode="L"
+            inpaint_mask.astype(np.uint8) * 255,
+            mode="L",
         )
-        component_background = background_inpaint(image, mask_image)
-        if component_background.size != image.size:
+        component_background = background_inpaint(source, mask_image)
+        if component_background.size != source.size:
             component_background = component_background.resize(
-                image.size, Image.Resampling.LANCZOS
+                source.size,
+                Image.Resampling.LANCZOS,
             )
-        background_np = np.asarray(
+        background_rgb = np.asarray(
             component_background.convert("RGB"), dtype=np.uint8
         )
-        background_np = refine_background(
-            background_np,
-            inpaint_mask.astype(bool),
+        background_rgb = refine_background(
+            background_rgb,
+            inpaint_mask,
             n_outer_ratio=BG_REFINE_OUTER_RATIO,
             max_num_colors=BG_REFINE_NUM_COLORS,
         )
         refined_alpha, foreground_rgb = refine_alpha_with_colors(
-            image_np,
-            background_np,
+            source_rgb,
+            background_rgb,
             alpha.copy(),
             hard_mask,
             kernel_size,
         )
+        refined_alpha = np.clip(refined_alpha, 0.0, 1.0)
 
-        x, y, layer_width, layer_height = bbox
-        rgb_crop = foreground_rgb[y : y + layer_height, x : x + layer_width]
+        real_pixels = np.zeros((roi.size, roi.size), dtype=bool)
+        left, top, right, bottom = roi.inner_box
+        real_pixels[top:bottom, left:right] = True
+        refined_alpha[~real_pixels] = 0.0
+        local_bbox = _bbox_from_mask(
+            (refined_alpha > THRESHOLD_ALPHA).astype(np.uint8)
+        )
+        if local_bbox is None:
+            continue
+
+        local_x, local_y, layer_width, layer_height = local_bbox
+        rgb_crop = foreground_rgb[
+            local_y : local_y + layer_height,
+            local_x : local_x + layer_width,
+        ]
         alpha_crop = np.rint(
-            refined_alpha[y : y + layer_height, x : x + layer_width] * 255
+            refined_alpha[
+                local_y : local_y + layer_height,
+                local_x : local_x + layer_width,
+            ]
+            * 255
         ).astype(np.uint8)
         rgba_image = Image.fromarray(
             np.dstack((rgb_crop, alpha_crop)), mode="RGBA"
         )
+        global_x = roi.x + local_x
+        global_y = roi.y + local_y
         layers.append(
             ObjectLayer(
-                keyword=label,
+                keyword=group.display_label,
                 png_base64=_image_to_base64(rgba_image),
-                x=x,
-                y=y,
+                x=global_x,
+                y=global_y,
                 width=layer_width,
                 height=layer_height,
             )
         )
-        logger.info("[Layer] '%s' bbox=%s", label, bbox)
+        logger.info(
+            "[Layer] '%s' bbox=%s",
+            group.display_label,
+            (global_x, global_y, layer_width, layer_height),
+        )
 
     return layers
-
-
-def extract_object_layers(
-    image: Image.Image,
-    image_np: np.ndarray,
-    objects: Sequence[DetectedObject | GroupedObject],
-    kernel_size: tuple[int, int],
-    background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
-) -> list[ObjectLayer]:
-    """Render objects that have a stored soft alpha."""
-    ready_objects = [
-        detected for detected in objects if detected.soft_alpha is not None
-    ]
-    return extract_layers(
-        image,
-        image_np,
-        [detected.soft_alpha for detected in ready_objects],
-        [detected.display_label for detected in ready_objects],
-        kernel_size,
-        background_inpaint,
-    )
