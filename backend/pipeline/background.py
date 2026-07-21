@@ -11,6 +11,20 @@ from .matting import THRESHOLD_ALPHA
 from .types import DetectedObject, GroupedObject
 
 
+VISIBLE_ALPHA_DILATION = (3, 3)
+
+
+def _visible_soft_alpha(
+    modal_mask: np.ndarray,
+    soft_alpha: np.ndarray,
+) -> np.ndarray:
+    """Keep alpha coverage only on, or immediately beside, visible pixels."""
+    visible_support = expand_mask(
+        modal_mask > 0, VISIBLE_ALPHA_DILATION
+    ).astype(bool)
+    return np.where(visible_support, soft_alpha, 0.0)
+
+
 def generate_background_from_masks(
     image: Image.Image,
     raw_masks: Sequence[np.ndarray],
@@ -45,12 +59,15 @@ def generate_final_background(
     kernel_size: tuple[int, int],
     background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
 ) -> Image.Image:
-    """Generate a background from per-object modal masks and soft alphas."""
+    """Inpaint visible object coverage once on the original source image."""
     return generate_background_from_masks(
         image,
         [detected.modal_mask for detected in objects],
         [
-            detected.soft_alpha
+            _visible_soft_alpha(
+                detected.modal_mask,
+                detected.soft_alpha,
+            )
             for detected in objects
             if detected.soft_alpha is not None
         ],
