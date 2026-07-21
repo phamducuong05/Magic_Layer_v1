@@ -7,18 +7,18 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from functools import wraps
 import json
-import logging
 from time import perf_counter
 from typing import Any
 
 import numpy as np
 import torch
 
+from ..core.logging import get_logger
 from ..core.occlusion import OverlapPair, PairDecision
 from .types import DetectedObject, GroupedObject
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 REQUIRED_TIMING_STAGES = (
     "completion",

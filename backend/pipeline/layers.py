@@ -1,6 +1,5 @@
 """RGBA object-layer rendering with a background-only inpainter."""
 
-import logging
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -8,12 +7,13 @@ from PIL import Image
 
 from ..core.helpers import _bbox_from_mask, _image_to_base64
 from ..core.layerd_refine import refine_background
+from ..core.logging import get_logger, log_event
 from ..core.refine import build_inpaint_mask, refine_alpha_with_colors
 from .matting import THRESHOLD_ALPHA
 from .roi import crop_array
 from .types import GroupedObject, ObjectLayer
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 BG_REFINE_NUM_COLORS = 10
 BG_REFINE_OUTER_RATIO = 0.2
@@ -29,6 +29,14 @@ def extract_object_layers(
 
     for group in objects:
         if group.soft_alpha is None:
+            log_event(
+                logger,
+                "layer_extraction",
+                "group_decision",
+                group_id=group.group_id,
+                decision="skip",
+                reason="missing_soft_alpha",
+            )
             continue
         if group.matting_source is None or group.matting_roi is None:
             raise ValueError(
@@ -56,7 +64,29 @@ def extract_object_layers(
         support_crop = crop_array(selected_support, roi).astype(bool)
         hard_mask = support_crop | (alpha > THRESHOLD_ALPHA)
         if not np.any(hard_mask):
+            log_event(
+                logger,
+                "layer_extraction",
+                "group_decision",
+                group_id=group.group_id,
+                decision="skip",
+                reason="empty_hard_mask",
+            )
             continue
+
+        log_event(
+            logger,
+            "layer_extraction",
+            "group_decision",
+            group_id=group.group_id,
+            decision="run",
+            source=(
+                "composed_reconstructed_rgb"
+                if group.has_reconstruction
+                else "original_modal_rgb"
+            ),
+            hard_mask_pixels=int(np.count_nonzero(hard_mask)),
+        )
 
         inpaint_mask = build_inpaint_mask(
             source_rgb,
@@ -99,6 +129,14 @@ def extract_object_layers(
             (refined_alpha > THRESHOLD_ALPHA).astype(np.uint8)
         )
         if local_bbox is None:
+            log_event(
+                logger,
+                "layer_extraction",
+                "group_decision",
+                group_id=group.group_id,
+                decision="skip",
+                reason="empty_refined_alpha",
+            )
             continue
 
         local_x, local_y, layer_width, layer_height = local_bbox
@@ -132,6 +170,15 @@ def extract_object_layers(
             "[Layer] '%s' bbox=%s",
             group.display_label,
             (global_x, global_y, layer_width, layer_height),
+        )
+        log_event(
+            logger,
+            "layer_extraction",
+            "group_result",
+            group_id=group.group_id,
+            decision="layer_created",
+            bbox=(global_x, global_y, layer_width, layer_height),
+            alpha_pixels=int(np.count_nonzero(alpha_crop)),
         )
 
     return layers

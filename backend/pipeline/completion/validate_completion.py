@@ -1,16 +1,16 @@
 """Validation helpers for amodal completion outputs."""
 
-import logging
 from typing import Any
 
 import numpy as np
 
 from ...core.helpers import _bbox_area
 from ...core.layerd_refine import divide_mask_to_connected_components
+from ...core.logging import get_logger
 from ..types import DetectedObject
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _store_modal_fallback(

@@ -1,11 +1,11 @@
 """Hidden-RGB reconstruction execution for occluded objects."""
 
 from collections.abc import Callable, Sequence
-import logging
 
 import numpy as np
 from PIL import Image
 
+from ...core.logging import get_logger, log_event
 from ..roi import SquareROI, crop_array, crop_image, square_roi_from_support
 from ..types import DetectedObject
 from .validate_reconstruction import (
@@ -14,7 +14,7 @@ from .validate_reconstruction import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _store_reconstruction_failure(
@@ -34,6 +34,15 @@ def _store_reconstruction_failure(
         stage,
         reason,
     )
+    log_event(
+        logger,
+        "object_reconstruction",
+        "object_decision",
+        object_id=detected.object_id,
+        decision="modal_rgb_fallback",
+        failure_stage=stage,
+        reason=reason,
+    )
 
 
 def reconstruct_objects(
@@ -52,7 +61,23 @@ def reconstruct_objects(
         detected.reconstruction_failure_reason = None
         reconstruction_mask = detected.reconstruction_mask
         if reconstruction_mask is None or not np.any(reconstruction_mask):
+            log_event(
+                logger,
+                "object_reconstruction",
+                "object_decision",
+                object_id=detected.object_id,
+                decision="bypass",
+                reason="no_reconstruction_mask",
+            )
             continue
+        log_event(
+            logger,
+            "object_reconstruction",
+            "object_decision",
+            object_id=detected.object_id,
+            decision="run",
+            reconstruction_pixels=int(np.count_nonzero(reconstruction_mask)),
+        )
         try:
             if detected.amodal_mask is None:
                 raise ReconstructionValidationError(
@@ -80,6 +105,15 @@ def reconstruct_objects(
                 f"Continue the hidden parts of the {detected.semantic_class}, "
                 "preserving its visible appearance and surrounding context."
             )
+            log_event(
+                logger,
+                "object_reconstruction",
+                "input_prepared",
+                object_id=detected.object_id,
+                roi=(roi.x, roi.y, roi.size),
+                crop_size=source_crop.size,
+                hard_mask_pixels=int(np.count_nonzero(mask_crop)),
+            )
             reconstructed = reconstruct(source_crop, mask_image, prompt)
             validated = validate_reconstruction_result(
                 reconstructed,
@@ -100,3 +134,12 @@ def reconstruct_objects(
 
         detected.reconstruction_canvas = validated
         detected.reconstruction_roi = roi
+        log_event(
+            logger,
+            "object_reconstruction",
+            "object_decision",
+            object_id=detected.object_id,
+            decision="accepted",
+            roi=(roi.x, roi.y, roi.size),
+            output_size=validated.size,
+        )

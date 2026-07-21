@@ -8,7 +8,6 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
-import logging
 from pathlib import Path
 import sys
 from typing import Any, Sequence
@@ -17,12 +16,17 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 
-logger = logging.getLogger(__name__)
-
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backend.core.logging import (
+    CLI_LOG_FORMAT,
+    configure_logging,
+    get_logger,
+)
 from backend.pipeline.grouping import group_reconstructed_objects
+
+logger = get_logger(__name__)
 
 COLORS = [
     (239, 83, 80),
@@ -497,9 +501,9 @@ def main() -> None:
     if not keywords:
         parser.error("--keywords must contain at least one non-empty prompt")
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(levelname)s %(name)s: %(message)s",
+    configure_logging(
+        level=args.log_level,
+        log_format=CLI_LOG_FORMAT,
     )
 
     from backend.config import config

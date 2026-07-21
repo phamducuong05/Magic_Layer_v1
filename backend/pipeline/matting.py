@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 from ..core.helpers import _inference_context
+from ..core.logging import get_logger, log_event
 from .roi import (
     SquareROI,
     crop_array,
@@ -18,6 +19,7 @@ from .roi import (
 from .types import GroupedObject
 
 THRESHOLD_ALPHA = 0.005
+logger = get_logger(__name__)
 
 
 def _expand_composed_source(
@@ -119,6 +121,7 @@ def refine_objects(
                     group.composed_roi,
                     roi,
                 )
+                source_kind = "composed_reconstructed_rgb"
             else:
                 support = group.modal_mask > 0
                 roi = square_roi_from_support(
@@ -126,6 +129,18 @@ def refine_objects(
                     context_ratio=context_ratio,
                 )
                 source_crop = crop_image(source_image, roi)
+                source_kind = "original_modal_rgb"
+
+            log_event(
+                logger,
+                "matting",
+                "group_decision",
+                group_id=group.group_id,
+                decision="run",
+                source=source_kind,
+                support=("amodal" if group.has_reconstruction else "modal"),
+                roi=(roi.x, roi.y, roi.size),
+            )
 
             if roi.image_size != source_image.size:
                 raise ValueError(
@@ -169,3 +184,13 @@ def refine_objects(
             group.matting_source = source_crop
             group.matting_roi = roi
             group.soft_alpha = restore_array(alpha_crop, roi)
+            log_event(
+                logger,
+                "matting",
+                "group_result",
+                group_id=group.group_id,
+                decision="accepted",
+                alpha_pixels=int(
+                    np.count_nonzero(group.soft_alpha > THRESHOLD_ALPHA)
+                ),
+            )

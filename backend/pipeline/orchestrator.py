@@ -1,6 +1,5 @@
 """Lazy model resolution and end-to-end image pipeline orchestration."""
 
-import logging
 import threading
 from functools import wraps
 from typing import Any, Sequence
@@ -10,6 +9,7 @@ from PIL import Image
 
 from ..config import config
 from ..core.helpers import _calc_kernel_size, _image_to_base64
+from ..core.logging import get_logger, log_event, trace_stage
 from .background import generate_final_background
 from .completion import (
     complete_objects,
@@ -34,7 +34,7 @@ from .reconstruction import (
 from .segmentation import extract_raw_objects
 from .types import ProcessResult
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 _PIPELINE_LOCK = threading.RLock()
 
 
@@ -46,6 +46,21 @@ def _serialized_pipeline(function):
             return function(*args, **kwargs)
 
     return serialized
+
+
+def _trace_pipeline(function):
+    """Trace one complete request, including uncaught failures."""
+    @wraps(function)
+    def traced(image, keywords, *args, **kwargs):
+        with trace_stage(
+            logger,
+            "pipeline",
+            image_size=image.size,
+            keywords=list(keywords),
+        ):
+            return function(image, keywords, *args, **kwargs)
+
+    return traced
 
 
 def _release_stage_model(manager: Any, category: str) -> None:
@@ -98,9 +113,16 @@ def _segment(
 
 
 def _complete_candidates(
-    image: Image.Image, objects: Sequence, manager: Any
+    image: Image.Image,
+    objects: Sequence,
+    manager: Any,
+    candidates: Sequence | None = None,
 ) -> None:
-    candidates = get_completion_candidates(objects)
+    candidates = (
+        list(candidates)
+        if candidates is not None
+        else get_completion_candidates(objects)
+    )
     if candidates:
         completion_config = config.get_pipeline_config("completion")
         complete_objects(
@@ -117,6 +139,7 @@ def _complete_candidates(
 
 
 @_serialized_pipeline
+@_trace_pipeline
 def process_masks(
     image: Image.Image,
     keywords: Sequence[str],
@@ -126,18 +149,43 @@ def process_masks(
     manager = _resolve_manager(manager)
     image = image.convert("RGB")
     try:
-        objects = _segment(image, keywords, manager)
+        with trace_stage(logger, "segmentation"):
+            objects = _segment(image, keywords, manager)
+            log_event(
+                logger,
+                "segmentation",
+                "result",
+                object_count=len(objects),
+            )
     finally:
         _release_stage_model(manager, "segmentation")
     if not objects:
         return []
 
-    link_overlap_partners(objects)
-    if get_completion_candidates(objects):
+    with trace_stage(logger, "overlap_detection"):
+        pairs = link_overlap_partners(objects)
+        log_event(
+            logger,
+            "overlap_detection",
+            "result",
+            candidate_pair_count=len(pairs),
+        )
+    candidates = get_completion_candidates(objects)
+    if candidates:
         try:
-            _complete_candidates(image, objects, manager)
+            with trace_stage(
+                logger, "completion", candidate_count=len(candidates)
+            ):
+                _complete_candidates(image, objects, manager, candidates)
         finally:
             _release_stage_model(manager, "completion")
+    else:
+        log_event(
+            logger,
+            "completion",
+            "skip",
+            reason="no_cross_class_overlap_candidates",
+        )
     return [
         detected.amodal_mask
         if detected.amodal_mask is not None
@@ -147,6 +195,7 @@ def process_masks(
 
 
 @_serialized_pipeline
+@_trace_pipeline
 def process_image(
     image: Image.Image,
     keywords: Sequence[str],
@@ -166,12 +215,26 @@ def process_image(
     )
 
     try:
-        objects = _segment(image, keywords, manager)
+        with trace_stage(logger, "segmentation"):
+            objects = _segment(image, keywords, manager)
+            log_event(
+                logger,
+                "segmentation",
+                "result",
+                object_count=len(objects),
+            )
     finally:
         _release_stage_model(manager, "segmentation")
     if not objects:
         logger.warning(
             "No objects were detected; returning the original background."
+        )
+        log_event(
+            logger,
+            "pipeline",
+            "decision",
+            decision="return_original_background",
+            reason="no_objects_detected",
         )
         diagnostics = build_pipeline_diagnostics(
             raw_objects=[],
@@ -195,34 +258,74 @@ def process_image(
         )
 
     kernel_size = _calc_kernel_size(image_np, 0.0075)
-    potential_overlap_pairs = link_overlap_partners(objects)
-    completion_candidate_count = len(get_completion_candidates(objects))
+    with trace_stage(logger, "overlap_detection"):
+        potential_overlap_pairs = link_overlap_partners(objects)
+        log_event(
+            logger,
+            "overlap_detection",
+            "result",
+            candidate_pair_count=len(potential_overlap_pairs),
+        )
+    completion_candidates = get_completion_candidates(objects)
+    completion_candidate_count = len(completion_candidates)
     if completion_candidate_count:
         try:
-            with timings.measure("completion"):
-                _complete_candidates(image, objects, manager)
+            with trace_stage(
+                logger,
+                "completion",
+                candidate_count=completion_candidate_count,
+            ):
+                with timings.measure("completion"):
+                    _complete_candidates(
+                        image, objects, manager, completion_candidates
+                    )
         finally:
             _release_stage_model(manager, "completion")
-    overlap_pairs = filter_pairs_by_amodal_overlap(
-        objects, potential_overlap_pairs
-    )
+    else:
+        log_event(
+            logger,
+            "completion",
+            "skip",
+            reason="no_cross_class_overlap_candidates",
+        )
+
+    if potential_overlap_pairs:
+        with trace_stage(logger, "amodal_overlap_validation"):
+            overlap_pairs = filter_pairs_by_amodal_overlap(
+                objects, potential_overlap_pairs
+            )
+            log_event(
+                logger,
+                "amodal_overlap_validation",
+                "result",
+                retained_pair_count=len(overlap_pairs),
+            )
+    else:
+        overlap_pairs = []
+        log_event(
+            logger,
+            "amodal_overlap_validation",
+            "skip",
+            reason="no_potential_pairs",
+        )
     pair_decisions = []
     if overlap_pairs:
         completion_config = config.get_pipeline_config("completion")
-        pair_decisions = prepare_raw_reconstruction_masks(
-            objects,
-            overlap_pairs,
-            kernel_size,
-            minimum_hole_area_pixels=int(
-                completion_config["minimum_hole_area_pixels"]
-            ),
-            minimum_hole_area_ratio=float(
-                completion_config["minimum_hole_area_ratio"]
-            ),
-            tie_tolerance_ratio=float(
-                completion_config["tie_tolerance_ratio"]
-            ),
-        )
+        with trace_stage(logger, "depth_ordering"):
+            pair_decisions = prepare_raw_reconstruction_masks(
+                objects,
+                overlap_pairs,
+                kernel_size,
+                minimum_hole_area_pixels=int(
+                    completion_config["minimum_hole_area_pixels"]
+                ),
+                minimum_hole_area_ratio=float(
+                    completion_config["minimum_hole_area_ratio"]
+                ),
+                tie_tolerance_ratio=float(
+                    completion_config["tie_tolerance_ratio"]
+                ),
+            )
 
         needs_reconstruction = any(
             detected.reconstruction_mask is not None
@@ -233,29 +336,40 @@ def process_image(
             if manager.has_object_reconstruction_model():
                 reconstruction_model = None
                 try:
-                    reconstruction_model = (
-                        manager.get_object_reconstruction_model()
-                    )
-                    if reconstruction_model is None:
-                        _mark_missing_reconstruction_model(objects)
-                    else:
-                        reconstruction_config = config.get_pipeline_config(
-                            "object_reconstruction"
+                    with trace_stage(logger, "object_reconstruction"):
+                        reconstruction_model = (
+                            manager.get_object_reconstruction_model()
                         )
-                        with timings.measure("object_reconstruction"):
-                            reconstruct_objects(
-                                image,
-                                objects,
-                                reconstruction_model.reconstruct,
-                                context_ratio=float(
-                                    reconstruction_config["context_ratio"]
-                                ),
-                                blend_allowance_ratio=float(
-                                    reconstruction_config[
-                                        "blend_allowance_ratio"
-                                    ]
-                                ),
+                        if reconstruction_model is None:
+                            _mark_missing_reconstruction_model(objects)
+                            log_event(
+                                logger,
+                                "object_reconstruction",
+                                "skip",
+                                reason="model_not_resolved",
                             )
+                        else:
+                            reconstruction_config = (
+                                config.get_pipeline_config(
+                                    "object_reconstruction"
+                                )
+                            )
+                            with timings.measure("object_reconstruction"):
+                                reconstruct_objects(
+                                    image,
+                                    objects,
+                                    reconstruction_model.reconstruct,
+                                    context_ratio=float(
+                                        reconstruction_config[
+                                            "context_ratio"
+                                        ]
+                                    ),
+                                    blend_allowance_ratio=float(
+                                        reconstruction_config[
+                                            "blend_allowance_ratio"
+                                        ]
+                                    ),
+                                )
                 finally:
                     reconstruction_model = None
                     _release_stage_model(
@@ -263,27 +377,61 @@ def process_image(
                     )
             else:
                 _mark_missing_reconstruction_model(objects)
+                log_event(
+                    logger,
+                    "object_reconstruction",
+                    "skip",
+                    reason="model_not_configured",
+                )
+        else:
+            log_event(
+                logger,
+                "object_reconstruction",
+                "skip",
+                reason="no_reconstruction_masks",
+            )
+    else:
+        log_event(
+            logger,
+            "depth_ordering",
+            "skip",
+            reason="no_retained_amodal_overlap_pairs",
+        )
+        log_event(
+            logger,
+            "object_reconstruction",
+            "skip",
+            reason="no_depth_ordered_occluded_objects",
+        )
 
-    with timings.measure("group_composition"):
-        final_groups = group_reconstructed_objects(objects)
-        compose_group_sources(image, final_groups)
+    with trace_stage(logger, "grouping", object_count=len(objects)):
+        with timings.measure("group_composition"):
+            final_groups = group_reconstructed_objects(objects)
+            compose_group_sources(image, final_groups)
+        log_event(
+            logger,
+            "grouping",
+            "result",
+            group_count=len(final_groups),
+        )
 
     matting_config = config.get_pipeline_config("matting")
     matting_model = None
     matte = None
     try:
-        matting_model = manager.get_matting_model()
-        matte = matting_model.process
-        with timings.measure("matting"):
-            refine_objects(
-                image,
-                final_groups,
-                matte,
-                context_ratio=float(matting_config["context_ratio"]),
-                support_dilation_pixels=int(
-                    matting_config["support_dilation_pixels"]
-                ),
-            )
+        with trace_stage(logger, "matting", group_count=len(final_groups)):
+            matting_model = manager.get_matting_model()
+            matte = matting_model.process
+            with timings.measure("matting"):
+                refine_objects(
+                    image,
+                    final_groups,
+                    matte,
+                    context_ratio=float(matting_config["context_ratio"]),
+                    support_dilation_pixels=int(
+                        matting_config["support_dilation_pixels"]
+                    ),
+                )
     finally:
         matte = None
         matting_model = None
@@ -296,12 +444,22 @@ def process_image(
         background_inpaint = timings.wrap(
             "background_inpainting", background_model.process
         )
-        layers = extract_object_layers(
-            final_groups, kernel_size, background_inpaint
-        )
-        background = generate_final_background(
-            image, final_groups, kernel_size, background_inpaint
-        )
+        with trace_stage(
+            logger, "layer_extraction", group_count=len(final_groups)
+        ):
+            layers = extract_object_layers(
+                final_groups, kernel_size, background_inpaint
+            )
+            log_event(
+                logger,
+                "layer_extraction",
+                "result",
+                layer_count=len(layers),
+            )
+        with trace_stage(logger, "background_inpainting"):
+            background = generate_final_background(
+                image, final_groups, kernel_size, background_inpaint
+            )
     finally:
         background_inpaint = None
         background_model = None

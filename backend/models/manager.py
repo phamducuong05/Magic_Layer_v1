@@ -1,10 +1,10 @@
 import gc
-import logging
 from typing import Optional
 
 import torch
 
 from ..config import config
+from ..core.logging import get_logger
 from .registry import ModelRegistry
 from .base import (
     BaseBackgroundInpaintingModel,
@@ -20,7 +20,7 @@ from .background_inpainting import lama, sdxl
 from .completion import adapter
 from .object_reconstruction import adapter as object_reconstruction_adapter
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _release_cuda_memory() -> None:

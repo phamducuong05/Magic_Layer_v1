@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import gc
 import importlib
-import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,10 +14,11 @@ import numpy as np
 import torch
 from PIL import Image
 
+from ...core.logging import get_logger, trace_stage
 from ..base import BaseObjectReconstructionModel
 from ..registry import ModelRegistry
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ObjectReconstructionError(RuntimeError):
@@ -350,19 +350,26 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                     if self._settings["method"] in {"rasg", "painta+rasg"}
                     else self._runtime.sd_run
                 )
-                generated = runner(
-                    ddim=self._inpainting_model,
+                with trace_stage(
+                    logger,
+                    "hd_painter_generation_512",
                     method=self._settings["method"],
-                    prompt=prompt,
-                    image=self._runtime.IImage(low_image),
-                    mask=self._runtime.IImage(low_mask),
-                    seed=self._settings["seed"],
-                    eta=self._settings["rasg_eta"],
-                    negative_prompt=self._settings["negative_prompt"],
-                    positive_prompt=self._settings["positive_prompt"],
+                    input_size=low_image.size,
                     num_steps=self._settings["num_steps"],
-                    guidance_scale=self._settings["guidance_scale"],
-                )
+                ):
+                    generated = runner(
+                        ddim=self._inpainting_model,
+                        method=self._settings["method"],
+                        prompt=prompt,
+                        image=self._runtime.IImage(low_image),
+                        mask=self._runtime.IImage(low_mask),
+                        seed=self._settings["seed"],
+                        eta=self._settings["rasg_eta"],
+                        negative_prompt=self._settings["negative_prompt"],
+                        positive_prompt=self._settings["positive_prompt"],
+                        num_steps=self._settings["num_steps"],
+                        guidance_scale=self._settings["guidance_scale"],
+                    )
                 result = self._to_single_pil(generated)
 
                 sr = self._settings["super_resolution"]
@@ -384,29 +391,33 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                     sr_prompt = prompt
                     if sr["prompt_suffix"]:
                         sr_prompt = f"{prompt}, {sr['prompt_suffix']}"
-                    result = self._to_single_pil(
-                        self._runtime.sr_run(
-                            ddim=self._sr_model,
-                            sam_predictor=None,
-                            # methods/sr.py expects PIL images here: it reads
-                            # hr_image.info before constructing its own IImage
-                            # wrappers for all three inputs.
-                            lr_image=result,
-                            hr_image=source,
-                            hr_mask=hard_mask.convert("RGB"),
-                            prompt=sr_prompt,
-                            noise_level=sr["noise_level"],
-                            blend_output=sr["blend_output"],
-                            blend_trick=sr["blend_trick"],
-                            dt=sr["denoising_stride"],
-                            seed=self._settings["seed"],
-                            guidance_scale=sr["guidance_scale"],
-                            negative_prompt=self._settings[
-                                "negative_prompt"
-                            ],
-                            use_sam_mask=False,
+                    with trace_stage(
+                        logger,
+                        "hd_painter_super_resolution",
+                        source_size=source.size,
+                        target_size=sr["target_size"],
+                    ):
+                        result = self._to_single_pil(
+                            self._runtime.sr_run(
+                                ddim=self._sr_model,
+                                sam_predictor=None,
+                                # The SR runner reads PIL image metadata.
+                                lr_image=result,
+                                hr_image=source,
+                                hr_mask=hard_mask.convert("RGB"),
+                                prompt=sr_prompt,
+                                noise_level=sr["noise_level"],
+                                blend_output=sr["blend_output"],
+                                blend_trick=sr["blend_trick"],
+                                dt=sr["denoising_stride"],
+                                seed=self._settings["seed"],
+                                guidance_scale=sr["guidance_scale"],
+                                negative_prompt=self._settings[
+                                    "negative_prompt"
+                                ],
+                                use_sam_mask=False,
+                            )
                         )
-                    )
             except ObjectReconstructionError as exc:
                 if exc.stage != "inference":
                     raise

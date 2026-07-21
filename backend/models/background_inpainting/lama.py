@@ -1,13 +1,12 @@
-import logging
-
 from PIL import Image
 from simple_lama_inpainting import SimpleLama
 
 from ...core.helpers import _prepare_inpaint_masks, _preserve_unmasked_pixels
+from ...core.logging import get_logger
 from ..base import BaseBackgroundInpaintingModel
 from ..registry import ModelRegistry
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @ModelRegistry.register("background_inpainting", "lama")

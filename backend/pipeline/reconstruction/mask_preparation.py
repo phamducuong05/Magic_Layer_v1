@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from ...core.layerd_refine import expand_mask
+from ...core.logging import get_logger, log_event
 from ...core.occlusion import (
     OverlapPair,
     PairDecision,
@@ -12,6 +13,9 @@ from ...core.occlusion import (
     effective_hole_area,
 )
 from ..types import DetectedObject
+
+
+logger = get_logger(__name__)
 
 
 def apply_pair_decisions(
@@ -24,9 +28,28 @@ def apply_pair_decisions(
 
     for decision in decisions:
         if decision.ambiguous:
+            log_event(
+                logger,
+                "depth_ordering",
+                "pair_assignment",
+                first_id=decision.first_id,
+                second_id=decision.second_id,
+                decision="skip",
+                reason="ambiguous_completion_hole_areas",
+            )
             continue
         objects_by_id[decision.occluded_id].occluder_ids.add(
             decision.occluder_id
+        )
+        log_event(
+            logger,
+            "depth_ordering",
+            "pair_assignment",
+            first_id=decision.first_id,
+            second_id=decision.second_id,
+            decision="assign",
+            occluded_id=decision.occluded_id,
+            occluder_id=decision.occluder_id,
         )
 
 
@@ -46,6 +69,21 @@ def build_reconstruction_masks(
             or detected.amodal_mask is None
             or detected.completion_hole_mask is None
         ):
+            missing = []
+            if not detected.occluder_ids:
+                missing.append("no_assigned_occluder")
+            if detected.amodal_mask is None:
+                missing.append("missing_amodal_mask")
+            if detected.completion_hole_mask is None:
+                missing.append("missing_completion_hole_mask")
+            log_event(
+                logger,
+                "reconstruction_mask",
+                "decision",
+                object_id=detected.object_id,
+                decision="skip",
+                reason=",".join(missing),
+            )
             continue
 
         # Bước 1: Gộp tất cả modal mask (phần hiển thị) của các đối tượng che khuất (occluders)
@@ -71,6 +109,23 @@ def build_reconstruction_masks(
         # gộp phần completion hole đã có với phần occluder liên quan vừa tìm được.
         detected.reconstruction_mask = (
             detected.completion_hole_mask | relevant_occluder
+        )
+        log_event(
+            logger,
+            "reconstruction_mask",
+            "decision",
+            object_id=detected.object_id,
+            decision="created",
+            occluder_ids=sorted(detected.occluder_ids),
+            completion_hole_pixels=int(
+                np.count_nonzero(detected.completion_hole_mask)
+            ),
+            relevant_occluder_pixels=int(
+                np.count_nonzero(relevant_occluder)
+            ),
+            reconstruction_pixels=int(
+                np.count_nonzero(detected.reconstruction_mask)
+            ),
         )
 
 
@@ -98,12 +153,35 @@ def prepare_raw_reconstruction_masks(
         )
         detected.effective_completion_hole_area = effective_area
         effective_areas[detected.object_id] = effective_area
+        log_event(
+            logger,
+            "depth_ordering",
+            "object_hole",
+            object_id=detected.object_id,
+            raw_hole_area=raw_area,
+            effective_hole_area=effective_area,
+            modal_area=int(np.count_nonzero(detected.modal_mask)),
+            decision="retain" if effective_area else "suppress_as_noise",
+        )
 
     decisions = assign_pair_roles(
         retained_pairs,
         effective_areas,
         tie_tolerance_ratio=tie_tolerance_ratio,
     )
+    for decision in decisions:
+        log_event(
+            logger,
+            "depth_ordering",
+            "pair_decision",
+            first_id=decision.first_id,
+            second_id=decision.second_id,
+            first_hole_area=effective_areas[decision.first_id],
+            second_hole_area=effective_areas[decision.second_id],
+            decision="ambiguous" if decision.ambiguous else "ordered",
+            occluded_id=decision.occluded_id,
+            occluder_id=decision.occluder_id,
+        )
     apply_pair_decisions(objects, decisions)
     build_reconstruction_masks(objects, kernel_size)
     return decisions

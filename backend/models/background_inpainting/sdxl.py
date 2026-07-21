@@ -1,14 +1,13 @@
-import logging
-
 import torch
 from diffusers import AutoPipelineForInpainting
 from PIL import Image
 
 from ...core.helpers import _prepare_inpaint_masks, _preserve_unmasked_pixels
+from ...core.logging import get_logger
 from ..base import BaseBackgroundInpaintingModel
 from ..registry import ModelRegistry
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @ModelRegistry.register("background_inpainting", "sdxl")

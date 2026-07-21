@@ -6,8 +6,12 @@ import numpy as np
 from PIL import Image
 
 from ..core.helpers import _bbox_from_mask
+from ..core.logging import get_logger, log_event
 from .roi import crop_image, square_roi_from_support
 from .types import DetectedObject, GroupedObject
+
+
+logger = get_logger(__name__)
 
 
 def _boxes_overlap(
@@ -61,14 +65,30 @@ def group_reconstructed_objects(
     for first_index, first in enumerate(ordered):
         for second_index in range(first_index + 1, len(ordered)):
             second = ordered[second_index]
-            if (
-                first.semantic_class == second.semantic_class
-                and _boxes_overlap(
-                    first.original_modal_bbox,
-                    second.original_modal_bbox,
-                )
-            ):
+            same_class = first.semantic_class == second.semantic_class
+            bbox_overlap = _boxes_overlap(
+                first.original_modal_bbox,
+                second.original_modal_bbox,
+            )
+            if same_class and bbox_overlap:
                 union(first_index, second_index)
+                decision = "merge"
+                reason = "same_class_bbox_overlap"
+            elif not same_class:
+                decision = "keep_separate"
+                reason = "different_semantic_class"
+            else:
+                decision = "keep_separate"
+                reason = "original_modal_bboxes_do_not_overlap"
+            log_event(
+                logger,
+                "grouping",
+                "pair_decision",
+                first_id=first.object_id,
+                second_id=second.object_id,
+                decision=decision,
+                reason=reason,
+            )
 
     grouped_indices: dict[int, list[int]] = {}
     for index in range(len(ordered)):
@@ -92,18 +112,26 @@ def group_reconstructed_objects(
         if bbox is None:
             raise ValueError("a final group cannot contain only empty masks")
         first = members[0]
-        groups.append(
-            GroupedObject(
-                group_id=f"group-{first.object_id}",
-                semantic_class=first.semantic_class,
-                display_label=first.display_label,
-                member_ids=tuple(member.object_id for member in members),
-                members=members,
-                modal_mask=grouped_modal.astype(np.uint8) * 255,
-                amodal_mask=grouped_amodal,
-                bbox=bbox,
-                segmentation_index=first.segmentation_index,
-            )
+        group = GroupedObject(
+            group_id=f"group-{first.object_id}",
+            semantic_class=first.semantic_class,
+            display_label=first.display_label,
+            member_ids=tuple(member.object_id for member in members),
+            members=members,
+            modal_mask=grouped_modal.astype(np.uint8) * 255,
+            amodal_mask=grouped_amodal,
+            bbox=bbox,
+            segmentation_index=first.segmentation_index,
+        )
+        groups.append(group)
+        log_event(
+            logger,
+            "grouping",
+            "group_created",
+            group_id=group.group_id,
+            semantic_class=group.semantic_class,
+            member_ids=list(group.member_ids),
+            bbox=group.bbox,
         )
     return groups
 
@@ -160,6 +188,15 @@ def compose_group_sources(
             member_roi = member.reconstruction_roi
             reconstruction_mask = member.reconstruction_mask
             if canvas is None and member_roi is None:
+                log_event(
+                    logger,
+                    "group_composition",
+                    "member_decision",
+                    group_id=group.group_id,
+                    object_id=member.object_id,
+                    decision="use_original_rgb",
+                    reason="member_not_reconstructed",
+                )
                 continue
             if (
                 canvas is None
@@ -241,6 +278,15 @@ def compose_group_sources(
                 )
                 if conflict_record not in conflicts:
                     conflicts.append(conflict_record)
+                    log_event(
+                        logger,
+                        "group_composition",
+                        "conflict_decision",
+                        group_id=group.group_id,
+                        winner_id=conflict_record[0],
+                        loser_id=conflict_record[1],
+                        decision="first_reconstruction_wins",
+                    )
             # Overlay the reconstructed pixels onto the composite image
             destination = composed[destination_y, destination_x]
             candidate = np.asarray(canvas.convert("RGB"), dtype=np.uint8)[
@@ -250,7 +296,32 @@ def compose_group_sources(
             # Block later members from overwriting these accepted pixels.
             filled_reconstruction[destination_y, destination_x] |= writable
             owner_crop[writable] = member_index
+            log_event(
+                logger,
+                "group_composition",
+                "member_decision",
+                group_id=group.group_id,
+                object_id=member.object_id,
+                decision="apply_reconstructed_rgb",
+                written_pixels=int(np.count_nonzero(writable)),
+                protected_modal_pixels=int(
+                    np.count_nonzero(
+                        permitted
+                        & protected_modal[destination_y, destination_x]
+                    )
+                ),
+                conflict_pixels=int(np.count_nonzero(conflict)),
+            )
 
         group.composed_source = Image.fromarray(composed, mode="RGB")
         group.composed_roi = roi
         group.reconstruction_conflicts = tuple(conflicts)
+        log_event(
+            logger,
+            "group_composition",
+            "group_result",
+            group_id=group.group_id,
+            roi=(roi.x, roi.y, roi.size),
+            has_reconstruction=group.has_reconstruction,
+            reconstruction_conflicts=list(group.reconstruction_conflicts),
+        )

@@ -7,7 +7,6 @@ Endpoints:
 """
 
 import io
-import logging
 from typing import List
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -19,20 +18,19 @@ from pydantic import BaseModel
 import numpy as np
 
 try:
+    from .core.logging import configure_logging, get_logger
     from .image_processor import ProcessResult, process_image
     from .models import model_manager
 except ImportError:  # Legacy: run uvicorn from inside backend/.
+    from core.logging import configure_logging, get_logger
     from image_processor import ProcessResult, process_image
     from models import model_manager
 
 # ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-)
-logger = logging.getLogger(__name__)
+configure_logging()
+logger = get_logger(__name__)
 
 
 # ──────────────────────────────────────────────

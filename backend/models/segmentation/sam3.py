@@ -1,12 +1,12 @@
-import logging
 from typing import Any, Dict
 from sam3 import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
 
 from ..base import BaseSegmentationModel
 from ..registry import ModelRegistry
+from ...core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 @ModelRegistry.register("segmentation", "sam3")
 class Sam3SegmentationModel(BaseSegmentationModel):

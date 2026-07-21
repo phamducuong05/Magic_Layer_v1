@@ -1,4 +1,5 @@
 import importlib.util
+import logging
 import os
 import subprocess
 import sys
@@ -321,6 +322,29 @@ def test_optional_super_resolution_uses_original_crop_and_mask(monkeypatch):
     assert sr_kwargs["hr_mask"].mode == "RGB"
     assert result.size == image.size
     assert result.getpixel((0, 0)) == (70, 80, 90)
+
+
+def test_hd_painter_logs_generation_and_super_resolution_stages(
+    monkeypatch, caplog
+):
+    runtime, _, _ = make_runtime()
+    model = build_adapter(
+        monkeypatch,
+        config={"super_resolution": {"enabled": True}},
+        runtime=runtime,
+    )
+
+    with caplog.at_level(logging.INFO):
+        model.reconstruct(
+            Image.new("RGB", (32, 32), "white"),
+            Image.new("L", (32, 32), 255),
+            "hidden object",
+        )
+
+    assert "[HD_PAINTER_GENERATION_512] START" in caplog.text
+    assert "[HD_PAINTER_GENERATION_512] COMPLETE" in caplog.text
+    assert "[HD_PAINTER_SUPER_RESOLUTION] START" in caplog.text
+    assert "[HD_PAINTER_SUPER_RESOLUTION] COMPLETE" in caplog.text
 
 
 def test_super_resolution_receives_pil_images_with_source_metadata(monkeypatch):

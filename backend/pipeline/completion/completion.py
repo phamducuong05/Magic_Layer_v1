@@ -1,7 +1,6 @@
 """Cross-class overlap linking and explicit-model amodal completion."""
 
 from collections.abc import Sequence
-import logging
 from typing import Any
 
 import numpy as np
@@ -12,6 +11,7 @@ from ...core.occlusion import (
     OverlapPair,
     find_cross_class_overlaps,
 )
+from ...core.logging import get_logger, log_event
 from ..types import DetectedObject
 from .validate_completion import (
     _store_modal_fallback,
@@ -20,7 +20,7 @@ from .validate_completion import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def link_overlap_partners(
@@ -44,6 +44,15 @@ def link_overlap_partners(
     for first_id, second_id in pairs:
         objects_by_id[first_id].overlap_partner_ids.add(second_id)
         objects_by_id[second_id].overlap_partner_ids.add(first_id)
+        log_event(
+            logger,
+            "overlap_detection",
+            "pair_decision",
+            first_id=first_id,
+            second_id=second_id,
+            decision="completion_candidate",
+            reason="cross_class_bbox_overlap",
+        )
 
     return pairs
 
@@ -52,7 +61,26 @@ def get_completion_candidates(
     objects: Sequence[DetectedObject],
 ) -> list[DetectedObject]:
     """Return overlapping objects once each, preserving object order."""
-    return [detected for detected in objects if detected.overlap_partner_ids]
+    candidates = [
+        detected for detected in objects if detected.overlap_partner_ids
+    ]
+    for detected in objects:
+        log_event(
+            logger,
+            "completion",
+            "object_decision",
+            object_id=detected.object_id,
+            decision=(
+                "complete" if detected.overlap_partner_ids else "bypass"
+            ),
+            overlap_partner_ids=sorted(detected.overlap_partner_ids),
+            reason=(
+                "cross_class_bbox_overlap"
+                if detected.overlap_partner_ids
+                else "no_cross_class_bbox_overlap"
+            ),
+        )
+    return candidates
 
 
 def complete_objects(
@@ -87,6 +115,15 @@ def complete_objects(
             _store_modal_fallback(
                 detected, stage="inference", reason=reason
             )
+            log_event(
+                logger,
+                "completion",
+                "object_decision",
+                object_id=detected.object_id,
+                decision="modal_fallback",
+                reason=reason,
+                failure_stage="inference",
+            )
         return
 
     if not isinstance(outputs, Sequence) or len(outputs) != len(candidates):
@@ -105,6 +142,15 @@ def complete_objects(
             _store_modal_fallback(
                 detected, stage="output_contract", reason=reason
             )
+            log_event(
+                logger,
+                "completion",
+                "object_decision",
+                object_id=detected.object_id,
+                decision="modal_fallback",
+                reason=reason,
+                failure_stage="output_contract",
+            )
         return
 
     for detected, output in zip(candidates, outputs):
@@ -120,8 +166,30 @@ def complete_objects(
                 detected.object_id,
             )
             _store_modal_fallback(detected)
+            log_event(
+                logger,
+                "completion",
+                "object_decision",
+                object_id=detected.object_id,
+                decision="modal_fallback",
+                reason=(
+                    detected.completion_failure_reason
+                    or "completion_validation_failed"
+                ),
+                failure_stage=detected.completion_failure_stage,
+            )
             continue
         _store_valid_completion(detected, amodal_mask)
+        log_event(
+            logger,
+            "completion",
+            "object_decision",
+            object_id=detected.object_id,
+            decision="accepted",
+            modal_area=int(np.count_nonzero(detected.modal_mask)),
+            amodal_area=int(np.count_nonzero(amodal_mask)),
+            completion_hole_area=detected.completion_hole_area,
+        )
 
 
 def filter_pairs_by_amodal_overlap(
@@ -142,6 +210,15 @@ def filter_pairs_by_amodal_overlap(
         )
         if overlaps:
             retained.append((first_id, second_id))
+            log_event(
+                logger,
+                "amodal_overlap_validation",
+                "pair_decision",
+                first_id=first_id,
+                second_id=second_id,
+                decision="retain",
+                reason="validated_amodal_masks_overlap",
+            )
             continue
 
         logger.info(
@@ -149,6 +226,15 @@ def filter_pairs_by_amodal_overlap(
             "skipping depth ordering and reconstruction for this pair.",
             first_id,
             second_id,
+        )
+        log_event(
+            logger,
+            "amodal_overlap_validation",
+            "pair_decision",
+            first_id=first_id,
+            second_id=second_id,
+            decision="reject",
+            reason="validated_amodal_masks_do_not_overlap",
         )
 
     return retained

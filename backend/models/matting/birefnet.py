@@ -1,4 +1,3 @@
-import logging
 import torch
 import torchvision.transforms as T
 from PIL import Image
@@ -6,8 +5,9 @@ from transformers import AutoModelForImageSegmentation
 
 from ..base import BaseMattingModel
 from ..registry import ModelRegistry
+from ...core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 @ModelRegistry.register("matting", "birefnet")
 class BiRefNetMattingModel(BaseMattingModel):
