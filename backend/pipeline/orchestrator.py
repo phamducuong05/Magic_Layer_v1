@@ -63,8 +63,15 @@ def _trace_pipeline(function):
     return traced
 
 
-def _release_stage_model(manager: Any, category: str) -> None:
-    """Release a stage model when supported by the supplied manager."""
+def _release_stage_model(
+    manager: Any, category: str, *, retain_cpu: bool = False
+) -> None:
+    """Release a stage model, optionally retaining reusable CPU weights."""
+    if retain_cpu:
+        offload = getattr(manager, "offload_model", None)
+        if callable(offload):
+            offload(category)
+            return
     release = getattr(manager, "release_model", None)
     if callable(release):
         release(category)
@@ -335,6 +342,7 @@ def process_image(
         if needs_reconstruction:
             if manager.has_object_reconstruction_model():
                 reconstruction_model = None
+                retain_reconstruction_weights = False
                 try:
                     with trace_stage(logger, "object_reconstruction"):
                         reconstruction_model = (
@@ -349,6 +357,7 @@ def process_image(
                                 reason="model_not_resolved",
                             )
                         else:
+                            retain_reconstruction_weights = True
                             reconstruction_config = (
                                 config.get_pipeline_config(
                                     "object_reconstruction"
@@ -359,6 +368,9 @@ def process_image(
                                     image,
                                     objects,
                                     reconstruction_model.reconstruct,
+                                    reconstruct_many=(
+                                        reconstruction_model.reconstruct_many
+                                    ),
                                     context_ratio=float(
                                         reconstruction_config[
                                             "context_ratio"
@@ -373,7 +385,9 @@ def process_image(
                 finally:
                     reconstruction_model = None
                     _release_stage_model(
-                        manager, "object_reconstruction"
+                        manager,
+                        "object_reconstruction",
+                        retain_cpu=retain_reconstruction_weights,
                     )
             else:
                 _mark_missing_reconstruction_model(objects)

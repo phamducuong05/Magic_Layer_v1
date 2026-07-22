@@ -489,6 +489,135 @@ def test_sequential_cpu_offload_keeps_only_active_stage_on_cuda(monkeypatch):
     assert empty_cache.call_count >= 2
 
 
+def test_reconstruct_many_runs_generation_phase_once_before_conditional_sr(
+    monkeypatch,
+):
+    moves = []
+    calls = []
+    inpainting_model = FakeDDIM("inpainting", moves)
+    sr_model = FakeDDIM("sr", moves, super_resolution=True)
+
+    def generation(**_kwargs):
+        calls.append("generation")
+        return FakeIImage(Image.new("RGB", (512, 512), "green"))
+
+    def super_resolution(**_kwargs):
+        calls.append("super_resolution")
+        return Image.new("RGB", (2048, 2048), "blue")
+
+    runtime = SimpleNamespace(
+        IImage=FakeIImage,
+        load_inpainting_model=lambda **_kwargs: inpainting_model,
+        load_sr_model=lambda **_kwargs: sr_model,
+        sd_run=generation,
+        rasg_run=generation,
+        sr_run=super_resolution,
+        reset_state=Mock(),
+    )
+    model = build_adapter(
+        monkeypatch,
+        config={
+            "sequential_cpu_offload": True,
+            "super_resolution": {
+                "enabled": True,
+                "minimum_roi_size": 128,
+            },
+        },
+        runtime=runtime,
+    )
+    moves.clear()
+
+    outcomes = model.reconstruct_many(
+        [
+            (
+                Image.new("RGB", (64, 64), "white"),
+                Image.new("L", (64, 64), 255),
+                "small object",
+            ),
+            (
+                Image.new("RGB", (256, 256), "white"),
+                Image.new("L", (256, 256), 255),
+                "large object",
+            ),
+        ]
+    )
+
+    assert calls == ["generation", "generation", "super_resolution"]
+    assert all(isinstance(outcome, Image.Image) for outcome in outcomes)
+    assert outcomes[0].size == (64, 64)
+    assert outcomes[0].getpixel((0, 0)) == (0, 128, 0)
+    assert outcomes[1].size == (256, 256)
+    assert outcomes[1].getpixel((0, 0)) == (0, 0, 255)
+    assert moves.count(("inpainting.unet", "cuda:0")) == 1
+    assert moves.count(("sr.unet", "cuda:0")) == 1
+
+
+def test_reconstruct_many_isolates_generation_failure_and_continues_sr(
+    monkeypatch,
+):
+    runtime, calls, _ = make_runtime()
+    generation_count = 0
+
+    def generation(**_kwargs):
+        nonlocal generation_count
+        generation_count += 1
+        if generation_count == 1:
+            raise RuntimeError("first generation failed")
+        calls.append(("generation_success", {}))
+        return FakeIImage(Image.new("RGB", (512, 512), "green"))
+
+    runtime.rasg_run = generation
+    model = build_adapter(
+        monkeypatch,
+        config={"super_resolution": {"enabled": True}},
+        runtime=runtime,
+    )
+    mask = Image.new("L", (64, 64), 255)
+
+    outcomes = model.reconstruct_many(
+        [
+            (Image.new("RGB", (64, 64)), mask, "first"),
+            (Image.new("RGB", (64, 64)), mask, "second"),
+        ]
+    )
+
+    assert isinstance(outcomes[0], Exception)
+    assert outcomes[0].stage == "generation_512"
+    assert isinstance(outcomes[1], Image.Image)
+    assert [name for name, _ in calls if name == "run_sr"] == ["run_sr"]
+
+
+def test_offload_to_cpu_preserves_loaded_weights_and_runtime_cache(
+    monkeypatch,
+):
+    moves = []
+    inpainting_model = FakeDDIM("inpainting", moves)
+    sr_model = FakeDDIM("sr", moves, super_resolution=True)
+    runtime = SimpleNamespace(
+        IImage=FakeIImage,
+        load_inpainting_model=lambda **_kwargs: inpainting_model,
+        load_sr_model=lambda **_kwargs: sr_model,
+        sd_run=Mock(),
+        rasg_run=Mock(),
+        sr_run=Mock(),
+        reset_state=Mock(),
+        clear_model_cache=Mock(),
+    )
+    model = build_adapter(
+        monkeypatch,
+        config={"super_resolution": {"enabled": True}},
+        runtime=runtime,
+    )
+
+    model.offload_to_cpu()
+
+    assert model._inpainting_model is inpainting_model
+    assert model._sr_model is sr_model
+    assert inpainting_model.unet.device == "cpu"
+    assert sr_model.unet.device == "cpu"
+    runtime.clear_model_cache.assert_not_called()
+
+
 def test_unload_clears_hd_painter_runtime_cache_and_owned_weights(monkeypatch):
     from backend.models.object_reconstruction import adapter as module
 
@@ -522,6 +651,7 @@ def test_unload_clears_hd_painter_runtime_cache_and_owned_weights(monkeypatch):
         ({"num_steps": 1001}, "num_steps"),
         ({"guidance_scale": 0}, "guidance_scale"),
         ({"super_resolution": {"enabled": True, "use_sam_mask": True}}, "use_sam_mask"),
+        ({"super_resolution": {"minimum_roi_size": -1}}, "minimum_roi_size"),
     ],
 )
 def test_invalid_configuration_is_rejected_before_runtime_import(

@@ -1,6 +1,7 @@
 """Hidden-RGB reconstruction execution for occluded objects."""
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image
@@ -15,6 +16,18 @@ from .validate_reconstruction import (
 
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _PreparedReconstruction:
+    detected: DetectedObject
+    roi: SquareROI
+    source_crop: Image.Image
+    mask_image: Image.Image
+    mask_crop: np.ndarray
+    hole_crop: np.ndarray
+    modal_crop: np.ndarray
+    prompt: str
 
 
 def _store_reconstruction_failure(
@@ -50,10 +63,16 @@ def reconstruct_objects(
     objects: Sequence[DetectedObject],
     reconstruct: Callable[[Image.Image, Image.Image, str], Image.Image],
     *,
+    reconstruct_many: Callable[
+        [Sequence[tuple[Image.Image, Image.Image, str]]],
+        Sequence[Image.Image | Exception],
+    ]
+    | None = None,
     context_ratio: float,
     blend_allowance_ratio: float = 0.0,
 ) -> None:
     """Reconstruct and validate hidden RGB independently for each raw object."""
+    prepared: list[_PreparedReconstruction] = []
     for detected in objects:
         detected.reconstruction_canvas = None
         detected.reconstruction_roi = None
@@ -114,15 +133,17 @@ def reconstruct_objects(
                 crop_size=source_crop.size,
                 hard_mask_pixels=int(np.count_nonzero(mask_crop)),
             )
-            reconstructed = reconstruct(source_crop, mask_image, prompt)
-            validated = validate_reconstruction_result(
-                reconstructed,
-                source_crop=source_crop,
-                hard_mask=mask_crop,
-                completion_hole=hole_crop,
-                modal_mask=modal_crop,
-                roi=roi,
-                blend_allowance_ratio=blend_allowance_ratio,
+            prepared.append(
+                _PreparedReconstruction(
+                    detected=detected,
+                    roi=roi,
+                    source_crop=source_crop,
+                    mask_image=mask_image,
+                    mask_crop=mask_crop,
+                    hole_crop=hole_crop,
+                    modal_crop=modal_crop,
+                    prompt=prompt,
+                )
             )
         except Exception as exc:
             _store_reconstruction_failure(
@@ -132,14 +153,74 @@ def reconstruct_objects(
             )
             continue
 
+    if reconstruct_many is None:
+        outcomes: Sequence[Image.Image | Exception] = []
+        single_outcomes: list[Image.Image | Exception] = []
+        for item in prepared:
+            try:
+                single_outcomes.append(
+                    reconstruct(
+                        item.source_crop,
+                        item.mask_image,
+                        item.prompt,
+                    )
+                )
+            except Exception as exc:
+                single_outcomes.append(exc)
+        outcomes = single_outcomes
+    else:
+        try:
+            outcomes = reconstruct_many(
+                [
+                    (item.source_crop, item.mask_image, item.prompt)
+                    for item in prepared
+                ]
+            )
+        except Exception as exc:
+            outcomes = [exc] * len(prepared)
+
+    if len(outcomes) != len(prepared):
+        mismatch = ReconstructionValidationError(
+            "inference",
+            "batch reconstruction returned an unexpected result count",
+        )
+        outcomes = [mismatch] * len(prepared)
+
+    for item, reconstructed in zip(prepared, outcomes):
+        detected = item.detected
+        if isinstance(reconstructed, Exception):
+            _store_reconstruction_failure(
+                detected,
+                stage=str(getattr(reconstructed, "stage", "inference")),
+                reason=str(reconstructed) or type(reconstructed).__name__,
+            )
+            continue
+        try:
+            validated = validate_reconstruction_result(
+                reconstructed,
+                source_crop=item.source_crop,
+                hard_mask=item.mask_crop,
+                completion_hole=item.hole_crop,
+                modal_mask=item.modal_crop,
+                roi=item.roi,
+                blend_allowance_ratio=blend_allowance_ratio,
+            )
+        except Exception as exc:
+            _store_reconstruction_failure(
+                detected,
+                stage=str(getattr(exc, "stage", "validation")),
+                reason=str(exc) or type(exc).__name__,
+            )
+            continue
+
         detected.reconstruction_canvas = validated
-        detected.reconstruction_roi = roi
+        detected.reconstruction_roi = item.roi
         log_event(
             logger,
             "object_reconstruction",
             "object_decision",
             object_id=detected.object_id,
             decision="accepted",
-            roi=(roi.x, roi.y, roi.size),
+            roi=(item.roi.x, item.roi.y, item.roi.size),
             output_size=validated.size,
         )

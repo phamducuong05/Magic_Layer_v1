@@ -44,6 +44,9 @@ models:
       checkpoint_root: checkpoints
       super_resolution:
         enabled: true
+        # Crops below this size use the 512px generation directly. Upscaling
+        # them to 2048px and immediately shrinking them adds avoidable latency.
+        minimum_roi_size: 640
         target_size: 2048
         noise_level: 20
         denoising_stride: 50

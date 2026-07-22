@@ -837,6 +837,9 @@ def test_object_reconstruction_context_ratio_is_configured():
         "context_ratio": 0.25,
         "blend_allowance_ratio": 0.012,
     }
+    assert config.get_model_config("object_reconstruction")[
+        "super_resolution"
+    ]["minimum_roi_size"] == 640
 
 
 def test_completion_noise_floor_and_tie_tolerance_are_configured():

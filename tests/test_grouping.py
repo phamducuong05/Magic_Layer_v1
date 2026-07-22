@@ -227,7 +227,9 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
 
     manager = Mock()
     manager.has_object_reconstruction_model.return_value = True
-    manager.get_object_reconstruction_model.return_value.reconstruct = Mock()
+    reconstruction_model = manager.get_object_reconstruction_model.return_value
+    reconstruction_model.reconstruct = Mock()
+    reconstruction_model.reconstruct_many = Mock()
     manager.get_matting_model.return_value.process = Mock()
     manager.get_background_inpainting_model.return_value.process = Mock()
 
@@ -249,10 +251,13 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         first.reconstruction_mask[1, 1] = True
 
     monkeypatch.setattr(orchestrator, "prepare_raw_reconstruction_masks", prepare)
+    reconstruct_stage = Mock(
+        side_effect=lambda *_args, **_kwargs: events.append("reconstruct")
+    )
     monkeypatch.setattr(
         orchestrator,
         "reconstruct_objects",
-        Mock(side_effect=lambda *_args, **_kwargs: events.append("reconstruct")),
+        reconstruct_stage,
     )
 
     def group(supplied):
@@ -314,3 +319,8 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
     )
 
     assert events == ["reconstruct", "group", "compose", "matte", "layers"]
+    assert (
+        reconstruct_stage.call_args.kwargs["reconstruct_many"]
+        is reconstruction_model.reconstruct_many
+    )
+    manager.offload_model.assert_called_once_with("object_reconstruction")

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any, Dict, List
 
 import numpy as np
@@ -55,6 +56,19 @@ class BaseObjectReconstructionModel(BaseModel):
         object_context: str = "",
     ) -> Image.Image:
         pass
+
+    def reconstruct_many(
+        self,
+        requests: Sequence[tuple[Image.Image, Image.Image, str]],
+    ) -> list[Image.Image | Exception]:
+        """Reconstruct requests in order while isolating individual errors."""
+        outcomes: list[Image.Image | Exception] = []
+        for image, mask, object_context in requests:
+            try:
+                outcomes.append(self.reconstruct(image, mask, object_context))
+            except Exception as exc:
+                outcomes.append(exc)
+        return outcomes
 
 
 class BaseSegmentationModel(BaseModel):

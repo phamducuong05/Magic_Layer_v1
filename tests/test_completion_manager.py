@@ -112,6 +112,28 @@ def test_release_model_unloads_instance_and_drops_manager_reference(
     release_cuda_memory.assert_called_once_with()
 
 
+def test_offload_model_keeps_instance_available_for_next_request(monkeypatch):
+    manager = _new_manager()
+    model = Mock()
+    manager._object_reconstruction_model = model
+    release_cuda_memory = Mock()
+    monkeypatch.setattr(
+        manager_module,
+        "_release_cuda_memory",
+        release_cuda_memory,
+        raising=False,
+    )
+
+    offloaded = manager.offload_model("object_reconstruction")
+
+    assert offloaded is True
+    model.offload_to_cpu.assert_called_once_with()
+    model.unload.assert_not_called()
+    assert manager._object_reconstruction_model is model
+    assert manager.get_object_reconstruction_model() is model
+    release_cuda_memory.assert_called_once_with()
+
+
 def test_released_model_is_lazily_created_again(monkeypatch):
     created = []
 

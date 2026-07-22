@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -203,5 +204,37 @@ def test_one_failure_does_not_discard_successful_sibling():
     assert failed.reconstruction_roi is None
     assert failed.reconstruction_failure_stage == "generation_512"
     assert "CUDA inference failed" in failed.reconstruction_failure_reason
+    assert successful.reconstruction_canvas is not None
+    assert successful.reconstruction_failure_stage is None
+
+
+def test_reconstruct_objects_uses_one_batch_call_and_isolates_outcomes():
+    failed = _object("failed")
+    successful = _object("successful", x_offset=7)
+    batch_calls = []
+
+    class GenerationFailure(RuntimeError):
+        stage = "generation_512"
+
+    def reconstruct_many(requests):
+        batch_calls.append(requests)
+        source, mask, _prompt = requests[1]
+        return [
+            GenerationFailure("synthetic failure"),
+            _valid_result()(source, mask, "successful"),
+        ]
+
+    reconstruct_objects(
+        _source_image(),
+        [failed, successful],
+        Mock(side_effect=AssertionError("single path must not run")),
+        reconstruct_many=reconstruct_many,
+        context_ratio=0.0,
+    )
+
+    assert len(batch_calls) == 1
+    assert len(batch_calls[0]) == 2
+    assert failed.reconstruction_canvas is None
+    assert failed.reconstruction_failure_stage == "generation_512"
     assert successful.reconstruction_canvas is not None
     assert successful.reconstruction_failure_stage is None

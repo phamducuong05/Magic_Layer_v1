@@ -29,7 +29,7 @@ except ImportError:  # Legacy: run uvicorn from inside backend/.
 # ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
-configure_logging()
+configure_logging(level="INFO", force=True)
 logger = get_logger(__name__)
 
 

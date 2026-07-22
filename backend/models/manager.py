@@ -142,6 +142,35 @@ class ModelManager:
         logger.info("Released %s model.", category)
         return True
 
+    def offload_model(self, category: str) -> bool:
+        """Move a model off CUDA while retaining its CPU weights for reuse."""
+        attributes = {
+            "object_reconstruction": "_object_reconstruction_model",
+        }
+        try:
+            attribute = attributes[category]
+        except KeyError as exc:
+            raise ValueError(
+                f"CPU retention is unsupported for category: {category}"
+            ) from exc
+
+        model = getattr(self, attribute)
+        if model is None:
+            _release_cuda_memory()
+            return False
+
+        offload = getattr(model, "offload_to_cpu", None)
+        if not callable(offload):
+            return self.release_model(category)
+
+        logger.info("Offloading %s model to CPU...", category)
+        try:
+            offload()
+        finally:
+            _release_cuda_memory()
+        logger.info("Retained %s model weights in CPU RAM.", category)
+        return True
+
     def warmup_first_stage(self) -> None:
         """Load only SAM3; all later stages remain lazy to protect VRAM."""
         logger.info("Warming up the first pipeline stage...")

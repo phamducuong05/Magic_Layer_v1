@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import importlib
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -14,7 +15,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from ...core.logging import get_logger, trace_stage
+from ...core.logging import get_logger, log_event, trace_stage
 from ..base import BaseObjectReconstructionModel
 from ..registry import ModelRegistry
 
@@ -68,6 +69,18 @@ class _Runtime:
     sr_run: Callable[..., Any] | None
     reset_state: Callable[[], None]
     clear_model_cache: Callable[[], None]
+
+
+@dataclass
+class _PreparedRequest:
+    """Normalized inputs and intermediate output for one reconstruction."""
+
+    source: Image.Image
+    hard_mask: Image.Image
+    low_image: Image.Image
+    low_mask: Image.Image
+    prompt: str
+    generated: Image.Image | None = None
 
 
 def _reset_research_state(
@@ -249,6 +262,9 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             "checkpoint_root": str(raw.get("checkpoint_root", "checkpoints")),
             "super_resolution": {
                 "enabled": bool(sr_raw.get("enabled", True)),
+                "minimum_roi_size": int(
+                    sr_raw.get("minimum_roi_size", 0)
+                ),
                 "target_size": int(sr_raw.get("target_size", 2048)),
                 "noise_level": int(sr_raw.get("noise_level", 20)),
                 "denoising_stride": int(
@@ -286,6 +302,11 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                 "HD-Painter guidance_scale must be positive."
             )
         sr = settings["super_resolution"]
+        if sr["minimum_roi_size"] < 0:
+            raise ObjectReconstructionError(
+                "HD-Painter super_resolution.minimum_roi_size must be "
+                "non-negative."
+            )
         if sr["enabled"] and sr["use_sam_mask"]:
             raise ObjectReconstructionError(
                 "HD-Painter use_sam_mask must remain false; the pipeline "
@@ -312,6 +333,19 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
         mask: Image.Image,
         object_context: str = "",
     ) -> Image.Image:
+        """Reconstruct one crop through the same phase scheduler as batches."""
+        outcome = self.reconstruct_many([(image, mask, object_context)])[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def _prepare_request(
+        self,
+        image: Image.Image,
+        mask: Image.Image,
+        object_context: str,
+    ) -> _PreparedRequest | Image.Image:
+        """Normalize one request, returning source directly for an empty mask."""
         source = image.convert("RGB")
         original_size = source.size
         hard_mask = mask.convert("L")
@@ -340,8 +374,54 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             mode="L",
         ).convert("RGB")
 
+        return _PreparedRequest(
+            source=source,
+            hard_mask=hard_mask,
+            low_image=low_image,
+            low_mask=low_mask,
+            prompt=prompt,
+        )
+
+    @staticmethod
+    def _stage_error(exc: Exception, stage: str) -> ObjectReconstructionError:
+        """Attach the failing HD-Painter phase without losing explicit stages."""
+        if (
+            isinstance(exc, ObjectReconstructionError)
+            and exc.stage != "inference"
+        ):
+            return exc
+        return ObjectReconstructionError(
+            f"HD-Painter {stage} failed: {exc}",
+            stage=stage,
+        )
+
+    def reconstruct_many(
+        self,
+        requests: Sequence[tuple[Image.Image, Image.Image, str]],
+    ) -> list[Image.Image | Exception]:
+        """Run all 512px generations, then all eligible SR jobs."""
+        outcomes: list[Image.Image | Exception | None] = [None] * len(requests)
+        prepared: dict[int, _PreparedRequest] = {}
+        for index, (image, mask, object_context) in enumerate(requests):
+            try:
+                normalized = self._prepare_request(
+                    image, mask, object_context
+                )
+            except Exception as exc:
+                outcomes[index] = self._stage_error(
+                    exc, "input_preparation"
+                )
+                continue
+            if isinstance(normalized, Image.Image):
+                outcomes[index] = normalized
+            else:
+                prepared[index] = normalized
+
+        if not prepared:
+            return [outcome for outcome in outcomes if outcome is not None]
+
         with self._inference_lock:
-            active_stage = "generation_512"
+            sr_phase_started = False
             try:
                 if self._settings["sequential_cpu_offload"]:
                     _move_ddim_model(self._inpainting_model, self.device)
@@ -350,102 +430,169 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                     if self._settings["method"] in {"rasg", "painta+rasg"}
                     else self._runtime.sd_run
                 )
-                with trace_stage(
-                    logger,
-                    "hd_painter_generation_512",
-                    method=self._settings["method"],
-                    input_size=low_image.size,
-                    num_steps=self._settings["num_steps"],
-                ):
-                    generated = runner(
-                        ddim=self._inpainting_model,
-                        method=self._settings["method"],
-                        prompt=prompt,
-                        image=self._runtime.IImage(low_image),
-                        mask=self._runtime.IImage(low_mask),
-                        seed=self._settings["seed"],
-                        eta=self._settings["rasg_eta"],
-                        negative_prompt=self._settings["negative_prompt"],
-                        positive_prompt=self._settings["positive_prompt"],
-                        num_steps=self._settings["num_steps"],
-                        guidance_scale=self._settings["guidance_scale"],
-                    )
-                result = self._to_single_pil(generated)
-
-                sr = self._settings["super_resolution"]
-                if sr["enabled"]:
-                    active_stage = "super_resolution"
-                    if self._runtime.sr_run is None or self._sr_model is None:
-                        raise ObjectReconstructionError(
-                            "HD-Painter super-resolution was enabled but not loaded."
-                        )
-                    if self._settings["sequential_cpu_offload"]:
-                        # RASG stores mask/attention tensors in module globals.
-                        # Clear them before moving its model off GPU so SR does
-                        # not overlap with either the model or stage tensors.
-                        self._runtime.reset_state()
-                        _offload_ddim_model(self._inpainting_model)
-                        generated = None
-                        _release_cuda_cache()
-                        _move_ddim_model(self._sr_model, self.device)
-                    sr_prompt = prompt
-                    if sr["prompt_suffix"]:
-                        sr_prompt = f"{prompt}, {sr['prompt_suffix']}"
-                    with trace_stage(
-                        logger,
-                        "hd_painter_super_resolution",
-                        source_size=source.size,
-                        target_size=sr["target_size"],
-                    ):
-                        result = self._to_single_pil(
-                            self._runtime.sr_run(
-                                ddim=self._sr_model,
-                                sam_predictor=None,
-                                # The SR runner reads PIL image metadata.
-                                lr_image=result,
-                                hr_image=source,
-                                hr_mask=hard_mask.convert("RGB"),
-                                prompt=sr_prompt,
-                                noise_level=sr["noise_level"],
-                                blend_output=sr["blend_output"],
-                                blend_trick=sr["blend_trick"],
-                                dt=sr["denoising_stride"],
+                for index, item in prepared.items():
+                    try:
+                        with trace_stage(
+                            logger,
+                            "hd_painter_generation_512",
+                            request_index=index,
+                            method=self._settings["method"],
+                            input_size=item.low_image.size,
+                            num_steps=self._settings["num_steps"],
+                        ):
+                            generated = runner(
+                                ddim=self._inpainting_model,
+                                method=self._settings["method"],
+                                prompt=item.prompt,
+                                image=self._runtime.IImage(item.low_image),
+                                mask=self._runtime.IImage(item.low_mask),
                                 seed=self._settings["seed"],
-                                guidance_scale=sr["guidance_scale"],
+                                eta=self._settings["rasg_eta"],
                                 negative_prompt=self._settings[
                                     "negative_prompt"
                                 ],
-                                use_sam_mask=False,
+                                positive_prompt=self._settings[
+                                    "positive_prompt"
+                                ],
+                                num_steps=self._settings["num_steps"],
+                                guidance_scale=self._settings[
+                                    "guidance_scale"
+                                ],
                             )
+                        item.generated = self._to_single_pil(generated)
+                    except Exception as exc:
+                        outcomes[index] = self._stage_error(
+                            exc, "generation_512"
                         )
-            except ObjectReconstructionError as exc:
-                if exc.stage != "inference":
-                    raise
-                raise ObjectReconstructionError(
-                    str(exc), stage=active_stage
-                ) from exc
-            except Exception as exc:
-                raise ObjectReconstructionError(
-                    f"HD-Painter {active_stage} failed: {exc}",
-                    stage=active_stage,
-                ) from exc
+                    finally:
+                        # RASG and PAINTA store attention state globally.
+                        self._runtime.reset_state()
+
+                sr = self._settings["super_resolution"]
+                sr_indices = [
+                    index
+                    for index, item in prepared.items()
+                    if outcomes[index] is None
+                    and item.generated is not None
+                    and sr["enabled"]
+                    and max(item.source.size) >= sr["minimum_roi_size"]
+                ]
+                if self._settings["sequential_cpu_offload"]:
+                    _offload_ddim_model(self._inpainting_model)
+                    _release_cuda_cache()
+
+                if sr_indices:
+                    if self._runtime.sr_run is None or self._sr_model is None:
+                        error = ObjectReconstructionError(
+                            "HD-Painter super-resolution was enabled but not loaded."
+                        )
+                        for index in sr_indices:
+                            outcomes[index] = self._stage_error(
+                                error, "super_resolution"
+                            )
+                        sr_indices = []
+                    if self._settings["sequential_cpu_offload"]:
+                        if sr_indices:
+                            _move_ddim_model(self._sr_model, self.device)
+                    sr_phase_started = bool(sr_indices)
+                    for index in sr_indices:
+                        item = prepared[index]
+                        sr_prompt = item.prompt
+                        if sr["prompt_suffix"]:
+                            sr_prompt = (
+                                f"{item.prompt}, {sr['prompt_suffix']}"
+                            )
+                        try:
+                            with trace_stage(
+                                logger,
+                                "hd_painter_super_resolution",
+                                request_index=index,
+                                source_size=item.source.size,
+                                target_size=sr["target_size"],
+                            ):
+                                outcomes[index] = self._to_single_pil(
+                                    self._runtime.sr_run(
+                                        ddim=self._sr_model,
+                                        sam_predictor=None,
+                                        lr_image=item.generated,
+                                        hr_image=item.source,
+                                        hr_mask=item.hard_mask.convert("RGB"),
+                                        prompt=sr_prompt,
+                                        noise_level=sr["noise_level"],
+                                        blend_output=sr["blend_output"],
+                                        blend_trick=sr["blend_trick"],
+                                        dt=sr["denoising_stride"],
+                                        seed=self._settings["seed"],
+                                        guidance_scale=sr["guidance_scale"],
+                                        negative_prompt=self._settings[
+                                            "negative_prompt"
+                                        ],
+                                        use_sam_mask=False,
+                                    )
+                                )
+                        except Exception as exc:
+                            outcomes[index] = self._stage_error(
+                                exc, "super_resolution"
+                            )
+
+                for index, item in prepared.items():
+                    if outcomes[index] is not None:
+                        continue
+                    if item.generated is None:
+                        outcomes[index] = ObjectReconstructionError(
+                            "HD-Painter generation produced no image.",
+                            stage="generation_512",
+                        )
+                        continue
+                    outcomes[index] = item.generated
+                    if sr["enabled"]:
+                        log_event(
+                            logger,
+                            "hd_painter_super_resolution",
+                            "skip",
+                            request_index=index,
+                            roi_size=max(item.source.size),
+                            minimum_roi_size=sr["minimum_roi_size"],
+                            reason="roi_below_threshold",
+                        )
             finally:
-                self._runtime.reset_state()
+                if sr_phase_started:
+                    self._runtime.reset_state()
                 if self._settings["sequential_cpu_offload"]:
                     _offload_ddim_model(self._inpainting_model)
                     if self._sr_model is not None:
                         _offload_ddim_model(self._sr_model)
                     _release_cuda_cache()
 
-        try:
-            return result.convert("RGB").resize(
-                original_size, Image.Resampling.LANCZOS
-            )
-        except Exception as exc:
-            raise ObjectReconstructionError(
-                f"HD-Painter crop-size restoration failed: {exc}",
-                stage="crop_size_restoration",
-            ) from exc
+        for index, item in prepared.items():
+            result = outcomes[index]
+            if isinstance(result, Exception):
+                continue
+            try:
+                outcomes[index] = result.convert("RGB").resize(
+                    item.source.size, Image.Resampling.LANCZOS
+                )
+            except Exception as exc:
+                outcomes[index] = ObjectReconstructionError(
+                    f"HD-Painter crop-size restoration failed: {exc}",
+                    stage="crop_size_restoration",
+                )
+
+        return [
+            outcome
+            if outcome is not None
+            else ObjectReconstructionError("Missing reconstruction outcome.")
+            for outcome in outcomes
+        ]
+
+    def offload_to_cpu(self) -> None:
+        """Free CUDA residency while retaining reusable model weights in RAM."""
+        with self._inference_lock:
+            self._runtime.reset_state()
+            _offload_ddim_model(self._inpainting_model)
+            if self._sr_model is not None:
+                _offload_ddim_model(self._sr_model)
+            _release_cuda_cache()
 
     def unload(self) -> None:
         """Remove HD-Painter weights, including its module-level SD cache."""
