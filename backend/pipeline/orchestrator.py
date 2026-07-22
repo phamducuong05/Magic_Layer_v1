@@ -191,6 +191,7 @@ def process_masks(
             logger,
             "completion",
             "skip",
+            level="INFO",
             reason="no_cross_class_overlap_candidates",
         )
     return [
@@ -293,6 +294,7 @@ def process_image(
             logger,
             "completion",
             "skip",
+            level="INFO",
             reason="no_cross_class_overlap_candidates",
         )
 
@@ -313,11 +315,15 @@ def process_image(
             logger,
             "amodal_overlap_validation",
             "skip",
+            level="INFO",
             reason="no_potential_pairs",
         )
     pair_decisions = []
     if overlap_pairs:
         completion_config = config.get_pipeline_config("completion")
+        reconstruction_config = config.get_pipeline_config(
+            "object_reconstruction"
+        )
         with trace_stage(logger, "depth_ordering"):
             pair_decisions = prepare_raw_reconstruction_masks(
                 objects,
@@ -331,6 +337,38 @@ def process_image(
                 ),
                 tie_tolerance_ratio=float(
                     completion_config["tie_tolerance_ratio"]
+                ),
+                generation_mask_dilation_pixels=int(
+                    reconstruction_config.get(
+                        "generation_mask_dilation_pixels", 0
+                    )
+                ),
+                generation_mask_closing_pixels=int(
+                    reconstruction_config.get(
+                        "generation_mask_closing_pixels", 0
+                    )
+                ),
+                support_margin_pixels=int(
+                    reconstruction_config.get(
+                        "support_margin_pixels", max(kernel_size) // 2
+                    )
+                ),
+            ) or []
+            log_event(
+                logger,
+                "depth_ordering",
+                "summary",
+                level="INFO",
+                pairs=len(pair_decisions),
+                one_way=sum(
+                    len(decision.reconstruction_directions) == 1
+                    for decision in pair_decisions
+                ),
+                bidirectional=sum(
+                    decision.bidirectional for decision in pair_decisions
+                ),
+                ambiguous=sum(
+                    decision.ambiguous for decision in pair_decisions
                 ),
             )
 
@@ -354,15 +392,11 @@ def process_image(
                                 logger,
                                 "object_reconstruction",
                                 "skip",
+                                level="INFO",
                                 reason="model_not_resolved",
                             )
                         else:
                             retain_reconstruction_weights = True
-                            reconstruction_config = (
-                                config.get_pipeline_config(
-                                    "object_reconstruction"
-                                )
-                            )
                             with timings.measure("object_reconstruction"):
                                 reconstruct_objects(
                                     image,
@@ -381,6 +415,19 @@ def process_image(
                                             "blend_allowance_ratio"
                                         ]
                                     ),
+                                    prompt_template=str(
+                                        reconstruction_config.get(
+                                            "prompt_template",
+                                            "Reconstruct only the hidden continuation of the "
+                                            "{target} behind {occluders}. Do not recreate "
+                                            "{occluders}.",
+                                        )
+                                    ),
+                                    diagnostics_directory=(
+                                        reconstruction_config.get(
+                                            "diagnostics_directory"
+                                        )
+                                    ),
                                 )
                 finally:
                     reconstruction_model = None
@@ -395,6 +442,7 @@ def process_image(
                     logger,
                     "object_reconstruction",
                     "skip",
+                    level="INFO",
                     reason="model_not_configured",
                 )
         else:
@@ -402,6 +450,7 @@ def process_image(
                 logger,
                 "object_reconstruction",
                 "skip",
+                level="INFO",
                 reason="no_reconstruction_masks",
             )
     else:
@@ -409,18 +458,22 @@ def process_image(
             logger,
             "depth_ordering",
             "skip",
+            level="INFO",
             reason="no_retained_amodal_overlap_pairs",
         )
         log_event(
             logger,
             "object_reconstruction",
             "skip",
+            level="INFO",
             reason="no_depth_ordered_occluded_objects",
         )
 
     with trace_stage(logger, "grouping", object_count=len(objects)):
         with timings.measure("group_composition"):
-            final_groups = group_reconstructed_objects(objects)
+            final_groups = group_reconstructed_objects(
+                objects, pair_decisions or []
+            )
             compose_group_sources(image, final_groups)
         log_event(
             logger,

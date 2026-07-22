@@ -221,7 +221,7 @@ def filter_pairs_by_amodal_overlap(
             )
             continue
 
-        logger.info(
+        logger.debug(
             "Validated amodal masks for %s and %s do not overlap; "
             "skipping depth ordering and reconstruction for this pair.",
             first_id,

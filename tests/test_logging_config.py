@@ -71,11 +71,21 @@ def test_entry_points_configure_logging_centrally():
         assert "configure_logging(" in source, relative_path
 
 
-def test_log_event_emits_structured_info_metadata(caplog):
+def test_logging_configuration_is_available_from_yaml():
+    from backend.config import config
+
+    assert config.get_logging_config() == {
+        "level": "INFO",
+        "workflow_detail": "compact",
+        "third_party_level": "WARNING",
+    }
+
+
+def test_log_event_defaults_to_debug_and_formats_readable_metadata(caplog):
     logging_config = _logging_module()
     logger = logging_config.get_logger("test.pipeline.trace")
 
-    with caplog.at_level(logging.INFO, logger="test.pipeline.trace"):
+    with caplog.at_level(logging.DEBUG, logger="test.pipeline.trace"):
         logging_config.log_event(
             logger,
             "completion",
@@ -84,9 +94,28 @@ def test_log_event_emits_structured_info_metadata(caplog):
             decision="accepted",
         )
 
-    assert '[COMPLETION] DECISION {' in caplog.text
-    assert '"decision": "accepted"' in caplog.text
-    assert '"object_id": "object-0"' in caplog.text
+    assert "[COMPLETION] DECISION" in caplog.text
+    assert "decision=accepted" in caplog.text
+    assert "object_id=object-0" in caplog.text
+    assert "{" not in caplog.text
+
+
+def test_log_event_can_promote_notable_decision_to_info(caplog):
+    logging_config = _logging_module()
+    logger = logging_config.get_logger("test.pipeline.summary")
+
+    with caplog.at_level(logging.INFO, logger="test.pipeline.summary"):
+        logging_config.log_event(
+            logger,
+            "reconstruction",
+            "skip",
+            level=logging.INFO,
+            object_id="object-4",
+            reason="no_directional_overlap",
+        )
+
+    assert "[RECONSTRUCTION] SKIP" in caplog.text
+    assert "object_id=object-4" in caplog.text
 
 
 def test_trace_stage_logs_start_complete_and_failure(caplog):
@@ -102,6 +131,6 @@ def test_trace_stage_logs_start_complete_and_failure(caplog):
 
     assert "[MATTING] START" in caplog.text
     assert "[MATTING] COMPLETE" in caplog.text
-    assert '"duration_ms":' in caplog.text
+    assert "duration_ms=" in caplog.text
     assert "[RECONSTRUCTION] FAILED" in caplog.text
-    assert '"error_type": "RuntimeError"' in caplog.text
+    assert "error_type=RuntimeError" in caplog.text

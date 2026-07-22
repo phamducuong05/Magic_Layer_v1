@@ -2,6 +2,8 @@
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+import re
 
 import numpy as np
 from PIL import Image
@@ -25,9 +27,28 @@ class _PreparedReconstruction:
     source_crop: Image.Image
     mask_image: Image.Image
     mask_crop: np.ndarray
+    composition_crop: np.ndarray
     hole_crop: np.ndarray
     modal_crop: np.ndarray
     prompt: str
+
+
+DEFAULT_PROMPT_TEMPLATE = (
+    "Reconstruct only the hidden continuation of the {target} behind "
+    "{occluders}, matching the visible target's color, texture, lighting, "
+    "and geometry. Do not recreate {occluders}."
+)
+
+
+def _artifact_directory(root: str | Path, object_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", object_id)
+    directory = Path(root) / safe_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _save_mask(path: Path, mask: np.ndarray) -> None:
+    Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(path)
 
 
 def _store_reconstruction_failure(
@@ -70,6 +91,8 @@ def reconstruct_objects(
     | None = None,
     context_ratio: float,
     blend_allowance_ratio: float = 0.0,
+    prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+    diagnostics_directory: str | Path | None = None,
 ) -> None:
     """Reconstruct and validate hidden RGB independently for each raw object."""
     prepared: list[_PreparedReconstruction] = []
@@ -79,6 +102,11 @@ def reconstruct_objects(
         detected.reconstruction_failure_stage = None
         detected.reconstruction_failure_reason = None
         reconstruction_mask = detected.reconstruction_mask
+        generation_mask = (
+            detected.reconstruction_generation_mask
+            if detected.reconstruction_generation_mask is not None
+            else reconstruction_mask
+        )
         if reconstruction_mask is None or not np.any(reconstruction_mask):
             log_event(
                 logger,
@@ -106,12 +134,18 @@ def reconstruct_objects(
                 raise ReconstructionValidationError(
                     "input_preparation", "completion-hole mask is missing"
                 )
+            roi_support = (detected.amodal_mask > 0) | generation_mask.astype(
+                bool
+            )
             roi = square_roi_from_support(
-                detected.amodal_mask > 0,
+                roi_support,
                 context_ratio=context_ratio,
             )
             source_crop = crop_image(image.convert("RGB"), roi)
-            mask_crop = crop_array(reconstruction_mask.astype(bool), roi)
+            mask_crop = crop_array(generation_mask.astype(bool), roi)
+            composition_crop = crop_array(
+                reconstruction_mask.astype(bool), roi
+            )
             hole_crop = crop_array(
                 detected.completion_hole_mask.astype(bool), roi
             )
@@ -120,9 +154,12 @@ def reconstruct_objects(
                 mask_crop.astype(np.uint8) * 255,
                 mode="L",
             )
-            prompt = (
-                f"Continue the hidden parts of the {detected.semantic_class}, "
-                "preserving its visible appearance and surrounding context."
+            occluders = " and ".join(sorted(detected.occluder_classes)) or (
+                "the foreground occluder"
+            )
+            prompt = prompt_template.format(
+                target=detected.semantic_class,
+                occluders=occluders,
             )
             log_event(
                 logger,
@@ -132,7 +169,26 @@ def reconstruct_objects(
                 roi=(roi.x, roi.y, roi.size),
                 crop_size=source_crop.size,
                 hard_mask_pixels=int(np.count_nonzero(mask_crop)),
+                composition_mask_pixels=int(
+                    np.count_nonzero(composition_crop)
+                ),
+                prompt=prompt,
             )
+            if diagnostics_directory is not None:
+                directory = _artifact_directory(
+                    diagnostics_directory, detected.object_id
+                )
+                source_crop.save(directory / "source.png")
+                _save_mask(directory / "composition_mask.png", composition_crop)
+                _save_mask(directory / "generation_mask.png", mask_crop)
+                _save_mask(directory / "completion_hole.png", hole_crop)
+                occluder_mask = detected.reconstruction_occluder_mask
+                _save_mask(
+                    directory / "occluder_mask.png",
+                    crop_array(
+                        occluder_mask.astype(bool), roi
+                    ) if occluder_mask is not None else np.zeros_like(mask_crop),
+                )
             prepared.append(
                 _PreparedReconstruction(
                     detected=detected,
@@ -140,6 +196,7 @@ def reconstruct_objects(
                     source_crop=source_crop,
                     mask_image=mask_image,
                     mask_crop=mask_crop,
+                    composition_crop=composition_crop,
                     hole_crop=hole_crop,
                     modal_crop=modal_crop,
                     prompt=prompt,
@@ -196,6 +253,13 @@ def reconstruct_objects(
             )
             continue
         try:
+            if diagnostics_directory is not None and isinstance(
+                reconstructed, Image.Image
+            ):
+                directory = _artifact_directory(
+                    diagnostics_directory, detected.object_id
+                )
+                reconstructed.save(directory / "model_output.png")
             validated = validate_reconstruction_result(
                 reconstructed,
                 source_crop=item.source_crop,
@@ -215,6 +279,11 @@ def reconstruct_objects(
 
         detected.reconstruction_canvas = validated
         detected.reconstruction_roi = item.roi
+        if diagnostics_directory is not None:
+            directory = _artifact_directory(
+                diagnostics_directory, detected.object_id
+            )
+            validated.save(directory / "validated_output.png")
         log_event(
             logger,
             "object_reconstruction",
@@ -224,3 +293,21 @@ def reconstruct_objects(
             roi=(item.roi.x, item.roi.y, item.roi.size),
             output_size=validated.size,
         )
+
+    accepted_count = sum(
+        detected.reconstruction_canvas is not None for detected in objects
+    )
+    failed_count = sum(
+        detected.reconstruction_failure_stage is not None for detected in objects
+    )
+    log_event(
+        logger,
+        "object_reconstruction",
+        "summary",
+        level="INFO",
+        requested=len(prepared),
+        accepted=accepted_count,
+        failed=failed_count,
+        bypassed=len(objects) - len(prepared),
+        artifacts=diagnostics_directory,
+    )

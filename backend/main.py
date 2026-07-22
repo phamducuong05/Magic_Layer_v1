@@ -18,10 +18,12 @@ from pydantic import BaseModel
 import numpy as np
 
 try:
+    from .config import config
     from .core.logging import configure_logging, get_logger
     from .image_processor import ProcessResult, process_image
     from .models import model_manager
 except ImportError:  # Legacy: run uvicorn from inside backend/.
+    from config import config
     from core.logging import configure_logging, get_logger
     from image_processor import ProcessResult, process_image
     from models import model_manager
@@ -29,7 +31,16 @@ except ImportError:  # Legacy: run uvicorn from inside backend/.
 # ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
-configure_logging(level="INFO", force=True)
+_logging_config = config.get_logging_config()
+configure_logging(
+    level=(
+        "DEBUG"
+        if _logging_config["workflow_detail"] == "full"
+        else _logging_config["level"]
+    ),
+    third_party_level=_logging_config["third_party_level"],
+    force=True,
+)
 logger = get_logger(__name__)
 
 

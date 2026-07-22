@@ -330,7 +330,7 @@ def test_link_overlap_partners_keeps_multiple_partners_unique():
 
 
 def test_filter_pairs_keeps_only_positive_validated_amodal_overlap(caplog):
-    caplog.set_level("INFO")
+    caplog.set_level("DEBUG")
     person = _detected_object("person-1", "person", (0, 0, 4, 4))
     chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
     lamp = _detected_object("lamp-1", "lamp", (6, 0, 2, 2))
@@ -727,12 +727,13 @@ def test_build_reconstruction_masks_constrains_assigned_occluders():
     )
 
     reconstruction = hidden.reconstruction_mask
+    generation = hidden.reconstruction_generation_mask
     assert reconstruction.dtype == bool
-    assert np.all(reconstruction[hidden.completion_hole_mask])
-    assert reconstruction[7, 13]
-    assert reconstruction[12, 8]
-    assert not reconstruction[9, 10]
-    assert not reconstruction[0, 0]
+    assert np.array_equal(reconstruction, hidden.completion_hole_mask)
+    assert generation[7, 13]
+    assert generation[12, 8]
+    assert not generation[9, 10]
+    assert not generation[0, 0]
     assert first_occluder.reconstruction_mask is None
     assert second_occluder.reconstruction_mask is None
     assert distant_occluder.reconstruction_mask is None
@@ -744,20 +745,21 @@ def test_prepare_raw_reconstruction_masks_aggregates_pairwise_occluders_once():
     table = _detected_object("table", "table", (3, 5, 4, 4))
     objects = [hidden, chair, table]
 
-    for detected, raw_area in zip(objects, [30, 10, 4]):
+    for detected, raw_area in zip(objects, [2, 0, 0]):
         detected.amodal_mask = detected.modal_mask > 0
         detected.completion_hole_mask = np.zeros_like(
             detected.modal_mask, dtype=bool
         )
         detected.completion_hole_area = raw_area
-    hidden.completion_hole_mask[4, 8] = True
+    hidden.completion_hole_mask[5, 8] = True  # Behind chair.
+    hidden.completion_hole_mask[5, 3] = True  # Behind table.
     hidden.amodal_mask |= hidden.completion_hole_mask
 
     decisions = reconstruction_stage.prepare_raw_reconstruction_masks(
         objects,
         [("hidden", "chair"), ("hidden", "table")],
         (3, 3),
-        minimum_hole_area_pixels=5,
+        minimum_hole_area_pixels=1,
         minimum_hole_area_ratio=0.0,
         tie_tolerance_ratio=0.1,
     )
@@ -766,16 +768,52 @@ def test_prepare_raw_reconstruction_masks_aggregates_pairwise_occluders_once():
         (decision.occluded_id, decision.occluder_id)
         for decision in decisions
     ] == [("hidden", "chair"), ("hidden", "table")]
-    assert [detected.completion_hole_area for detected in objects] == [30, 10, 4]
+    assert [detected.completion_hole_area for detected in objects] == [2, 0, 0]
     assert [
         detected.effective_completion_hole_area for detected in objects
-    ] == [30, 10, 0]
+    ] == [2, 0, 0]
     assert hidden.occluder_ids == {"chair", "table"}
     assert hidden.reconstruction_mask is not None
     assert hidden.reconstruction_mask.dtype == bool
     assert sum(
         detected.reconstruction_mask is not None for detected in objects
     ) == 1
+
+
+def test_prepare_reconstruction_masks_supports_bidirectional_occlusion():
+    first = _detected_object("person", "person", (2, 2, 4, 4))
+    second = _detected_object("book", "book", (5, 3, 4, 4))
+    for detected in (first, second):
+        detected.amodal_mask = detected.modal_mask > 0
+
+    first.completion_hole_mask = np.zeros_like(first.modal_mask, dtype=bool)
+    first.completion_hole_mask[3:5, 6] = True
+    first.amodal_mask |= first.completion_hole_mask
+    first.completion_hole_area = 2
+
+    second.completion_hole_mask = np.zeros_like(second.modal_mask, dtype=bool)
+    second.completion_hole_mask[2, 4] = True
+    second.amodal_mask |= second.completion_hole_mask
+    second.completion_hole_area = 1
+
+    decisions = reconstruction_stage.prepare_raw_reconstruction_masks(
+        [first, second],
+        [("person", "book")],
+        (3, 3),
+        minimum_hole_area_pixels=1,
+        minimum_hole_area_ratio=0.0,
+        tie_tolerance_ratio=0.1,
+        generation_mask_dilation_pixels=1,
+        generation_mask_closing_pixels=1,
+        support_margin_pixels=2,
+    )
+
+    assert decisions[0].bidirectional is True
+    assert decisions[0].occluded_id == "person"
+    assert first.occluder_ids == {"book"}
+    assert second.occluder_ids == {"person"}
+    assert np.any(first.reconstruction_generation_mask)
+    assert np.any(second.reconstruction_generation_mask)
 
 
 def test_reconstruct_objects_inpaints_only_nonempty_masks(rgb_image):
@@ -833,10 +871,14 @@ def test_reconstruct_objects_inpaints_only_nonempty_masks(rgb_image):
 def test_object_reconstruction_context_ratio_is_configured():
     from backend.config import config
 
-    assert config.get_pipeline_config("object_reconstruction") == {
-        "context_ratio": 0.25,
-        "blend_allowance_ratio": 0.012,
-    }
+    reconstruction_config = config.get_pipeline_config(
+        "object_reconstruction"
+    )
+    assert reconstruction_config["context_ratio"] == 0.15
+    assert reconstruction_config["blend_allowance_ratio"] == 0.012
+    assert reconstruction_config["generation_mask_dilation_pixels"] == 12
+    assert reconstruction_config["generation_mask_closing_pixels"] == 7
+    assert reconstruction_config["support_margin_pixels"] == 8
     assert config.get_model_config("object_reconstruction")[
         "super_resolution"
     ]["minimum_roi_size"] == 640

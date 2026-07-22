@@ -260,8 +260,9 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         reconstruct_stage,
     )
 
-    def group(supplied):
+    def group(supplied, decisions):
         assert supplied == objects
+        assert decisions == []
         events.append("group")
         return final_groups
 
@@ -324,3 +325,42 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         is reconstruction_model.reconstruct_many
     )
     manager.offload_model.assert_called_once_with("object_reconstruction")
+
+
+def test_final_groups_are_ordered_back_to_front_from_pair_decisions():
+    from backend.core.occlusion import PairDecision
+    from backend.pipeline.grouping import group_reconstructed_objects
+
+    hidden = _detected("person", "person", (0, 0, 3, 3), segmentation_index=9)
+    front = _detected("camera", "camera", (1, 1, 3, 3), segmentation_index=0)
+    decision = PairDecision(
+        "person",
+        "camera",
+        "person",
+        "camera",
+        reconstruction_directions=(("person", "camera"),),
+    )
+
+    groups = group_reconstructed_objects([front, hidden], [decision])
+
+    assert [group.member_ids for group in groups] == [
+        ("person",),
+        ("camera",),
+    ]
+
+
+def test_group_depth_order_ignores_internal_edges_after_same_class_merge():
+    from backend.core.occlusion import PairDecision
+    from backend.pipeline.grouping import group_reconstructed_objects
+
+    first = _detected("first", "person", (0, 0, 3, 3), segmentation_index=1)
+    second = _detected("second", "person", (2, 1, 3, 3), segmentation_index=0)
+    decision = PairDecision(
+        "first", "second", "first", "second",
+        reconstruction_directions=(("first", "second"),),
+    )
+
+    groups = group_reconstructed_objects([first, second], [decision])
+
+    assert len(groups) == 1
+    assert groups[0].member_ids == ("second", "first")

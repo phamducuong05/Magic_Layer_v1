@@ -69,6 +69,8 @@ def test_build_pipeline_diagnostics_records_metadata_without_pixel_data():
     assert diagnostics.objects[0].raw_completion_hole_area == 1
     assert diagnostics.objects[0].effective_completion_hole_area == 1
     assert diagnostics.pair_decisions[0].occluded_id == "object-0"
+    assert diagnostics.pair_decisions[0].reconstruction_directions == ()
+    assert diagnostics.pair_decisions[0].bidirectional is False
     assert diagnostics.pair_decisions[0].ambiguous_reason is None
     assert diagnostics.groups[0].member_ids == ("object-0",)
     assert diagnostics.groups[0].reconstruction_conflicts == (
@@ -104,6 +106,42 @@ def test_ambiguous_pair_diagnostic_records_reason():
     assert diagnostics.pair_decisions[0].ambiguous_reason == (
         "completion-hole areas are within tie tolerance"
     )
+
+
+def test_directional_pair_diagnostic_records_both_reconstruction_paths():
+    from backend.pipeline.diagnostics import build_pipeline_diagnostics
+
+    first = _object("object-0", "person", 1)
+    second = _object("object-1", "book", 3)
+    decision = PairDecision(
+        "object-0",
+        "object-1",
+        "object-0",
+        "object-1",
+        reconstruction_directions=(
+            ("object-0", "object-1"),
+            ("object-1", "object-0"),
+        ),
+        first_hidden_by_second_area=8,
+        second_hidden_by_first_area=3,
+    )
+
+    diagnostics = build_pipeline_diagnostics(
+        raw_objects=[first, second],
+        final_groups=[],
+        potential_pairs=[("object-0", "object-1")],
+        retained_pairs=[("object-0", "object-1")],
+        completion_candidate_count=2,
+        pair_decisions=[decision],
+        stage_timings_ms={},
+        peak_gpu_memory_bytes=None,
+    )
+
+    record = diagnostics.pair_decisions[0]
+    assert record.bidirectional is True
+    assert record.first_hidden_by_second_area == 8
+    assert record.second_hidden_by_first_area == 3
+    assert record.reconstruction_directions == decision.reconstruction_directions
 
 
 def test_completion_fallback_records_stage_and_reason():

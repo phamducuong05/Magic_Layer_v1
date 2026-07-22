@@ -172,3 +172,33 @@ def test_multi_pair_roles_are_independent_and_keep_pair_order():
         ("person-1", "chair-1"),
         ("table-1", "person-1"),
     ]
+
+
+def test_directional_roles_allow_both_objects_to_be_reconstructed():
+    decisions = occlusion.assign_directional_pair_roles(
+        [("person", "book")],
+        {
+            ("person", "book"): 12,
+            ("book", "person"): 5,
+        },
+        tie_tolerance_ratio=0.1,
+    )
+
+    decision = decisions[0]
+    assert decision.reconstruction_directions == (
+        ("person", "book"),
+        ("book", "person"),
+    )
+    assert decision.bidirectional is True
+    assert decision.occluded_id == "person"
+    assert decision.occluder_id == "book"
+
+
+def test_directional_roles_skip_pair_without_directional_overlap():
+    decision = occlusion.assign_directional_pair_roles(
+        [("person", "book")],
+        {("person", "book"): 0, ("book", "person"): 0},
+    )[0]
+
+    assert decision.reconstruction_directions == ()
+    assert decision.ambiguous is True

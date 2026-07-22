@@ -46,11 +46,14 @@ class DetectedObject:
     _original_modal_bbox: tuple[int, int, int, int] = field(init=False, repr=False)
     overlap_partner_ids: set[str] = field(default_factory=set)
     occluder_ids: set[str] = field(default_factory=set)
+    occluder_classes: set[str] = field(default_factory=set)
     amodal_mask: Optional[np.ndarray] = None
     completion_hole_mask: Optional[np.ndarray] = None
     completion_hole_area: Optional[int] = None
     effective_completion_hole_area: Optional[int] = None
     reconstruction_mask: Optional[np.ndarray] = None
+    reconstruction_generation_mask: Optional[np.ndarray] = None
+    reconstruction_occluder_mask: Optional[np.ndarray] = None
     reconstruction_canvas: Optional[Image.Image] = None
     reconstruction_roi: Optional[SquareROI] = None
     reconstruction_failure_stage: Optional[str] = None

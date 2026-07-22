@@ -162,7 +162,7 @@ def extract_object_layers(
                 height=layer_height,
             )
         )
-        logger.info(
+        logger.debug(
             "[Layer] '%s' bbox=%s",
             group.display_label,
             (global_x, global_y, layer_width, layer_height),

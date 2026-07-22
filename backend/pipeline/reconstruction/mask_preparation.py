@@ -3,13 +3,14 @@
 from collections.abc import Sequence
 
 import numpy as np
+import cv2
 
 from ...core.layerd_refine import expand_mask
 from ...core.logging import get_logger, log_event
 from ...core.occlusion import (
     OverlapPair,
     PairDecision,
-    assign_pair_roles,
+    assign_directional_pair_roles,
     effective_hole_area,
 )
 from ..types import DetectedObject
@@ -25,9 +26,13 @@ def apply_pair_decisions(
     objects_by_id = {detected.object_id: detected for detected in objects}
     for detected in objects:
         detected.occluder_ids.clear()
+        detected.occluder_classes.clear()
 
     for decision in decisions:
-        if decision.ambiguous:
+        directions = decision.reconstruction_directions
+        if not directions and not decision.ambiguous:
+            directions = ((decision.occluded_id, decision.occluder_id),)
+        if not directions:
             log_event(
                 logger,
                 "depth_ordering",
@@ -35,33 +40,52 @@ def apply_pair_decisions(
                 first_id=decision.first_id,
                 second_id=decision.second_id,
                 decision="skip",
-                reason="ambiguous_completion_hole_areas",
+                reason="no_directional_completion_overlap",
             )
             continue
-        objects_by_id[decision.occluded_id].occluder_ids.add(
-            decision.occluder_id
-        )
-        log_event(
-            logger,
-            "depth_ordering",
-            "pair_assignment",
-            first_id=decision.first_id,
-            second_id=decision.second_id,
-            decision="assign",
-            occluded_id=decision.occluded_id,
-            occluder_id=decision.occluder_id,
-        )
+        for occluded_id, occluder_id in directions:
+            occluded = objects_by_id[occluded_id]
+            occluder = objects_by_id[occluder_id]
+            occluded.occluder_ids.add(occluder_id)
+            occluded.occluder_classes.add(occluder.semantic_class)
+            log_event(
+                logger,
+                "depth_ordering",
+                "pair_assignment",
+                first_id=decision.first_id,
+                second_id=decision.second_id,
+                decision="assign",
+                occluded_id=occluded_id,
+                occluder_id=occluder_id,
+            )
 
 
 def build_reconstruction_masks(
-    objects: Sequence[DetectedObject], kernel_size: tuple[int, int]
+    objects: Sequence[DetectedObject],
+    kernel_size: tuple[int, int],
+    *,
+    generation_mask_dilation_pixels: int = 0,
+    generation_mask_closing_pixels: int = 0,
+    support_margin_pixels: int | None = None,
 ) -> None:
-    """Build constrained masks for objects with assigned occluders."""
+    """Build separate composition and model-generation masks."""
+    for value in (
+        generation_mask_dilation_pixels,
+        generation_mask_closing_pixels,
+    ):
+        if value < 0:
+            raise ValueError("reconstruction morphology settings must be non-negative")
+    if support_margin_pixels is None:
+        support_margin_pixels = max(kernel_size) // 2
+    if support_margin_pixels < 0:
+        raise ValueError("support_margin_pixels must be non-negative")
     # Tạo mapping để truy xuất đối tượng nhanh theo ID
     objects_by_id = {detected.object_id: detected for detected in objects}
     
     for detected in objects:
         detected.reconstruction_mask = None
+        detected.reconstruction_generation_mask = None
+        detected.reconstruction_occluder_mask = None
         
         # Bỏ qua nếu đối tượng không bị ai che khuất hoặc không có mặt nạ amodal/hole hợp lệ
         if (
@@ -92,8 +116,9 @@ def build_reconstruction_masks(
             occluder_union |= objects_by_id[occluder_id].modal_mask > 0
 
         # Bước 2: Giãn nở mặt nạ amodal mask của đối tượng hiện tại để bao phủ vùng biên lân cận
+        support_kernel = 2 * support_margin_pixels + 1
         expanded_support = expand_mask(
-            detected.amodal_mask > 0, kernel_size
+            detected.amodal_mask > 0, (support_kernel, support_kernel)
         ).astype(bool)
         
         # Bước 3: Xác định vùng che khuất thực sự liên quan
@@ -107,9 +132,33 @@ def build_reconstruction_masks(
         
         # Bước 4: Tạo mặt nạ phục dựng (reconstruction mask) cuối cùng bằng cách
         # gộp phần completion hole đã có với phần occluder liên quan vừa tìm được.
-        detected.reconstruction_mask = (
-            detected.completion_hole_mask | relevant_occluder
+        composition_mask = (
+            detected.completion_hole_mask.astype(bool)
+            & (detected.amodal_mask > 0)
+            & ~(detected.modal_mask > 0)
         )
+        generation_mask = composition_mask | relevant_occluder
+        if generation_mask_closing_pixels:
+            radius = generation_mask_closing_pixels
+            closing_kernel = np.ones((2 * radius + 1,) * 2, np.uint8)
+            generation_mask = cv2.morphologyEx(
+                generation_mask.astype(np.uint8),
+                cv2.MORPH_CLOSE,
+                closing_kernel,
+            ).astype(bool)
+        if generation_mask_dilation_pixels:
+            radius = generation_mask_dilation_pixels
+            generation_mask = expand_mask(
+                generation_mask,
+                (2 * radius + 1, 2 * radius + 1),
+            ).astype(bool)
+        generation_mask &= expanded_support
+        generation_mask &= ~(detected.modal_mask > 0)
+        generation_mask |= composition_mask
+
+        detected.reconstruction_mask = composition_mask
+        detected.reconstruction_generation_mask = generation_mask
+        detected.reconstruction_occluder_mask = relevant_occluder
         log_event(
             logger,
             "reconstruction_mask",
@@ -123,8 +172,9 @@ def build_reconstruction_masks(
             relevant_occluder_pixels=int(
                 np.count_nonzero(relevant_occluder)
             ),
-            reconstruction_pixels=int(
-                np.count_nonzero(detected.reconstruction_mask)
+            composition_pixels=int(np.count_nonzero(composition_mask)),
+            generation_pixels=int(
+                np.count_nonzero(detected.reconstruction_generation_mask)
             ),
         )
 
@@ -137,6 +187,9 @@ def prepare_raw_reconstruction_masks(
     minimum_hole_area_pixels: int,
     minimum_hole_area_ratio: float,
     tie_tolerance_ratio: float,
+    generation_mask_dilation_pixels: int = 0,
+    generation_mask_closing_pixels: int = 0,
+    support_margin_pixels: int | None = None,
 ) -> list[PairDecision]:
     """Decide pairwise depth and build one reconstruction mask per raw object."""
     effective_areas: dict[str, int] = {}
@@ -164,9 +217,30 @@ def prepare_raw_reconstruction_masks(
             decision="retain" if effective_area else "suppress_as_noise",
         )
 
-    decisions = assign_pair_roles(
+    objects_by_id = {detected.object_id: detected for detected in objects}
+    directional_areas: dict[OverlapPair, int] = {}
+    for first_id, second_id in retained_pairs:
+        first = objects_by_id[first_id]
+        second = objects_by_id[second_id]
+        for target, occluder in ((first, second), (second, first)):
+            raw_directional_area = int(
+                np.count_nonzero(
+                    target.completion_hole_mask.astype(bool)
+                    & (occluder.modal_mask > 0)
+                )
+            )
+            directional_areas[(target.object_id, occluder.object_id)] = (
+                effective_hole_area(
+                    raw_directional_area,
+                    int(np.count_nonzero(target.modal_mask)),
+                    minimum_pixels=minimum_hole_area_pixels,
+                    minimum_modal_ratio=minimum_hole_area_ratio,
+                )
+            )
+
+    decisions = assign_directional_pair_roles(
         retained_pairs,
-        effective_areas,
+        directional_areas,
         tie_tolerance_ratio=tie_tolerance_ratio,
     )
     for decision in decisions:
@@ -178,10 +252,19 @@ def prepare_raw_reconstruction_masks(
             second_id=decision.second_id,
             first_hole_area=effective_areas[decision.first_id],
             second_hole_area=effective_areas[decision.second_id],
+            first_hidden_by_second=decision.first_hidden_by_second_area,
+            second_hidden_by_first=decision.second_hidden_by_first_area,
+            reconstruction_directions=decision.reconstruction_directions,
             decision="ambiguous" if decision.ambiguous else "ordered",
             occluded_id=decision.occluded_id,
             occluder_id=decision.occluder_id,
         )
     apply_pair_decisions(objects, decisions)
-    build_reconstruction_masks(objects, kernel_size)
+    build_reconstruction_masks(
+        objects,
+        kernel_size,
+        generation_mask_dilation_pixels=generation_mask_dilation_pixels,
+        generation_mask_closing_pixels=generation_mask_closing_pixels,
+        support_margin_pixels=support_margin_pixels,
+    )
     return decisions

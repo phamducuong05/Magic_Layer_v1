@@ -238,3 +238,80 @@ def test_reconstruct_objects_uses_one_batch_call_and_isolates_outcomes():
     assert failed.reconstruction_failure_stage == "generation_512"
     assert successful.reconstruction_canvas is not None
     assert successful.reconstruction_failure_stage is None
+
+
+def test_reconstruction_uses_generation_mask_but_preserves_composition_mask():
+    detected = _object("person")
+    composition = detected.reconstruction_mask.copy()
+    generation = composition.copy()
+    generation[3, 8] = True  # Outside tight amodal support.
+    detected.reconstruction_generation_mask = generation
+    captured = {}
+
+    def reconstruct(source, mask, prompt):
+        captured["mask"] = np.asarray(mask) > 0
+        captured["prompt"] = prompt
+        result = np.asarray(source).copy()
+        result[captured["mask"]] = (70, 80, 90)
+        return Image.fromarray(result, mode="RGB")
+
+    reconstruct_objects(
+        _source_image(),
+        [detected],
+        reconstruct,
+        context_ratio=0.0,
+    )
+
+    roi = detected.reconstruction_roi
+    assert roi.x <= 8 < roi.x + roi.size
+    expected_generation = generation[
+        roi.y : roi.y + roi.size, roi.x : roi.x + roi.size
+    ]
+    assert np.array_equal(captured["mask"], expected_generation)
+    assert np.array_equal(detected.reconstruction_mask, composition)
+
+
+def test_reconstruction_prompt_names_target_and_occluder_classes():
+    detected = _object("person")
+    detected.occluder_classes = {"book", "camera"}
+    prompts = []
+
+    reconstruct_objects(
+        _source_image(),
+        [detected],
+        lambda source, mask, prompt: (
+            prompts.append(prompt) or _valid_result()(source, mask, prompt)
+        ),
+        context_ratio=0.0,
+        prompt_template=(
+            "Reconstruct only the hidden continuation of the {target} "
+            "behind {occluders}. Do not recreate {occluders}."
+        ),
+    )
+
+    assert "person" in prompts[0]
+    assert "book and camera" in prompts[0]
+    assert "Do not recreate" in prompts[0]
+
+
+def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
+    detected = _object("person")
+
+    reconstruct_objects(
+        _source_image(),
+        [detected],
+        _valid_result(),
+        context_ratio=0.0,
+        diagnostics_directory=tmp_path,
+    )
+
+    object_directory = tmp_path / "person"
+    assert {
+        "source.png",
+        "occluder_mask.png",
+        "composition_mask.png",
+        "generation_mask.png",
+        "completion_hole.png",
+        "model_output.png",
+        "validated_output.png",
+    } <= {path.name for path in object_directory.iterdir()}

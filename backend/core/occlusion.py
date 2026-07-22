@@ -27,10 +27,17 @@ class PairDecision:
     # occluded_id and occluder_id can only have value of first_id or second_id
     occluded_id: Optional[str]
     occluder_id: Optional[str]
+    reconstruction_directions: tuple[OverlapPair, ...] = ()
+    first_hidden_by_second_area: int = 0
+    second_hidden_by_first_area: int = 0
 
     @property
     def ambiguous(self) -> bool:
         return self.occluded_id is None
+
+    @property
+    def bidirectional(self) -> bool:
+        return len(self.reconstruction_directions) == 2
 
 
 def find_cross_class_overlaps(
@@ -107,4 +114,53 @@ def assign_pair_roles(
             )
         )
 
+    return decisions
+
+
+def assign_directional_pair_roles(
+    pairs: Sequence[OverlapPair],
+    directional_hole_areas: Mapping[OverlapPair, int],
+    *,
+    tie_tolerance_ratio: float = 0.0,
+) -> list[PairDecision]:
+    """Assign reconstruction directions independently from display depth.
+
+    ``(A, B)`` in ``directional_hole_areas`` means the completion hole of A
+    intersects B's visible modal mask, so A needs reconstruction behind B.
+    Both directions may be retained for interleaved objects such as hands
+    crossing a book, while a single dominant direction provides a stable
+    back-to-front display edge.
+    """
+    if tie_tolerance_ratio < 0:
+        raise ValueError("tie_tolerance_ratio must be non-negative")
+
+    decisions: list[PairDecision] = []
+    for first_id, second_id in pairs:
+        first_area = int(directional_hole_areas[(first_id, second_id)])
+        second_area = int(directional_hole_areas[(second_id, first_id)])
+        directions: list[OverlapPair] = []
+        if first_area > 0:
+            directions.append((first_id, second_id))
+        if second_area > 0:
+            directions.append((second_id, first_id))
+
+        tolerance = max(first_area, second_area) * tie_tolerance_ratio
+        if not directions or abs(first_area - second_area) <= tolerance:
+            occluded_id = occluder_id = None
+        elif first_area > second_area:
+            occluded_id, occluder_id = first_id, second_id
+        else:
+            occluded_id, occluder_id = second_id, first_id
+
+        decisions.append(
+            PairDecision(
+                first_id=first_id,
+                second_id=second_id,
+                occluded_id=occluded_id,
+                occluder_id=occluder_id,
+                reconstruction_directions=tuple(directions),
+                first_hidden_by_second_area=first_area,
+                second_hidden_by_first_area=second_area,
+            )
+        )
     return decisions

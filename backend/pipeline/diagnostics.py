@@ -6,7 +6,6 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from functools import wraps
-import json
 from time import perf_counter
 from typing import Any
 
@@ -46,6 +45,10 @@ class PairDecisionDiagnostics:
     occluded_id: str | None
     occluder_id: str | None
     ambiguous_reason: str | None
+    reconstruction_directions: tuple[tuple[str, str], ...]
+    first_hidden_by_second_area: int
+    second_hidden_by_first_area: int
+    bidirectional: bool
 
 
 @dataclass(frozen=True)
@@ -179,6 +182,14 @@ def build_pipeline_diagnostics(
                 if decision.ambiguous
                 else None
             ),
+            reconstruction_directions=decision.reconstruction_directions,
+            first_hidden_by_second_area=(
+                decision.first_hidden_by_second_area
+            ),
+            second_hidden_by_first_area=(
+                decision.second_hidden_by_first_area
+            ),
+            bidirectional=decision.bidirectional,
         )
         for decision in pair_decisions
     )
@@ -232,8 +243,21 @@ def build_pipeline_diagnostics(
 
 
 def log_pipeline_diagnostics(diagnostics: PipelineDiagnostics) -> None:
-    """Emit one structured summary without pixel or feature payloads."""
+    """Emit a compact INFO summary and retain full records at DEBUG."""
     logger.info(
-        "Pipeline diagnostics: %s",
-        json.dumps(diagnostics.to_log_dict(), sort_keys=True, default=str),
+        "[PIPELINE] SUMMARY objects=%d groups=%d pairs=%d retained=%d "
+        "completion_candidates=%d fallbacks=%d peak_gpu_bytes=%s timings_ms=%s",
+        diagnostics.raw_object_count,
+        diagnostics.final_group_count,
+        diagnostics.potential_overlap_pair_count,
+        diagnostics.retained_amodal_pair_count,
+        diagnostics.completion_candidate_count,
+        len(diagnostics.fallbacks),
+        diagnostics.peak_gpu_memory_bytes,
+        ",".join(
+            f"{stage}:{duration:.1f}"
+            for stage, duration in diagnostics.stage_timings_ms.items()
+        ),
     )
+    if logger.isEnabledFor(10):  # stdlib DEBUG
+        logger.debug("[PIPELINE] DETAILS %r", diagnostics.to_log_dict())

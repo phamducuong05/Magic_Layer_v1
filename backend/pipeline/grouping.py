@@ -7,6 +7,7 @@ from PIL import Image
 
 from ..core.helpers import _bbox_from_mask
 from ..core.logging import get_logger, log_event
+from ..core.occlusion import PairDecision
 from .roi import crop_image, square_roi_from_support
 from .types import DetectedObject, GroupedObject
 
@@ -31,6 +32,7 @@ def _boxes_overlap(
 
 def group_reconstructed_objects(
     objects: Sequence[DetectedObject],
+    pair_decisions: Sequence[PairDecision] = (),
 ) -> list[GroupedObject]:
     """Group same-class raw objects using original modal bboxes only."""
     if not objects:
@@ -133,7 +135,59 @@ def group_reconstructed_objects(
             member_ids=list(group.member_ids),
             bbox=group.bbox,
         )
-    return groups
+    if not pair_decisions or len(groups) < 2:
+        return groups
+
+    group_index_by_member = {
+        member_id: index
+        for index, group in enumerate(groups)
+        for member_id in group.member_ids
+    }
+    edges: list[set[int]] = [set() for _ in groups]
+    indegree = [0] * len(groups)
+    for decision in pair_decisions:
+        if decision.ambiguous:
+            continue
+        back = group_index_by_member.get(decision.occluded_id)
+        front = group_index_by_member.get(decision.occluder_id)
+        if back is None or front is None or back == front or front in edges[back]:
+            continue
+        edges[back].add(front)
+        indegree[front] += 1
+
+    ready = [index for index, degree in enumerate(indegree) if degree == 0]
+    ordered_indices: list[int] = []
+    while ready:
+        current = ready.pop(0)
+        ordered_indices.append(current)
+        for following in sorted(edges[current]):
+            indegree[following] -= 1
+            if indegree[following] == 0:
+                ready.append(following)
+                ready.sort()
+
+    if len(ordered_indices) != len(groups):
+        emitted = set(ordered_indices)
+        ordered_indices.extend(
+            index for index in range(len(groups)) if index not in emitted
+        )
+        log_event(
+            logger,
+            "grouping",
+            "depth_cycle",
+            level="WARNING",
+            decision="stable_segmentation_fallback",
+        )
+
+    depth_ordered = [groups[index] for index in ordered_indices]
+    log_event(
+        logger,
+        "grouping",
+        "depth_order",
+        level="INFO",
+        back_to_front=[group.group_id for group in depth_ordered],
+    )
+    return depth_ordered
 
 
 def compose_group_sources(

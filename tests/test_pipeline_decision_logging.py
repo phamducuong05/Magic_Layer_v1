@@ -33,7 +33,7 @@ def test_overlap_and_amodal_validation_log_each_pair(caplog):
     person.amodal_mask = person.modal_mask > 0
     chair.amodal_mask = chair.modal_mask > 0
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         pairs = link_overlap_partners([person, chair])
         retained = filter_pairs_by_amodal_overlap(
             [person, chair], pairs
@@ -41,9 +41,9 @@ def test_overlap_and_amodal_validation_log_each_pair(caplog):
 
     assert retained == [("person", "chair")]
     assert "[OVERLAP_DETECTION] PAIR_DECISION" in caplog.text
-    assert '"decision": "completion_candidate"' in caplog.text
+    assert "decision=completion_candidate" in caplog.text
     assert "[AMODAL_OVERLAP_VALIDATION] PAIR_DECISION" in caplog.text
-    assert '"decision": "retain"' in caplog.text
+    assert "decision=retain" in caplog.text
 
 
 def test_depth_and_reconstruction_mask_log_each_object_and_pair(caplog):
@@ -60,7 +60,7 @@ def test_depth_and_reconstruction_mask_log_each_object_and_pair(caplog):
     occluder.completion_hole_mask[1, 4] = True
     occluder.amodal_mask |= occluder.completion_hole_mask
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         decisions = prepare_raw_reconstruction_masks(
             [hidden, occluder],
             [("hidden", "occluder")],
@@ -73,9 +73,9 @@ def test_depth_and_reconstruction_mask_log_each_object_and_pair(caplog):
     assert decisions[0].occluded_id == "hidden"
     assert "[DEPTH_ORDERING] OBJECT_HOLE" in caplog.text
     assert "[DEPTH_ORDERING] PAIR_DECISION" in caplog.text
-    assert '"occluded_id": "hidden"' in caplog.text
+    assert "occluded_id=hidden" in caplog.text
     assert "[RECONSTRUCTION_MASK] DECISION" in caplog.text
-    assert '"decision": "created"' in caplog.text
+    assert "decision=created" in caplog.text
 
 
 def test_grouping_logs_pair_decisions_and_final_members(caplog):
@@ -84,14 +84,14 @@ def test_grouping_logs_pair_decisions_and_final_members(caplog):
     first = _object("first", "person", (0, 0, 3, 3))
     second = _object("second", "person", (2, 2, 3, 3))
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         groups = group_reconstructed_objects([first, second])
 
     assert len(groups) == 1
     assert "[GROUPING] PAIR_DECISION" in caplog.text
-    assert '"decision": "merge"' in caplog.text
+    assert "decision=merge" in caplog.text
     assert "[GROUPING] GROUP_CREATED" in caplog.text
-    assert '"member_ids": ["first", "second"]' in caplog.text
+    assert "member_ids=first,second" in caplog.text
 
 
 def test_reconstruction_logs_run_success_and_bypass_decisions(caplog):
@@ -105,7 +105,7 @@ def test_reconstruction_logs_run_success_and_bypass_decisions(caplog):
     hidden.reconstruction_mask = hidden.completion_hole_mask.copy()
     ordinary = _object("ordinary", "chair", (3, 3, 2, 2))
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         reconstruct_objects(
             Image.new("RGB", (6, 6), "white"),
             [hidden, ordinary],
@@ -114,9 +114,9 @@ def test_reconstruction_logs_run_success_and_bypass_decisions(caplog):
         )
 
     assert "[OBJECT_RECONSTRUCTION] OBJECT_DECISION" in caplog.text
-    assert '"decision": "run"' in caplog.text
-    assert '"decision": "accepted"' in caplog.text
-    assert '"decision": "bypass"' in caplog.text
+    assert "decision=run" in caplog.text
+    assert "decision=accepted" in caplog.text
+    assert "decision=bypass" in caplog.text
 
 
 def test_matting_logs_source_selection_and_alpha_result(caplog):
@@ -126,7 +126,7 @@ def test_matting_logs_source_selection_and_alpha_result(caplog):
     detected = _object("person", "person", (1, 1, 3, 3))
     group = group_reconstructed_objects([detected])[0]
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         refine_objects(
             Image.new("RGB", (6, 6), "white"),
             [group],
@@ -136,5 +136,5 @@ def test_matting_logs_source_selection_and_alpha_result(caplog):
         )
 
     assert "[MATTING] GROUP_DECISION" in caplog.text
-    assert '"source": "original_modal_rgb"' in caplog.text
+    assert "source=original_modal_rgb" in caplog.text
     assert "[MATTING] GROUP_RESULT" in caplog.text

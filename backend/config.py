@@ -60,5 +60,20 @@ class ConfigManager:
             )
         return dict(stage_config)
 
+    def get_logging_config(self) -> Dict[str, Any]:
+        """Return terminal logging settings with safe compact defaults."""
+        logging_config = self.config_dict.get("logging", {})
+        if not isinstance(logging_config, dict):
+            raise ValueError("Logging configuration must be a mapping")
+        return {
+            "level": logging_config.get("level", "INFO"),
+            "workflow_detail": logging_config.get(
+                "workflow_detail", "compact"
+            ),
+            "third_party_level": logging_config.get(
+                "third_party_level", "WARNING"
+            ),
+        }
+
 # Global config instance for easy access
 config = ConfigManager()

@@ -103,7 +103,7 @@ def extract_raw_objects(
                     bbox=detected.bbox,
                     modal_area=int((detected.modal_mask > 0).sum()),
                 )
-                logger.info("[SAM3] raw instance '%s'", display_label)
+                logger.debug("[SAM3] raw instance '%s'", display_label)
 
     return objects
 
