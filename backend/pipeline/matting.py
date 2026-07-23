@@ -72,9 +72,11 @@ def refine_reconstruction_supports(
     BiRefNet supplies class-agnostic foreground confidence on each accepted
     reconstruction crop. A component may extend the target only when it stays
     inside the generation region, connects to the target core, contains strong
-    foreground confidence, and contains RGB changed by HD-Painter. Modal masks
-    from unrelated objects remain excluded; assigned occluders are allowed
-    because the hidden target is expected underneath them.
+    foreground confidence, and contains RGB changed by HD-Painter. Evidence-
+    derived extension never absorbs a modal pixel owned by another object.
+    The original reconstruction mask remains authoritative underneath assigned
+    occluders, so excluding foreign modal pixels here does not discard the
+    target's validated hidden reconstruction.
     """
     if not 0.0 <= alpha_low_threshold <= alpha_high_threshold <= 1.0:
         raise ValueError(
@@ -168,12 +170,11 @@ def refine_reconstruction_supports(
             generation_mask.astype(bool), roi
         )
 
-        unrelated_modal = np.zeros(source_shape, dtype=bool)
-        allowed_ids = {target.object_id, *target.occluder_ids}
+        foreign_modal = np.zeros(source_shape, dtype=bool)
         for other in objects:
-            if other.object_id not in allowed_ids:
-                unrelated_modal |= other.modal_mask > 0
-        unrelated_crop = crop_array(unrelated_modal, roi).astype(bool)
+            if other.object_id != target.object_id:
+                foreign_modal |= other.modal_mask > 0
+        foreign_modal_crop = crop_array(foreign_modal, roi).astype(bool)
 
         core_crop = modal_crop | amodal_crop | reconstruction_crop
         if connection_margin_pixels:
@@ -188,7 +189,7 @@ def refine_reconstruction_supports(
         candidate = (
             (alpha_crop >= alpha_low_threshold)
             & generation_crop
-            & ~unrelated_crop
+            & ~foreign_modal_crop
         )
         strong_foreground = alpha_crop >= alpha_high_threshold
         change_distance = np.mean(
@@ -269,6 +270,9 @@ def refine_reconstruction_supports(
                 "extended" if np.any(extension_full) else "keep_amodal_prior"
             ),
             alpha_candidate_pixels=int(np.count_nonzero(candidate)),
+            foreign_modal_pixels_excluded=int(
+                np.count_nonzero(generation_crop & foreign_modal_crop)
+            ),
             extension_pixels=int(np.count_nonzero(extension_full)),
             write_pixels=int(
                 np.count_nonzero(target.reconstruction_write_mask)

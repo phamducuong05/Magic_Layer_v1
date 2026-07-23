@@ -28,7 +28,7 @@ def _object(
     )
 
 
-def test_reconstruction_rgb_alpha_extends_incomplete_amodal_support():
+def test_reconstruction_rgb_alpha_excludes_every_other_modal_from_extension():
     from backend.pipeline import matting
 
     shape = (8, 8)
@@ -51,7 +51,7 @@ def test_reconstruction_rgb_alpha_extends_incomplete_amodal_support():
     target.reconstruction_canvas = Image.fromarray(reconstructed, mode="RGB")
 
     camera_modal = np.zeros(shape, dtype=bool)
-    camera_modal[3:5, 3:6] = True
+    camera_modal[3:5, 3:5] = True
     camera = _object("camera", camera_modal, semantic_class="camera")
 
     unrelated_modal = np.zeros(shape, dtype=bool)
@@ -73,10 +73,16 @@ def test_reconstruction_rgb_alpha_extends_incomplete_amodal_support():
     )
 
     assert target.reconstruction_extension_mask is not None
-    assert np.all(target.reconstruction_extension_mask[3:5, 4:6])
+    # The original reconstruction core remains writable below the occluder.
+    assert np.all(target.reconstruction_write_mask[3:5, 3])
+    # Evidence-derived support must not absorb the assigned occluder itself.
+    assert not np.any(target.reconstruction_extension_mask[3:5, 4])
+    # Validated RGB evidence outside every other modal mask may still extend.
+    assert np.all(target.reconstruction_extension_mask[3:5, 5])
     assert not np.any(target.reconstruction_extension_mask[3:5, 6])
-    assert np.all(target.reconstruction_write_mask[3:5, 4:6])
-    assert np.all(target.reconstruction_support_mask[3:5, 4:6])
+    assert not np.any(target.reconstruction_write_mask[3:5, 4])
+    assert np.all(target.reconstruction_write_mask[3:5, 5])
+    assert np.all(target.reconstruction_support_mask[3:5, 5])
     assert np.all(target.reconstruction_support_mask[target_modal])
 
 

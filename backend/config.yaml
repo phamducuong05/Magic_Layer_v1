@@ -13,7 +13,7 @@ pipeline:
   object_reconstruction:
     # A tighter crop reduces foreground-occluder distraction for HD-Painter.
     context_ratio: 0.15
-    generation_mask_dilation_pixels: 18
+    generation_mask_dilation_pixels: 12
     generation_mask_closing_pixels: 7
     support_margin_pixels: 8
     # Completion-hole components must remain connected to an occluder within
@@ -26,15 +26,7 @@ pipeline:
     # so explicitly discourage HD-Painter's photographic/soft texture bias.
     style_hint: "Match the source's flat vector illustration style with crisp edges, solid consistent colors, and no blur."
     color_refinement_enabled: true
-    color_refinement_strength: 0.35
-    # Let reconstructed RGB and BiRefNet recover target support missed by the
-    # amodal model, while retaining directional and unrelated-object guards.
-    support_refinement_enabled: true
-    support_alpha_low_threshold: 0.2
-    support_alpha_high_threshold: 0.7
-    support_change_threshold: 8.0
-    support_connection_margin_pixels: 4
-    support_max_extension_area_ratio: 2.0
+    color_refinement_strength: 0.2
     # Set to a directory path to save per-object source/mask/output PNGs.
     diagnostics_directory: outputs/reconstruction_debug
   matting:
@@ -70,7 +62,7 @@ models:
       auto_download: true
       checkpoint_root: checkpoints
       super_resolution:
-        enabled: true
+        enabled: false
         # Crops below this size use the 512px generation directly. Upscaling
         # them to 2048px and immediately shrinking them adds avoidable latency.
         minimum_roi_size: 640

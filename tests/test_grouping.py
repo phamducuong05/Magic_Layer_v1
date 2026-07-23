@@ -310,7 +310,7 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
             "change_threshold": 8.0,
             "connection_margin_pixels": 4,
             "max_extension_area_ratio": 2.0,
-            "diagnostics_directory": None,
+            "diagnostics_directory": "outputs/reconstruction_debug",
         }
         events.append("support")
 
