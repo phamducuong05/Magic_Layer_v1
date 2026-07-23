@@ -1,0 +1,21 @@
+{
+  "source_image": "/home/intern/sam3/assets/images/composite.png",
+  "source_masks": [
+    "/home/intern/sam3/masks/raw_mask_4.png"
+  ],
+  "source_size": [
+    6614,
+    4252
+  ],
+  "square_crop_box_xyxy": [
+    1942,
+    878,
+    5248,
+    4184
+  ],
+  "square_size": 3306,
+  "padding_ratio": 0.25,
+  "mask_semantics": "white pixels are reconstructed",
+  "image_padding": "edge replication",
+  "mask_padding": "zero"
+}
