@@ -36,7 +36,7 @@ pipeline:
     support_connection_margin_pixels: 4
     support_max_extension_area_ratio: 2.0
     # Set to a directory path to save per-object source/mask/output PNGs.
-    diagnostics_directory: null
+    diagnostics_directory: outputs/reconstruction_debug
   matting:
     context_ratio: 0.25
     support_dilation_pixels: 2

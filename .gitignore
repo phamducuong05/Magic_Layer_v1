@@ -133,6 +133,7 @@ backend/models/completion/checkpoints/
 backend/models/object_reconstruction/checkpoints/
 sam3_logs/
 backend/out/
+outputs/
 
 # Data files
 *.h5
