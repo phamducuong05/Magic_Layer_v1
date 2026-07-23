@@ -59,6 +59,10 @@ class DetectedObject:
     reconstruction_input_roi: Optional[SquareROI] = None
     reconstruction_canvas: Optional[Image.Image] = None
     reconstruction_roi: Optional[SquareROI] = None
+    reconstruction_evidence_alpha: Optional[np.ndarray] = None
+    reconstruction_extension_mask: Optional[np.ndarray] = None
+    reconstruction_write_mask: Optional[np.ndarray] = None
+    reconstruction_support_mask: Optional[np.ndarray] = None
     reconstruction_failure_stage: Optional[str] = None
     reconstruction_failure_reason: Optional[str] = None
     completion_failure_stage: Optional[str] = None
@@ -113,12 +117,12 @@ class GroupedObject:
         support = np.zeros_like(self.modal_mask, dtype=bool)
         for member in self.members:
             modal = member.modal_mask > 0
-            support |= (
-                member.amodal_mask > 0
-                if (
-                    member.reconstruction_canvas is not None
-                    and member.amodal_mask is not None
-                )
-                else modal
-            )
+            if member.reconstruction_canvas is None:
+                support |= modal
+            elif member.reconstruction_support_mask is not None:
+                support |= member.reconstruction_support_mask > 0
+            elif member.amodal_mask is not None:
+                support |= member.amodal_mask > 0
+            else:
+                support |= modal
         return support

@@ -186,6 +186,45 @@ def test_group_rgb_composition_maps_rois_and_applies_conflict_priority():
     assert group.reconstruction_conflicts == (("first", "second"),)
 
 
+def test_group_composition_uses_evidence_guided_write_and_support_masks():
+    from backend.pipeline.grouping import (
+        compose_group_sources,
+        group_reconstructed_objects,
+    )
+
+    image = Image.new("RGB", (6, 6), (10, 20, 30))
+    detected = _detected(
+        "person",
+        "person",
+        (1, 1, 2, 2),
+        segmentation_index=0,
+        shape=(6, 6),
+    )
+    detected.amodal_mask = detected.modal_mask > 0
+    detected.reconstruction_roi = SquareROI(0, 0, 6, 6, 6)
+    detected.reconstruction_canvas = Image.new("RGB", (6, 6), "red")
+    detected.reconstruction_mask = np.zeros((6, 6), dtype=bool)
+    detected.reconstruction_mask[2, 2] = True
+    detected.reconstruction_write_mask = (
+        detected.reconstruction_mask.copy()
+    )
+    detected.reconstruction_write_mask[2, 3] = True
+    detected.reconstruction_support_mask = (
+        detected.amodal_mask.copy()
+    )
+    detected.reconstruction_support_mask[2, 3] = True
+
+    group = group_reconstructed_objects([detected])[0]
+    compose_group_sources(image, [group])
+
+    assert group.effective_support_mask[2, 3]
+    assert group.composed_source is not None
+    assert group.composed_roi is not None
+    local_x = 3 - group.composed_roi.x
+    local_y = 2 - group.composed_roi.y
+    assert group.composed_source.getpixel((local_x, local_y)) == (255, 0, 0)
+
+
 def test_group_rgb_composition_initializes_fallback_group_from_original():
     from backend.pipeline.grouping import (
         compose_group_sources,
@@ -251,13 +290,35 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         first.reconstruction_mask[1, 1] = True
 
     monkeypatch.setattr(orchestrator, "prepare_raw_reconstruction_masks", prepare)
-    reconstruct_stage = Mock(
-        side_effect=lambda *_args, **_kwargs: events.append("reconstruct")
-    )
+    def reconstruct(*_args, **_kwargs):
+        first.reconstruction_canvas = Image.new("RGB", (3, 3), "red")
+        first.reconstruction_roi = SquareROI(0, 0, 3, 10, 8)
+        events.append("reconstruct")
+
+    reconstruct_stage = Mock(side_effect=reconstruct)
     monkeypatch.setattr(
         orchestrator,
         "reconstruct_objects",
         reconstruct_stage,
+    )
+
+    def refine_support(_image, supplied, _matte, **kwargs):
+        assert supplied == objects
+        assert kwargs == {
+            "alpha_low_threshold": 0.2,
+            "alpha_high_threshold": 0.7,
+            "change_threshold": 8.0,
+            "connection_margin_pixels": 4,
+            "max_extension_area_ratio": 2.0,
+            "diagnostics_directory": None,
+        }
+        events.append("support")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "refine_reconstruction_supports",
+        Mock(side_effect=refine_support),
+        raising=False,
     )
 
     def group(supplied, decisions):
@@ -319,7 +380,14 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         Image.new("RGB", (10, 8)), ["person", "chair"], manager=manager
     )
 
-    assert events == ["reconstruct", "group", "compose", "matte", "layers"]
+    assert events == [
+        "reconstruct",
+        "support",
+        "group",
+        "compose",
+        "matte",
+        "layers",
+    ]
     assert (
         reconstruct_stage.call_args.kwargs["reconstruct_many"]
         is reconstruction_model.reconstruct_many

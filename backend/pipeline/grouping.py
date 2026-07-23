@@ -241,6 +241,11 @@ def compose_group_sources(
             canvas = member.reconstruction_canvas
             member_roi = member.reconstruction_roi
             reconstruction_mask = member.reconstruction_mask
+            write_mask = (
+                member.reconstruction_write_mask
+                if member.reconstruction_write_mask is not None
+                else reconstruction_mask
+            )
             if canvas is None and member_roi is None:
                 log_event(
                     logger,
@@ -256,6 +261,7 @@ def compose_group_sources(
                 canvas is None
                 or member_roi is None
                 or reconstruction_mask is None
+                or write_mask is None
             ):
                 raise ValueError(
                     f"incomplete reconstruction record for {member.object_id}"
@@ -270,7 +276,10 @@ def compose_group_sources(
                     f"reconstruction canvas for {member.object_id} does not "
                     "match its ROI"
                 )
-            if reconstruction_mask.shape != (source_height, source_width):
+            if (
+                reconstruction_mask.shape != (source_height, source_width)
+                or write_mask.shape != (source_height, source_width)
+            ):
                 raise ValueError(
                     f"reconstruction mask for {member.object_id} does not "
                     "match the source image"
@@ -308,7 +317,7 @@ def compose_group_sources(
                 overlap_right - member_left,
             )
             # Restrict writes to pixels the model was allowed to reconstruct.
-            permitted = reconstruction_mask[
+            permitted = write_mask[
                 overlap_top:overlap_bottom,
                 overlap_left:overlap_right,
             ].astype(bool)

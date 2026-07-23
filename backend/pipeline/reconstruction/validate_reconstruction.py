@@ -7,7 +7,7 @@ import numpy as np
 import cv2
 from PIL import Image
 
-from ...core.layerd_refine import expand_mask
+from ...core.layerd_refine import expand_mask, refine_with_reference_mask
 from ..roi import SquareROI
 
 
@@ -125,36 +125,18 @@ def refine_reconstruction_colors(
     strength: float,
     max_colors: int = 16,
 ) -> Image.Image:
-    """Gently pull generated write-back pixels toward the target's palette."""
-    if not 0.0 <= strength <= 1.0:
-        raise ValueError("color refinement strength must be in [0, 1]")
-    if strength == 0.0 or not np.any(composition_mask):
-        return result.convert("RGB")
-
+    """Refine write-back RGB from flat colors in the original target modal."""
     result_array = np.asarray(result.convert("RGB"), dtype=np.uint8).copy()
     source_array = np.asarray(source_crop.convert("RGB"), dtype=np.uint8)
-    palette = _palette_from_visible_target(
-        source_array, modal_mask, max_colors=max_colors
+    refined = refine_with_reference_mask(
+        result_array,
+        edit_mask=composition_mask.astype(bool),
+        reference_image=source_array,
+        reference_mask=modal_mask.astype(bool),
+        max_num_colors=max_colors,
+        strength=strength,
     )
-    if palette.size == 0:
-        return result.convert("RGB")
-
-    generated = result_array[composition_mask.astype(bool)]
-    generated_lab = cv2.cvtColor(
-        generated.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB
-    ).reshape(-1, 3).astype(np.float32)
-    palette_lab = cv2.cvtColor(
-        palette.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB
-    ).reshape(-1, 3).astype(np.float32)
-    delta = generated_lab[:, None, :] - palette_lab[None, :, :]
-    delta[..., 1:] *= 0.5
-    closest = palette[np.argmin(np.linalg.norm(delta, axis=-1), axis=1)]
-    blended = np.rint(
-        generated.astype(np.float32) * (1.0 - strength)
-        + closest.astype(np.float32) * strength
-    ).clip(0, 255).astype(np.uint8)
-    result_array[composition_mask.astype(bool)] = blended
-    return Image.fromarray(result_array, mode="RGB")
+    return Image.fromarray(refined, mode="RGB")
 
 
 def _real_image_pixels(roi: SquareROI) -> np.ndarray:

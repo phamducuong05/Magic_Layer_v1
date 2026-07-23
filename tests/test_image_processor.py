@@ -966,7 +966,7 @@ def test_object_reconstruction_context_ratio_is_configured():
     )
     assert reconstruction_config["context_ratio"] == 0.15
     assert reconstruction_config["blend_allowance_ratio"] == 0.012
-    assert reconstruction_config["generation_mask_dilation_pixels"] == 12
+    assert reconstruction_config["generation_mask_dilation_pixels"] == 18
     assert reconstruction_config["generation_mask_closing_pixels"] == 7
     assert reconstruction_config["support_margin_pixels"] == 8
     assert config.get_model_config("object_reconstruction")[

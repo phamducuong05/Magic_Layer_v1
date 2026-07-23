@@ -26,7 +26,7 @@ from .diagnostics import (
 )
 from .layers import extract_object_layers
 from .grouping import compose_group_sources, group_reconstructed_objects
-from .matting import refine_objects
+from .matting import refine_objects, refine_reconstruction_supports
 from .reconstruction import (
     prepare_raw_reconstruction_masks,
     reconstruct_objects,
@@ -498,26 +498,75 @@ def process_image(
             reason="no_depth_ordered_occluded_objects",
         )
 
-    with trace_stage(logger, "grouping", object_count=len(objects)):
-        with timings.measure("group_composition"):
-            final_groups = group_reconstructed_objects(
-                objects, pair_decisions or []
-            )
-            compose_group_sources(image, final_groups)
-        log_event(
-            logger,
-            "grouping",
-            "result",
-            group_count=len(final_groups),
-        )
-
     matting_config = config.get_pipeline_config("matting")
+    has_accepted_reconstruction = any(
+        detected.reconstruction_canvas is not None for detected in objects
+    )
+    reconstruction_config = (
+        config.get_pipeline_config("object_reconstruction")
+        if has_accepted_reconstruction
+        else {}
+    )
     matting_model = None
     matte = None
     try:
+        matting_model = manager.get_matting_model()
+        matte = matting_model.process
+        if has_accepted_reconstruction and bool(
+            reconstruction_config.get("support_refinement_enabled", True)
+        ):
+            with trace_stage(logger, "reconstruction_support_refinement"):
+                with timings.measure("reconstruction_support_refinement"):
+                    refine_reconstruction_supports(
+                        image,
+                        objects,
+                        matte,
+                        alpha_low_threshold=float(
+                            reconstruction_config.get(
+                                "support_alpha_low_threshold", 0.2
+                            )
+                        ),
+                        alpha_high_threshold=float(
+                            reconstruction_config.get(
+                                "support_alpha_high_threshold", 0.7
+                            )
+                        ),
+                        change_threshold=float(
+                            reconstruction_config.get(
+                                "support_change_threshold", 8.0
+                            )
+                        ),
+                        connection_margin_pixels=int(
+                            reconstruction_config.get(
+                                "support_connection_margin_pixels", 4
+                            )
+                        ),
+                        max_extension_area_ratio=float(
+                            reconstruction_config.get(
+                                "support_max_extension_area_ratio", 2.0
+                            )
+                        ),
+                        diagnostics_directory=(
+                            reconstruction_config.get(
+                                "diagnostics_directory"
+                            )
+                        ),
+                    )
+
+        with trace_stage(logger, "grouping", object_count=len(objects)):
+            with timings.measure("group_composition"):
+                final_groups = group_reconstructed_objects(
+                    objects, pair_decisions or []
+                )
+                compose_group_sources(image, final_groups)
+            log_event(
+                logger,
+                "grouping",
+                "result",
+                group_count=len(final_groups),
+            )
+
         with trace_stage(logger, "matting", group_count=len(final_groups)):
-            matting_model = manager.get_matting_model()
-            matte = matting_model.process
             with timings.measure("matting"):
                 refine_objects(
                     image,

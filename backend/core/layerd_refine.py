@@ -187,6 +187,96 @@ def find_flat_color_region(
     return color_masks, palette
 
 
+def _lab_color_distance(
+    pixels: np.ndarray,
+    palette: np.ndarray,
+) -> np.ndarray:
+    """Calculate weighted LAB distance from pixels to palette colors."""
+    pixel_lab = cv2.cvtColor(
+        pixels.reshape(-1, 1, 3).astype(np.uint8),
+        cv2.COLOR_RGB2LAB,
+    ).reshape(-1, 3).astype(float)
+    palette_lab = cv2.cvtColor(
+        palette.reshape(-1, 1, 3).astype(np.uint8),
+        cv2.COLOR_RGB2LAB,
+    ).reshape(-1, 3).astype(float)
+    delta = pixel_lab[:, None, :] - palette_lab[None, :, :]
+    delta *= np.array([1.0, 0.5, 0.5])
+    return np.linalg.norm(delta, axis=-1)
+
+
+def refine_with_reference_mask(
+    image: np.ndarray,
+    *,
+    edit_mask: np.ndarray,
+    reference_image: np.ndarray,
+    reference_mask: np.ndarray,
+    max_num_colors: int,
+    percentile: float = 0.99,
+    strength: float = 1.0,
+) -> np.ndarray:
+    """Refine selected pixels using flat colors from an explicit reference.
+
+    ``edit_mask`` controls which output pixels may change. ``reference_mask``
+    controls where trusted palette colors are extracted, allowing object
+    reconstruction to use the original target modal region instead of nearby
+    occluder or background pixels.
+    """
+    assert image.dtype == np.uint8, f"Expected uint8 image, got {image.dtype}"
+    assert reference_image.dtype == np.uint8, (
+        f"Expected uint8 reference_image, got {reference_image.dtype}"
+    )
+    assert edit_mask.dtype == bool, (
+        f"Expected bool edit_mask, got {edit_mask.dtype}"
+    )
+    assert reference_mask.dtype == bool, (
+        f"Expected bool reference_mask, got {reference_mask.dtype}"
+    )
+    assert image.shape == reference_image.shape, (
+        "image and reference_image must have matching RGB shapes"
+    )
+    assert image.shape[:2] == edit_mask.shape == reference_mask.shape, (
+        "image and mask dimensions must match"
+    )
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("refinement strength must be in [0, 1]")
+    if (
+        strength == 0.0
+        or not np.any(edit_mask)
+        or not np.any(reference_mask)
+    ):
+        return image.copy()
+
+    # Never learn colors from pixels being rewritten, even if imperfect masks
+    # happen to overlap.
+    trusted_reference = reference_mask & ~edit_mask
+    if not np.any(trusted_reference):
+        return image.copy()
+    _, palette = find_flat_color_region(
+        reference_image,
+        trusted_reference,
+        max_num_colors=max_num_colors,
+        percentile=percentile,
+        th_flat_area_ratio=0.0,
+        th_overlap_ratio=0.0,
+    )
+    if len(palette) == 0:
+        return image.copy()
+
+    palette_array = np.asarray(palette, dtype=np.uint8)
+    edited_pixels = image[edit_mask]
+    distances = _lab_color_distance(edited_pixels, palette_array)
+    closest = palette_array[np.argmin(distances, axis=1)]
+    blended = np.rint(
+        edited_pixels.astype(float) * (1.0 - strength)
+        + closest.astype(float) * strength
+    ).clip(0, 255).astype(np.uint8)
+
+    refined = image.copy()
+    refined[edit_mask] = blended
+    return refined
+
+
 def refine_background(
     bg: np.ndarray, mask: np.ndarray, n_outer_ratio: float, max_num_colors: int, percentile: float = 0.99
 ) -> np.ndarray:
@@ -208,12 +298,6 @@ def refine_background(
         where inpainted regions have been replaced with the closest palette colors.
     """
 
-    def _lab_l1_distance(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """Calculate L1 distance in LAB color space."""
-        a_lab = cv2.cvtColor(a.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(float)
-        b_lab = cv2.cvtColor(b.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(float)
-        return np.linalg.norm((a_lab - b_lab) * [1.0, 0.5, 0.5], axis=-1)
-
     assert bg.dtype == np.uint8, f"Expected uint8 bg, got {bg.dtype}"
     assert mask.dtype == bool, f"Expected bool mask, got {mask.dtype}"
 
@@ -224,22 +308,15 @@ def refine_background(
         outer_mask = expand_mask_ratio(mask_cc, n_outer_ratio, 5) & (~mask_cc)
         if outer_mask.sum() == 0:
             continue
-        _, palette = find_flat_color_region(
-            bg,
-            outer_mask,
+        refined_bg = refine_with_reference_mask(
+            refined_bg,
+            edit_mask=mask_cc,
+            reference_image=bg,
+            reference_mask=outer_mask,
             max_num_colors=max_num_colors,
             percentile=percentile,
-            th_flat_area_ratio=0.0,
-            th_overlap_ratio=0.0,
+            strength=1.0,
         )
-        if len(palette) == 0:
-            continue
-
-        # Assign closest palette color to inpainted region
-        inpainted_colors = bg[mask_cc]
-        distance = _lab_l1_distance(inpainted_colors[:, None, :], np.array(palette)[None, :, :])
-        closest_indices = np.argmin(distance, axis=1)
-        refined_bg[mask_cc] = np.array(palette)[closest_indices]
 
     return refined_bg
 
