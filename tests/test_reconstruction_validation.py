@@ -6,6 +6,9 @@ import pytest
 from PIL import Image
 
 from backend.pipeline.reconstruction import reconstruct_objects
+from backend.pipeline.reconstruction.validate_reconstruction import (
+    reconstruction_color_metrics,
+)
 from backend.pipeline.types import DetectedObject
 
 
@@ -263,7 +266,8 @@ def test_reconstruction_uses_generation_mask_but_preserves_composition_mask():
     )
 
     roi = detected.reconstruction_roi
-    assert roi.x <= 8 < roi.x + roi.size
+    # Generation-only support cannot enlarge the target-centric ROI.
+    assert not (roi.x <= 8 < roi.x + roi.size)
     expected_generation = generation[
         roi.y : roi.y + roi.size, roi.x : roi.x + roi.size
     ]
@@ -294,6 +298,64 @@ def test_reconstruction_prompt_names_target_and_occluder_classes():
     assert "Do not recreate" in prompts[0]
 
 
+def test_reconstruction_prompt_appends_configured_style_hint():
+    detected = _object("person")
+    prompts = []
+
+    reconstruct_objects(
+        _source_image(),
+        [detected],
+        lambda source, mask, prompt: (
+            prompts.append(prompt) or _valid_result()(source, mask, prompt)
+        ),
+        context_ratio=0.0,
+        style_hint="flat vector illustration, crisp edges, solid colors",
+    )
+
+    assert prompts[0].endswith(
+        "flat vector illustration, crisp edges, solid colors"
+    )
+
+
+def test_target_palette_refinement_reduces_occluder_color_contamination():
+    detected = _object("person")
+    source = np.full((12, 16, 3), (250, 250, 250), dtype=np.uint8)
+    source[detected.modal_mask > 0] = (220, 20, 20)
+
+    reconstruct_objects(
+        Image.fromarray(source, mode="RGB"),
+        [detected],
+        _valid_result((10, 80, 220)),
+        context_ratio=0.0,
+        color_refinement_enabled=True,
+        color_refinement_strength=1.0,
+    )
+
+    roi = detected.reconstruction_roi
+    composition = detected.reconstruction_mask[
+        roi.y : roi.y + roi.size,
+        roi.x : roi.x + roi.size,
+    ]
+    refined = np.asarray(detected.reconstruction_canvas)
+    assert np.all(refined[composition] == (220, 20, 20))
+
+
+def test_soft_color_metrics_include_generated_detail_ratio():
+    source = np.zeros((8, 8, 3), dtype=np.uint8)
+    source[:, ::2] = 255
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[:, 4:] = True
+    metrics = reconstruction_color_metrics(
+        Image.fromarray(source, mode="RGB"),
+        source_crop=Image.fromarray(source, mode="RGB"),
+        composition_mask=mask,
+        modal_mask=~mask,
+        occluder_mask=mask,
+    )
+
+    assert metrics["generated_detail_ratio"] is not None
+
+
 def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
     detected = _object("person")
 
@@ -303,6 +365,12 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
         _valid_result(),
         context_ratio=0.0,
         diagnostics_directory=tmp_path,
+        debug_artifacts_provider=lambda: [
+            {
+                "base_output_512": Image.new("RGB", (512, 512), "red"),
+                "sr_output": Image.new("RGB", (2048, 2048), "blue"),
+            }
+        ],
     )
 
     object_directory = tmp_path / "person"
@@ -314,4 +382,12 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
         "completion_hole.png",
         "model_output.png",
         "validated_output.png",
+        "directional_seed.png",
+        "filtered_reconstruction_mask.png",
+        "full_occluder_in_roi.png",
+        "generation_before_dilation.png",
+        "generation_after_dilation.png",
+        "color_refined_output.png",
+        "base_output_512.png",
+        "sr_output.png",
     } <= {path.name for path in object_directory.iterdir()}

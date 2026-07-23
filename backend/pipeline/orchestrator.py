@@ -353,6 +353,15 @@ def process_image(
                         "support_margin_pixels", max(kernel_size) // 2
                     )
                 ),
+                composition_margin_pixels=int(
+                    reconstruction_config.get(
+                        "composition_margin_pixels",
+                        reconstruction_config.get(
+                            "support_margin_pixels", max(kernel_size) // 2
+                        ),
+                    )
+                ),
+                context_ratio=float(reconstruction_config["context_ratio"]),
             ) or []
             log_event(
                 logger,
@@ -423,10 +432,30 @@ def process_image(
                                             "{occluders}.",
                                         )
                                     ),
+                                    style_hint=str(
+                                        reconstruction_config.get(
+                                            "style_hint", ""
+                                        )
+                                    ),
+                                    color_refinement_enabled=bool(
+                                        reconstruction_config.get(
+                                            "color_refinement_enabled", False
+                                        )
+                                    ),
+                                    color_refinement_strength=float(
+                                        reconstruction_config.get(
+                                            "color_refinement_strength", 0.2
+                                        )
+                                    ),
                                     diagnostics_directory=(
                                         reconstruction_config.get(
                                             "diagnostics_directory"
                                         )
+                                    ),
+                                    debug_artifacts_provider=getattr(
+                                        reconstruction_model,
+                                        "consume_debug_artifacts",
+                                        None,
                                     ),
                                 )
                 finally:

@@ -4,6 +4,7 @@ import math
 from typing import Any
 
 import numpy as np
+import cv2
 from PIL import Image
 
 from ...core.layerd_refine import expand_mask
@@ -16,6 +17,144 @@ class ReconstructionValidationError(ValueError):
     def __init__(self, stage: str, message: str):
         super().__init__(message)
         self.stage = stage
+
+
+def _palette_from_visible_target(
+    source: np.ndarray,
+    modal_mask: np.ndarray,
+    *,
+    max_colors: int,
+) -> np.ndarray:
+    """Extract a compact anti-alias-tolerant palette from visible target RGB."""
+    pixels = source[modal_mask.astype(bool)]
+    if pixels.size == 0:
+        return np.empty((0, 3), dtype=np.uint8)
+    quantized = pixels // 16
+    _, inverse, counts = np.unique(
+        quantized, axis=0, return_inverse=True, return_counts=True
+    )
+    selected = np.argsort(counts)[::-1][:max_colors]
+    palette = [
+        np.rint(pixels[inverse == index].mean(axis=0)).astype(np.uint8)
+        for index in selected
+    ]
+    return np.asarray(palette, dtype=np.uint8)
+
+
+def _lab_distances(
+    pixels: np.ndarray, references: np.ndarray
+) -> np.ndarray:
+    """Return each RGB pixel's distance to its nearest reference color."""
+    if pixels.size == 0 or references.size == 0:
+        return np.empty(0, dtype=np.float32)
+    pixel_lab = cv2.cvtColor(
+        pixels.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB
+    ).reshape(-1, 3).astype(np.float32)
+    reference_lab = cv2.cvtColor(
+        references.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB
+    ).reshape(-1, 3).astype(np.float32)
+    delta = pixel_lab[:, None, :] - reference_lab[None, :, :]
+    delta[..., 1:] *= 0.5
+    return np.linalg.norm(delta, axis=-1).min(axis=1)
+
+
+def reconstruction_color_metrics(
+    result: Image.Image,
+    *,
+    source_crop: Image.Image,
+    composition_mask: np.ndarray,
+    modal_mask: np.ndarray,
+    occluder_mask: np.ndarray,
+) -> dict[str, float | None]:
+    """Measure color consistency without hard-rejecting generated content."""
+    result_array = np.asarray(result.convert("RGB"), dtype=np.uint8)
+    source_array = np.asarray(source_crop.convert("RGB"), dtype=np.uint8)
+    generated = result_array[composition_mask.astype(bool)]
+    target_palette = _palette_from_visible_target(
+        source_array, modal_mask, max_colors=16
+    )
+    occluder_palette = _palette_from_visible_target(
+        source_array, occluder_mask, max_colors=16
+    )
+    target_distance = _lab_distances(generated, target_palette)
+    occluder_distance = _lab_distances(generated, occluder_palette)
+    source_delta = np.linalg.norm(
+        generated.astype(np.float32)
+        - source_array[composition_mask.astype(bool)].astype(np.float32),
+        axis=1,
+    )
+    result_gray = cv2.cvtColor(result_array, cv2.COLOR_RGB2GRAY)
+    source_gray = cv2.cvtColor(source_array, cv2.COLOR_RGB2GRAY)
+    generated_detail = np.abs(
+        cv2.Laplacian(result_gray, cv2.CV_32F)
+    )[composition_mask.astype(bool)]
+    visible_detail = np.abs(
+        cv2.Laplacian(source_gray, cv2.CV_32F)
+    )[modal_mask.astype(bool)]
+    detail_ratio = (
+        float(generated_detail.mean() / max(visible_detail.mean(), 1e-6))
+        if generated_detail.size and visible_detail.size
+        else None
+    )
+    return {
+        "target_lab_distance": (
+            float(np.median(target_distance))
+            if target_distance.size
+            else None
+        ),
+        "occluder_lab_distance": (
+            float(np.median(occluder_distance))
+            if occluder_distance.size
+            else None
+        ),
+        "source_persistence_ratio": (
+            float(np.mean(source_delta < 8.0))
+            if source_delta.size
+            else None
+        ),
+        "generated_detail_ratio": detail_ratio,
+    }
+
+
+def refine_reconstruction_colors(
+    result: Image.Image,
+    *,
+    source_crop: Image.Image,
+    composition_mask: np.ndarray,
+    modal_mask: np.ndarray,
+    strength: float,
+    max_colors: int = 16,
+) -> Image.Image:
+    """Gently pull generated write-back pixels toward the target's palette."""
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("color refinement strength must be in [0, 1]")
+    if strength == 0.0 or not np.any(composition_mask):
+        return result.convert("RGB")
+
+    result_array = np.asarray(result.convert("RGB"), dtype=np.uint8).copy()
+    source_array = np.asarray(source_crop.convert("RGB"), dtype=np.uint8)
+    palette = _palette_from_visible_target(
+        source_array, modal_mask, max_colors=max_colors
+    )
+    if palette.size == 0:
+        return result.convert("RGB")
+
+    generated = result_array[composition_mask.astype(bool)]
+    generated_lab = cv2.cvtColor(
+        generated.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB
+    ).reshape(-1, 3).astype(np.float32)
+    palette_lab = cv2.cvtColor(
+        palette.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB
+    ).reshape(-1, 3).astype(np.float32)
+    delta = generated_lab[:, None, :] - palette_lab[None, :, :]
+    delta[..., 1:] *= 0.5
+    closest = palette[np.argmin(np.linalg.norm(delta, axis=-1), axis=1)]
+    blended = np.rint(
+        generated.astype(np.float32) * (1.0 - strength)
+        + closest.astype(np.float32) * strength
+    ).clip(0, 255).astype(np.uint8)
+    result_array[composition_mask.astype(bool)] = blended
+    return Image.fromarray(result_array, mode="RGB")
 
 
 def _real_image_pixels(roi: SquareROI) -> np.ndarray:

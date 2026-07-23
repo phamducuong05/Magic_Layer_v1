@@ -552,6 +552,35 @@ def test_reconstruct_many_runs_generation_phase_once_before_conditional_sr(
     assert moves.count(("sr.unet", "cuda:0")) == 1
 
 
+def test_reconstruct_many_exposes_base_and_sr_debug_outputs(monkeypatch):
+    runtime, _, _ = make_runtime()
+    model = build_adapter(
+        monkeypatch,
+        config={
+            "super_resolution": {
+                "enabled": True,
+                "minimum_roi_size": 0,
+            }
+        },
+        runtime=runtime,
+    )
+
+    model.reconstruct_many(
+        [
+            (
+                Image.new("RGB", (64, 64), "white"),
+                Image.new("L", (64, 64), 255),
+                "person",
+            )
+        ]
+    )
+
+    artifacts = model.consume_debug_artifacts()
+    assert artifacts[0]["base_output_512"].size == (512, 512)
+    assert artifacts[0]["sr_output"].size == (2048, 2048)
+    assert model.consume_debug_artifacts() == []
+
+
 def test_reconstruct_many_isolates_generation_failure_and_continues_sr(
     monkeypatch,
 ):

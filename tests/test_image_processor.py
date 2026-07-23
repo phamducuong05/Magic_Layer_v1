@@ -714,10 +714,10 @@ def test_build_reconstruction_masks_constrains_assigned_occluders():
     hidden.occluder_ids = {"first", "second", "distant"}
 
     first_occluder.modal_mask.fill(0)
-    first_occluder.modal_mask[7, 13] = 255
+    first_occluder.modal_mask[9, 12] = 255
     first_occluder.modal_mask[9, 10] = 255
     second_occluder.modal_mask.fill(0)
-    second_occluder.modal_mask[12, 8] = 255
+    second_occluder.modal_mask[10, 13] = 255
     distant_occluder.modal_mask.fill(0)
     distant_occluder.modal_mask[0, 0] = 255
 
@@ -730,13 +730,72 @@ def test_build_reconstruction_masks_constrains_assigned_occluders():
     generation = hidden.reconstruction_generation_mask
     assert reconstruction.dtype == bool
     assert np.array_equal(reconstruction, hidden.completion_hole_mask)
-    assert generation[7, 13]
-    assert generation[12, 8]
+    assert generation[9, 12]
+    assert generation[10, 13]
     assert not generation[9, 10]
     assert not generation[0, 0]
     assert first_occluder.reconstruction_mask is None
     assert second_occluder.reconstruction_mask is None
     assert distant_occluder.reconstruction_mask is None
+
+
+def test_reconstruction_mask_keeps_only_hole_components_anchored_to_occluder():
+    hidden = _detected_object("hidden", "person", (4, 4, 4, 4))
+    occluder = _detected_object("book", "book", (7, 5, 3, 3))
+    hidden.amodal_mask = hidden.modal_mask > 0
+    hidden.completion_hole_mask = np.zeros_like(hidden.modal_mask, dtype=bool)
+    # A real missing component behind the book.
+    hidden.completion_hole_mask[5:7, 8:10] = True
+    # Disconnected amodal-boundary drift that must never be composed.
+    hidden.completion_hole_mask[12, 12:15] = True
+    hidden.amodal_mask |= hidden.completion_hole_mask
+    hidden.occluder_ids = {"book"}
+
+    reconstruction_stage.build_reconstruction_masks(
+        [hidden, occluder],
+        (3, 3),
+        composition_margin_pixels=1,
+        context_ratio=0.0,
+    )
+
+    assert np.all(hidden.reconstruction_mask[5:7, 8:10])
+    assert not np.any(hidden.reconstruction_mask[12, 12:15])
+    assert np.all(
+        hidden.reconstruction_mask
+        <= hidden.reconstruction_generation_mask
+    )
+
+
+def test_generation_mask_contains_full_occluder_inside_target_centric_roi():
+    hidden = _detected_object("hidden", "person", (5, 5, 4, 4))
+    occluder = _detected_object("book", "book", (8, 6, 8, 2))
+    hidden.amodal_mask = hidden.modal_mask > 0
+    hidden.completion_hole_mask = np.zeros_like(hidden.modal_mask, dtype=bool)
+    hidden.completion_hole_mask[6:8, 8:10] = True
+    hidden.amodal_mask |= hidden.completion_hole_mask
+    hidden.occluder_ids = {"book"}
+
+    reconstruction_stage.build_reconstruction_masks(
+        [hidden, occluder],
+        (3, 3),
+        composition_margin_pixels=0,
+        context_ratio=0.5,
+    )
+
+    roi = hidden.reconstruction_input_roi
+    assert roi is not None
+    roi_mask = np.zeros_like(hidden.reconstruction_mask, dtype=bool)
+    left, top, right, bottom = roi.clipped_box
+    roi_mask[top:bottom, left:right] = True
+    expected_occluder = (occluder.modal_mask > 0) & roi_mask
+    expected_occluder &= ~(hidden.modal_mask > 0)
+    assert np.all(
+        hidden.reconstruction_generation_mask[expected_occluder]
+    )
+    assert np.array_equal(
+        hidden.reconstruction_occluder_mask,
+        expected_occluder,
+    )
 
 
 def test_prepare_raw_reconstruction_masks_aggregates_pairwise_occluders_once():
@@ -814,6 +873,37 @@ def test_prepare_reconstruction_masks_supports_bidirectional_occlusion():
     assert second.occluder_ids == {"person"}
     assert np.any(first.reconstruction_generation_mask)
     assert np.any(second.reconstruction_generation_mask)
+
+
+def test_directional_decision_uses_filtered_reconstruction_area_not_total_hole():
+    hidden = _detected_object("hidden", "person", (4, 4, 4, 4))
+    occluder = _detected_object("book", "book", (7, 5, 2, 2))
+    hidden.amodal_mask = hidden.modal_mask > 0
+    hidden.completion_hole_mask = np.zeros_like(hidden.modal_mask, dtype=bool)
+    # Large disconnected completion noise does not overlap the paired object.
+    hidden.completion_hole_mask[12:15, 12:15] = True
+    hidden.amodal_mask |= hidden.completion_hole_mask
+    hidden.completion_hole_area = 9
+    occluder.amodal_mask = occluder.modal_mask > 0
+    occluder.completion_hole_mask = np.zeros_like(
+        occluder.modal_mask, dtype=bool
+    )
+    occluder.completion_hole_area = 0
+
+    decisions = reconstruction_stage.prepare_raw_reconstruction_masks(
+        [hidden, occluder],
+        [("hidden", "book")],
+        (3, 3),
+        minimum_hole_area_pixels=1,
+        minimum_hole_area_ratio=0.0,
+        tie_tolerance_ratio=0.1,
+        composition_margin_pixels=1,
+        context_ratio=0.0,
+    )
+
+    assert decisions[0].reconstruction_directions == ()
+    assert hidden.occluder_ids == set()
+    assert hidden.reconstruction_mask is None
 
 
 def test_reconstruct_objects_inpaints_only_nonempty_masks(rgb_image):

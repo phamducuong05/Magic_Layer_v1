@@ -177,6 +177,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
 
     def _load_model(self) -> None:
         self._settings = self._validated_settings(self.config)
+        self._last_debug_artifacts: list[dict[str, Image.Image]] = []
         if not str(self.device).startswith("cuda") or not torch.cuda.is_available():
             raise ObjectReconstructionError(
                 "HD-Painter requires CUDA; configured device is "
@@ -401,6 +402,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
     ) -> list[Image.Image | Exception]:
         """Run all 512px generations, then all eligible SR jobs."""
         outcomes: list[Image.Image | Exception | None] = [None] * len(requests)
+        self._last_debug_artifacts = [{} for _ in requests]
         prepared: dict[int, _PreparedRequest] = {}
         for index, (image, mask, object_context) in enumerate(requests):
             try:
@@ -460,6 +462,9 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                                 ],
                             )
                         item.generated = self._to_single_pil(generated)
+                        self._last_debug_artifacts[index][
+                            "base_output_512"
+                        ] = item.generated.copy()
                     except Exception as exc:
                         outcomes[index] = self._stage_error(
                             exc, "generation_512"
@@ -530,6 +535,9 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                                         use_sam_mask=False,
                                     )
                                 )
+                                self._last_debug_artifacts[index][
+                                    "sr_output"
+                                ] = outcomes[index].copy()
                         except Exception as exc:
                             outcomes[index] = self._stage_error(
                                 exc, "super_resolution"
@@ -584,6 +592,12 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             else ObjectReconstructionError("Missing reconstruction outcome.")
             for outcome in outcomes
         ]
+
+    def consume_debug_artifacts(self) -> list[dict[str, Image.Image]]:
+        """Return and clear intermediate images from the latest batch."""
+        artifacts = self._last_debug_artifacts
+        self._last_debug_artifacts = []
+        return artifacts
 
     def offload_to_cpu(self) -> None:
         """Free CUDA residency while retaining reusable model weights in RAM."""

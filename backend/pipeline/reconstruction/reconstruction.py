@@ -13,6 +13,8 @@ from ..roi import SquareROI, crop_array, crop_image, square_roi_from_support
 from ..types import DetectedObject
 from .validate_reconstruction import (
     ReconstructionValidationError,
+    reconstruction_color_metrics,
+    refine_reconstruction_colors,
     validate_reconstruction_result,
 )
 
@@ -92,7 +94,14 @@ def reconstruct_objects(
     context_ratio: float,
     blend_allowance_ratio: float = 0.0,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
+    style_hint: str = "",
+    color_refinement_enabled: bool = False,
+    color_refinement_strength: float = 0.2,
     diagnostics_directory: str | Path | None = None,
+    debug_artifacts_provider: Callable[
+        [], Sequence[dict[str, Image.Image]]
+    ]
+    | None = None,
 ) -> None:
     """Reconstruct and validate hidden RGB independently for each raw object."""
     prepared: list[_PreparedReconstruction] = []
@@ -134,13 +143,13 @@ def reconstruct_objects(
                 raise ReconstructionValidationError(
                     "input_preparation", "completion-hole mask is missing"
                 )
-            roi_support = (detected.amodal_mask > 0) | generation_mask.astype(
-                bool
-            )
-            roi = square_roi_from_support(
-                roi_support,
-                context_ratio=context_ratio,
-            )
+            roi = detected.reconstruction_input_roi
+            if roi is None:
+                roi = square_roi_from_support(
+                    (detected.amodal_mask > 0)
+                    | reconstruction_mask.astype(bool),
+                    context_ratio=context_ratio,
+                )
             source_crop = crop_image(image.convert("RGB"), roi)
             mask_crop = crop_array(generation_mask.astype(bool), roi)
             composition_crop = crop_array(
@@ -161,6 +170,8 @@ def reconstruct_objects(
                 target=detected.semantic_class,
                 occluders=occluders,
             )
+            if style_hint.strip():
+                prompt = f"{prompt.rstrip()} {style_hint.strip()}"
             log_event(
                 logger,
                 "object_reconstruction",
@@ -182,12 +193,42 @@ def reconstruct_objects(
                 _save_mask(directory / "composition_mask.png", composition_crop)
                 _save_mask(directory / "generation_mask.png", mask_crop)
                 _save_mask(directory / "completion_hole.png", hole_crop)
+                seed_mask = detected.reconstruction_seed_mask
+                _save_mask(
+                    directory / "directional_seed.png",
+                    crop_array(seed_mask.astype(bool), roi)
+                    if seed_mask is not None
+                    else np.zeros_like(mask_crop),
+                )
+                _save_mask(
+                    directory / "filtered_reconstruction_mask.png",
+                    composition_crop,
+                )
+                generation_seed = (
+                    detected.reconstruction_generation_seed_mask
+                )
+                _save_mask(
+                    directory / "generation_before_dilation.png",
+                    crop_array(generation_seed.astype(bool), roi)
+                    if generation_seed is not None
+                    else composition_crop,
+                )
+                _save_mask(
+                    directory / "generation_after_dilation.png",
+                    mask_crop,
+                )
                 occluder_mask = detected.reconstruction_occluder_mask
                 _save_mask(
                     directory / "occluder_mask.png",
                     crop_array(
                         occluder_mask.astype(bool), roi
                     ) if occluder_mask is not None else np.zeros_like(mask_crop),
+                )
+                _save_mask(
+                    directory / "full_occluder_in_roi.png",
+                    crop_array(occluder_mask.astype(bool), roi)
+                    if occluder_mask is not None
+                    else np.zeros_like(mask_crop),
                 )
             prepared.append(
                 _PreparedReconstruction(
@@ -243,8 +284,25 @@ def reconstruct_objects(
         )
         outcomes = [mismatch] * len(prepared)
 
-    for item, reconstructed in zip(prepared, outcomes):
+    debug_artifacts: Sequence[dict[str, Image.Image]] = ()
+    if diagnostics_directory is not None and debug_artifacts_provider:
+        try:
+            debug_artifacts = debug_artifacts_provider()
+        except Exception as exc:
+            logger.warning(
+                "Could not collect HD-Painter debug artifacts: %s", exc
+            )
+
+    for index, (item, reconstructed) in enumerate(zip(prepared, outcomes)):
         detected = item.detected
+        if diagnostics_directory is not None and index < len(debug_artifacts):
+            directory = _artifact_directory(
+                diagnostics_directory, detected.object_id
+            )
+            for artifact_name in ("base_output_512", "sr_output"):
+                artifact = debug_artifacts[index].get(artifact_name)
+                if isinstance(artifact, Image.Image):
+                    artifact.save(directory / f"{artifact_name}.png")
         if isinstance(reconstructed, Exception):
             _store_reconstruction_failure(
                 detected,
@@ -264,10 +322,41 @@ def reconstruct_objects(
                 reconstructed,
                 source_crop=item.source_crop,
                 hard_mask=item.mask_crop,
-                completion_hole=item.hole_crop,
+                completion_hole=item.composition_crop,
                 modal_mask=item.modal_crop,
                 roi=item.roi,
                 blend_allowance_ratio=blend_allowance_ratio,
+            )
+            occluder_crop = crop_array(
+                detected.reconstruction_occluder_mask.astype(bool),
+                item.roi,
+            ) if detected.reconstruction_occluder_mask is not None else (
+                np.zeros_like(item.mask_crop)
+            )
+            color_metrics = reconstruction_color_metrics(
+                validated,
+                source_crop=item.source_crop,
+                composition_mask=item.composition_crop,
+                modal_mask=item.modal_crop,
+                occluder_mask=occluder_crop,
+            )
+            log_event(
+                logger,
+                "object_reconstruction",
+                "color_assessment",
+                object_id=detected.object_id,
+                **color_metrics,
+            )
+            refined = (
+                refine_reconstruction_colors(
+                    validated,
+                    source_crop=item.source_crop,
+                    composition_mask=item.composition_crop,
+                    modal_mask=item.modal_crop,
+                    strength=color_refinement_strength,
+                )
+                if color_refinement_enabled
+                else validated
             )
         except Exception as exc:
             _store_reconstruction_failure(
@@ -277,13 +366,14 @@ def reconstruct_objects(
             )
             continue
 
-        detected.reconstruction_canvas = validated
+        detected.reconstruction_canvas = refined
         detected.reconstruction_roi = item.roi
         if diagnostics_directory is not None:
             directory = _artifact_directory(
                 diagnostics_directory, detected.object_id
             )
             validated.save(directory / "validated_output.png")
+            refined.save(directory / "color_refined_output.png")
         log_event(
             logger,
             "object_reconstruction",
