@@ -21,7 +21,7 @@ pipeline:
     composition_margin_pixels: 4
     # HD-Painter Poisson blending dilates its mask by roughly 24/2048 pixels.
     blend_allowance_ratio: 0.012
-    prompt_template: "Reconstruct only the hidden continuation of the {target} behind {occluders}, matching the visible target's color, texture, lighting, and geometry. Do not recreate {occluders}."
+    prompt_template: "Reconstruct only the hidden continuation of the {target} behind occluders, matching the visible target's color, texture, lighting, and geometry."
     # Leave empty for photos. This project currently processes flat artwork,
     # so explicitly discourage HD-Painter's photographic/soft texture bias.
     style_hint: "Match the source's flat vector illustration style with crisp edges, solid consistent colors, and no blur."
