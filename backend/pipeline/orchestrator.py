@@ -437,16 +437,6 @@ def process_image(
                                             "style_hint", ""
                                         )
                                     ),
-                                    color_refinement_enabled=bool(
-                                        reconstruction_config.get(
-                                            "color_refinement_enabled", False
-                                        )
-                                    ),
-                                    color_refinement_strength=float(
-                                        reconstruction_config.get(
-                                            "color_refinement_strength", 0.2
-                                        )
-                                    ),
                                     diagnostics_directory=(
                                         reconstruction_config.get(
                                             "diagnostics_directory"

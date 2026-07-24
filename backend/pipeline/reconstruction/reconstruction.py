@@ -14,7 +14,6 @@ from ..types import DetectedObject
 from .validate_reconstruction import (
     ReconstructionValidationError,
     reconstruction_color_metrics,
-    refine_reconstruction_colors,
     validate_reconstruction_result,
 )
 
@@ -96,8 +95,6 @@ def reconstruct_objects(
     blend_allowance_ratio: float = 0.0,
     prompt_template: str = DEFAULT_PROMPT_TEMPLATE,
     style_hint: str = "",
-    color_refinement_enabled: bool = False,
-    color_refinement_strength: float = 0.2,
     diagnostics_directory: str | Path | None = None,
     debug_artifacts_provider: Callable[
         [], Sequence[dict[str, Image.Image]]
@@ -419,21 +416,6 @@ def reconstruct_objects(
                 object_id=detected.object_id,
                 **color_metrics,
             )
-            refined = (
-                refine_reconstruction_colors(
-                    validated,
-                    source_crop=item.source_crop,
-                    composition_mask=(
-                        item.accepted_rgb_crop
-                        if item.accepted_rgb_crop is not None
-                        else item.composition_crop
-                    ),
-                    modal_mask=item.modal_crop,
-                    strength=color_refinement_strength,
-                )
-                if color_refinement_enabled
-                else validated
-            )
         except Exception as exc:
             _store_reconstruction_failure(
                 detected,
@@ -442,7 +424,7 @@ def reconstruct_objects(
             )
             continue
 
-        detected.reconstruction_canvas = refined
+        detected.reconstruction_canvas = validated
         detected.reconstruction_roi = item.roi
         if detected.reconstruction_accepted_rgb_mask is not None:
             detected.reconstruction_write_mask = (
@@ -453,7 +435,6 @@ def reconstruct_objects(
                 diagnostics_directory, detected.object_id
             )
             validated.save(directory / "validated_output.png")
-            refined.save(directory / "color_refined_output.png")
         log_event(
             logger,
             "object_reconstruction",

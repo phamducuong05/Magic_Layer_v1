@@ -25,8 +25,6 @@ pipeline:
     # Leave empty for photos. This project currently processes flat artwork,
     # so explicitly discourage HD-Painter's photographic/soft texture bias.
     style_hint: "Match the source's flat vector illustration style with crisp edges, solid consistent colors, and no blur."
-    color_refinement_enabled: true
-    color_refinement_strength: 0.2
     # Set to a directory path to save per-object source/mask/output PNGs.
     diagnostics_directory: outputs/reconstruction_debug
   matting:

@@ -65,7 +65,7 @@ Quy tắc:
 
 - Không inpaint.
 - Luôn giữ RGB từ ảnh gốc.
-- Dùng làm reference cho color refinement.
+- Luôn là RGB nguồn được bảo vệ, không qua bước chỉnh màu hậu kỳ.
 - Không được HD-Painter hoặc BiRefNet extension ghi đè.
 
 #### B. `foreign_modal_inside_bbox`
@@ -240,8 +240,6 @@ Khôi phục target modal + protected foreign modal từ source
     ↓
 Giữ toàn bộ model RGB trong accepted_model_rgb_mask
     ↓
-Color refinement dựa trên target modal
-    ↓
 BiRefNet tìm foreground support từ reconstructed RGB
     ↓
 Same-class grouping + conflict resolution
@@ -354,7 +352,7 @@ Thay đổi:
 - `mask_image` giữ nguyên, tiếp tục là crop của generation mask hiện tại.
 - `composition_crop` vẫn là directional reconstruction mask và được dùng làm validation seed.
 - Thêm `accepted_rgb_crop` lấy từ `accepted_model_rgb_mask`, không lấy từ generation mask.
-- `accepted_rgb_crop` chỉ được dùng sau khi model trả kết quả để validation, refinement và write-back.
+- `accepted_rgb_crop` chỉ được dùng sau khi model trả kết quả để validation và write-back.
 
 #### Output acceptance
 
@@ -395,28 +393,14 @@ Vẫn giữ:
 
 Bỏ sự phụ thuộc giữa write-back area và amodal/completion shape.
 
-### 5.6. Color refinement
+### 5.6. Không chỉnh màu RGB sau reconstruction
 
-Hiện tại color refinement dùng `composition_mask` làm edit mask.
+`validated_output` được dùng trực tiếp làm `reconstruction_canvas`.
 
-Đổi thành:
-
-```text
-edit_mask = accepted_model_rgb_mask
-reference_mask = target_modal_mask
-```
-
-Quy tắc:
-
-- Chỉ thay đổi pixel do HD-Painter sinh.
-- Không thay đổi target modal gốc.
-- Không thay đổi foreign modal được bảo vệ.
-- Palette/reference lấy từ RGB modal thật của target.
-
-Color metrics vẫn có thể báo riêng:
-
-- Metrics trên directional hidden seed.
-- Metrics trên toàn accepted model RGB region.
+- Không gọi `refine_reconstruction_colors()`.
+- Không dùng `color_refinement_enabled` hoặc `color_refinement_strength`.
+- Không tạo `color_refined_output.png`.
+- Color metrics vẫn được giữ để đo và log, nhưng không thay đổi pixel.
 
 ### 5.7. `backend/pipeline/matting.py`
 
@@ -594,7 +578,7 @@ Các test:
 6. Directional hidden seed vẫn bắt blank extreme failure.
 7. Model output sai size/mode vẫn bị reject.
 
-### Task 4: Color refinement
+### Task 4: Không thay đổi validated RGB
 
 **Files:**
 
@@ -604,10 +588,10 @@ Các test:
 
 Các test:
 
-1. Refinement được áp dụng ngoài amodal nhưng trong accepted RGB mask.
+1. RGB trong accepted generation region giữ nguyên giá trị từ validated output.
 2. Target modal không đổi.
 3. Protected foreign modal không đổi.
-4. Pixel ngoài accepted RGB mask không đổi.
+4. Không tạo artifact `color_refined_output.png`.
 
 ### Task 5: BiRefNet support
 
@@ -742,10 +726,9 @@ Biện pháp:
 4. Viết test failing cho full-output validation.
 5. Implement validation và accepted RGB mask.
 6. Chạy targeted tests.
-7. Viết test failing cho color refinement.
-8. Refactor refinement sang accepted RGB region.
-9. Viết test failing cho BiRefNet support ngoài amodal.
-10. Refactor support refinement.
+7. Viết test xác nhận validated RGB không bị chỉnh màu.
+8. Viết test failing cho BiRefNet support ngoài amodal.
+9. Refactor support refinement.
 11. Viết và chạy grouping regression tests.
 12. Bổ sung diagnostics.
 13. Chạy toàn bộ test suite.

@@ -7,7 +7,7 @@ import numpy as np
 import cv2
 from PIL import Image
 
-from ...core.layerd_refine import expand_mask, refine_with_reference_mask
+from ...core.layerd_refine import expand_mask
 from ..roi import SquareROI
 
 
@@ -114,29 +114,6 @@ def reconstruction_color_metrics(
         ),
         "generated_detail_ratio": detail_ratio,
     }
-
-
-def refine_reconstruction_colors(
-    result: Image.Image,
-    *,
-    source_crop: Image.Image,
-    composition_mask: np.ndarray,
-    modal_mask: np.ndarray,
-    strength: float,
-    max_colors: int = 16,
-) -> Image.Image:
-    """Refine write-back RGB from flat colors in the original target modal."""
-    result_array = np.asarray(result.convert("RGB"), dtype=np.uint8).copy()
-    source_array = np.asarray(source_crop.convert("RGB"), dtype=np.uint8)
-    refined = refine_with_reference_mask(
-        result_array,
-        edit_mask=composition_mask.astype(bool),
-        reference_image=source_array,
-        reference_mask=modal_mask.astype(bool),
-        max_num_colors=max_colors,
-        strength=strength,
-    )
-    return Image.fromarray(refined, mode="RGB")
 
 
 def _real_image_pixels(roi: SquareROI) -> np.ndarray:

@@ -362,7 +362,7 @@ def test_reconstruction_prompt_appends_configured_style_hint():
     )
 
 
-def test_target_palette_refinement_reduces_occluder_color_contamination():
+def test_validated_reconstruction_rgb_is_not_color_refined():
     detected = _object("person")
     roi = SquareROI(2, 2, 5, 16, 12)
     detected.reconstruction_input_roi = roi
@@ -381,21 +381,14 @@ def test_target_palette_refinement_reduces_occluder_color_contamination():
         [detected],
         _valid_result((10, 80, 220)),
         context_ratio=0.0,
-        color_refinement_enabled=True,
-        color_refinement_strength=1.0,
     )
 
-    accepted_crop = accepted[
-        roi.y : roi.y + roi.size,
-        roi.x : roi.x + roi.size,
-    ]
     generation_crop = detected.reconstruction_generation_mask[
         roi.y : roi.y + roi.size,
         roi.x : roi.x + roi.size,
     ]
-    refined = np.asarray(detected.reconstruction_canvas)
-    assert np.any(accepted_crop & ~generation_crop)
-    assert np.all(refined[accepted_crop] == (220, 20, 20))
+    canvas = np.asarray(detected.reconstruction_canvas)
+    assert np.all(canvas[generation_crop] == (10, 80, 220))
 
 
 def test_soft_color_metrics_include_generated_detail_ratio():
@@ -452,7 +445,7 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
         "target_modal_protected.png",
         "foreign_modal_inside_bbox.png",
         "foreign_modal_outside_bbox.png",
-        "color_refined_output.png",
         "base_output_512.png",
         "sr_output.png",
     } <= {path.name for path in object_directory.iterdir()}
+    assert not (object_directory / "color_refined_output.png").exists()

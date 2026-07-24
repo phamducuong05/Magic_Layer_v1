@@ -1019,6 +1019,8 @@ def test_object_reconstruction_context_ratio_is_configured():
     assert reconstruction_config["generation_mask_dilation_pixels"] == 12
     assert reconstruction_config["generation_mask_closing_pixels"] == 7
     assert reconstruction_config["support_margin_pixels"] == 8
+    assert "color_refinement_enabled" not in reconstruction_config
+    assert "color_refinement_strength" not in reconstruction_config
     assert config.get_model_config("object_reconstruction")[
         "super_resolution"
     ]["minimum_roi_size"] == 640
