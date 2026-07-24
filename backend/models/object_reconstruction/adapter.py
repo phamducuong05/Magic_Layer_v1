@@ -1,4 +1,4 @@
-"""Application adapter for HD-Painter hidden-object reconstruction."""
+"""Application adapter cho mô hình tái tạo đối tượng bị che khuất HD-Painter (Hidden-Object Reconstruction)."""
 
 from __future__ import annotations
 
@@ -23,15 +23,16 @@ logger = get_logger(__name__)
 
 
 class ObjectReconstructionError(RuntimeError):
-    """Raised when HD-Painter cannot produce an application-valid crop."""
+    """Ngoại lệ tùy chỉnh được ném ra khi HD-Painter gặp lỗi không thể sinh crop ảnh hợp lệ."""
 
     def __init__(self, message: str, *, stage: str = "inference"):
         super().__init__(message)
+        # Ghi nhận giai đoạn xảy ra lỗi (VD: input_preparation, generation_512, super_resolution, crop_size_restoration)
         self.stage = stage
 
 
 def _move_ddim_model(model: Any, device: str) -> None:
-    """Move every module owned by the research DDIM container."""
+    """Di chuyển tất cả các sub-modules của mô hình DDIM (vae, encoder, unet, low_scale_model) sang thiết bị chỉ định (CPU/CUDA)."""
     for name in ("vae", "encoder", "unet", "low_scale_model"):
         module = getattr(model, name, None)
         if module is not None and hasattr(module, "to"):
@@ -42,7 +43,7 @@ def _move_ddim_model(model: Any, device: str) -> None:
 
 
 def _offload_ddim_model(model: Any) -> None:
-    """Drop gradients and move one DDIM model out of CUDA memory."""
+    """Hủy gradient và giải phóng mô hình DDIM khỏi bộ nhớ CUDA VRAM về CPU RAM."""
     unet = getattr(model, "unet", None)
     if unet is not None:
         if hasattr(unet, "zero_grad"):
@@ -53,7 +54,7 @@ def _offload_ddim_model(model: Any) -> None:
 
 
 def _release_cuda_cache() -> None:
-    """Release inactive allocations at the measured stage boundary."""
+    """Thu gom rác Python (gc) và giải phóng bộ nhớ đệm CUDA không còn sử dụng."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -86,7 +87,10 @@ class _PreparedRequest:
 def _reset_research_state(
     router: ModuleType, share: ModuleType, painta: ModuleType
 ) -> None:
-    """Clear mutable inference state while preserving cached model weights."""
+    """Xóa bộ nhớ Attention tạm thời (Global State) của PAINtA và RASG giữa các lượt sinh ảnh.
+    
+    Giúp tránh tình trạng rò rỉ dữ liệu chú ý (attention leakage) từ ảnh trước sang ảnh sau.
+    """
     router.reset()
     painta.painta_on = False
     painta.token_idx = []
@@ -115,7 +119,10 @@ def _load_runtime(
     enable_super_resolution: bool,
     auto_download: bool,
 ) -> _Runtime:
-    """Import HD-Painter only after the manager requests the adapter."""
+    """Cơ chế Lazy Loading: Chỉ import mã nguồn HD-Painter khi Model Manager thực sự gọi khởi tạo Adapter.
+    
+    Giúp ứng dụng khởi động tức thì và tránh xung đột thư viện môi trường khi không dùng đến tính năng tái tạo.
+    """
     package = "backend.models.object_reconstruction.hd_painter.src"
     try:
         common = importlib.import_module(f"{package}.models.common")
@@ -169,13 +176,15 @@ def _load_runtime(
 
 @ModelRegistry.register("object_reconstruction", "hd_painter")
 class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
-    """Run HD-Painter on one square RGB crop and aligned hard mask."""
+    """Adapter tích hợp mô hình HD-Painter để thực hiện vẽ bù/tái tạo đối tượng bị che khuất trên crop vuông RGB và mask chuẩn hóa."""
 
+    # Khóa Threading Lock đảm bảo chỉ có 1 thread duy nhất gọi GPU inference tại một thời điểm
     _inference_lock = threading.Lock()
     _MODEL_IDS = {"ds8_inp", "sd15_inp", "sd2_inp"}
     _METHODS = {"baseline", "painta", "rasg", "painta+rasg"}
 
     def _load_model(self) -> None:
+        """Khởi tạo và tải trọng số mô hình HD-Painter (Inpainting + Super-Resolution)."""
         self._settings = self._validated_settings(self.config)
         self._last_debug_artifacts: list[dict[str, Image.Image]] = []
         if not str(self.device).startswith("cuda") or not torch.cuda.is_available():
@@ -211,6 +220,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             else self.device
         )
         try:
+            # Tải mô hình Inpainting chính (512px)
             self._inpainting_model = self._runtime.load_inpainting_model(
                 model_id=self._settings["model_id"],
                 dtype=dtype,
@@ -218,8 +228,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                 cache=True,
             )
             if self._settings["sequential_cpu_offload"]:
-                # The research cache ignores the requested device when it
-                # returns an existing model, so enforce CPU residency here.
+                # Nếu bật offload tuần tự, đẩy model về CPU và giải phóng VRAM ngay sau khi load
                 _offload_ddim_model(self._inpainting_model)
                 _release_cuda_cache()
             self._sr_model = None
@@ -346,7 +355,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
         mask: Image.Image,
         object_context: str,
     ) -> _PreparedRequest | Image.Image:
-        """Normalize one request, returning source directly for an empty mask."""
+        """Chuẩn hóa ảnh đầu vào và mask. Nếu mask rỗng (không bị che), trả về ảnh gốc để bỏ qua GPU inference."""
         source = image.convert("RGB")
         original_size = source.size
         hard_mask = mask.convert("L")
@@ -358,6 +367,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             np.where(np.asarray(hard_mask) >= 127, 255, 0).astype(np.uint8),
             mode="L",
         )
+        # Tối ưu: Nếu mask không có vùng bị che (mask rỗng), trả về trực tiếp ảnh nguồn
         if not np.any(np.asarray(hard_mask)):
             return source
 
@@ -367,6 +377,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
                 "HD-Painter requires non-empty object_context."
             )
 
+        # Resize về kích thước đầu vào chuẩn của HD-Painter (512x512)
         size = self._settings["input_size"]
         low_image = source.resize((size, size), Image.Resampling.LANCZOS)
         low_mask = hard_mask.resize((size, size), Image.Resampling.NEAREST)
@@ -400,7 +411,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
         self,
         requests: Sequence[tuple[Image.Image, Image.Image, str]],
     ) -> list[Image.Image | Exception]:
-        """Run all 512px generations, then all eligible SR jobs."""
+        """Thực thi pipeline tái tạo 2 giai đoạn: Chạy tất cả các bản sinh 512px trước, sau đó siêu phân giải (Super-Resolution 2048px)."""
         outcomes: list[Image.Image | Exception | None] = [None] * len(requests)
         self._last_debug_artifacts = [{} for _ in requests]
         prepared: dict[int, _PreparedRequest] = {}
@@ -422,9 +433,11 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
         if not prepared:
             return [outcome for outcome in outcomes if outcome is not None]
 
+        # Đảm bảo duy nhất 1 thread truy cập GPU tại một thời điểm
         with self._inference_lock:
             sr_phase_started = False
             try:
+                # GIAI ĐOẠN 1: Tải model Inpainting 512px lên GPU và thực thi sinh ảnh base
                 if self._settings["sequential_cpu_offload"]:
                     _move_ddim_model(self._inpainting_model, self.device)
                 runner = (
@@ -600,7 +613,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
         return artifacts
 
     def offload_to_cpu(self) -> None:
-        """Free CUDA residency while retaining reusable model weights in RAM."""
+        """Giải phóng bộ nhớ GPU VRAM bằng cách chuyển trọng số mô hình về RAM CPU."""
         with self._inference_lock:
             self._runtime.reset_state()
             _offload_ddim_model(self._inpainting_model)
@@ -609,7 +622,7 @@ class HDPainterObjectReconstruction(BaseObjectReconstructionModel):
             _release_cuda_cache()
 
     def unload(self) -> None:
-        """Remove HD-Painter weights, including its module-level SD cache."""
+        """Hủy hoàn toàn mô hình HD-Painter khỏi bộ nhớ, xóa bộ nhớ cache mô hình ở cấp module."""
         with self._inference_lock:
             runtime = getattr(self, "_runtime", None)
             if runtime is not None:

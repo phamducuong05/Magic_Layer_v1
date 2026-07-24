@@ -12,7 +12,7 @@ pipeline:
     tie_tolerance_ratio: 0.1
   object_reconstruction:
     # A tighter crop reduces foreground-occluder distraction for HD-Painter.
-    context_ratio: 0.15
+    context_ratio: 0.025
     generation_mask_dilation_pixels: 12
     generation_mask_closing_pixels: 7
     support_margin_pixels: 8
