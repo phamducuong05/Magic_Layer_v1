@@ -441,6 +441,9 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
         "accepted_model_rgb_mask.png",
         "protected_source_pixels.png",
         "roi_real_pixels.png",
+        "initial_modal_mask.png",
+        "completed_amodal_mask.png",
+        "amodal_bbox_mask.png",
         "target_bbox_mask.png",
         "target_modal_protected.png",
         "foreign_modal_inside_bbox.png",
@@ -448,4 +451,16 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
         "base_output_512.png",
         "sr_output.png",
     } <= {path.name for path in object_directory.iterdir()}
+    initial_modal = np.asarray(
+        Image.open(object_directory / "initial_modal_mask.png")
+    ) > 0
+    completed_amodal = np.asarray(
+        Image.open(object_directory / "completed_amodal_mask.png")
+    ) > 0
+    amodal_bbox = np.asarray(
+        Image.open(object_directory / "amodal_bbox_mask.png")
+    ) > 0
+    assert np.all(completed_amodal[initial_modal])
+    assert np.any(completed_amodal & ~initial_modal)
+    assert np.all(amodal_bbox[completed_amodal])
     assert not (object_directory / "color_refined_output.png").exists()

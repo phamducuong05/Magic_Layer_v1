@@ -213,6 +213,35 @@ def reconstruct_objects(
                 target_bbox_mask = (
                     detected.reconstruction_target_bbox_mask
                 )
+                completed_amodal = (
+                    crop_array(detected.amodal_mask.astype(bool), roi)
+                    if detected.amodal_mask is not None
+                    else modal_crop
+                )
+                if target_bbox_mask is not None:
+                    diagnostic_bbox = crop_array(
+                        target_bbox_mask.astype(bool), roi
+                    )
+                else:
+                    diagnostic_bbox = np.zeros_like(mask_crop)
+                    bbox_y, bbox_x = np.nonzero(completed_amodal)
+                    if bbox_x.size:
+                        diagnostic_bbox[
+                            int(bbox_y.min()) : int(bbox_y.max()) + 1,
+                            int(bbox_x.min()) : int(bbox_x.max()) + 1,
+                        ] = True
+                _save_mask(
+                    directory / "initial_modal_mask.png",
+                    modal_crop,
+                )
+                _save_mask(
+                    directory / "completed_amodal_mask.png",
+                    completed_amodal,
+                )
+                _save_mask(
+                    directory / "amodal_bbox_mask.png",
+                    diagnostic_bbox,
+                )
                 foreign_inside = (
                     detected.reconstruction_foreign_modal_inside_bbox
                 )
@@ -235,9 +264,7 @@ def reconstruct_objects(
                 )
                 _save_mask(
                     directory / "target_bbox_mask.png",
-                    crop_array(target_bbox_mask.astype(bool), roi)
-                    if target_bbox_mask is not None
-                    else np.zeros_like(mask_crop),
+                    diagnostic_bbox,
                 )
                 _save_mask(
                     directory / "target_modal_protected.png",
