@@ -57,11 +57,6 @@ class DetectedObject:
     reconstruction_generation_mask: Optional[np.ndarray] = None
     reconstruction_occluder_mask: Optional[np.ndarray] = None
     reconstruction_input_roi: Optional[SquareROI] = None
-    reconstruction_target_bbox_mask: Optional[np.ndarray] = None
-    reconstruction_foreign_modal_inside_bbox: Optional[np.ndarray] = None
-    reconstruction_foreign_modal_outside_bbox: Optional[np.ndarray] = None
-    reconstruction_protected_mask: Optional[np.ndarray] = None
-    reconstruction_accepted_rgb_mask: Optional[np.ndarray] = None
     reconstruction_canvas: Optional[Image.Image] = None
     reconstruction_roi: Optional[SquareROI] = None
     reconstruction_evidence_alpha: Optional[np.ndarray] = None

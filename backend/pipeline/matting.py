@@ -70,9 +70,13 @@ def refine_reconstruction_supports(
     """Extend incomplete amodal support using reconstructed RGB evidence.
 
     BiRefNet supplies class-agnostic foreground confidence on each accepted
-    reconstruction crop. The model-generation mask remains an inference input
-    only; foreground evidence may use the wider post-inference accepted RGB
-    region when it connects to the visible target and was changed by the model.
+    reconstruction crop. A component may extend the target only when it stays
+    inside the generation region, connects to the target core, contains strong
+    foreground confidence, and contains RGB changed by HD-Painter. Evidence-
+    derived extension never absorbs a modal pixel owned by another object.
+    The original reconstruction mask remains authoritative underneath assigned
+    occluders, so excluding foreign modal pixels here does not discard the
+    target's validated hidden reconstruction.
     """
     if not 0.0 <= alpha_low_threshold <= alpha_high_threshold <= 1.0:
         raise ValueError(
@@ -89,9 +93,11 @@ def refine_reconstruction_supports(
         raise ValueError("support maximum extension ratio must be non-negative")
 
     source = image.convert("RGB")
+    source_shape = (source.height, source.width)
     for target in objects:
         target.reconstruction_evidence_alpha = None
         target.reconstruction_extension_mask = None
+        target.reconstruction_write_mask = None
         target.reconstruction_support_mask = None
 
         reconstruction_mask = target.reconstruction_mask
@@ -106,13 +112,16 @@ def refine_reconstruction_supports(
             continue
 
         modal = target.modal_mask > 0
-        accepted_rgb_mask = (
-            target.reconstruction_accepted_rgb_mask.astype(bool)
-            if target.reconstruction_accepted_rgb_mask is not None
-            else reconstruction_mask.astype(bool)
+        amodal = (
+            target.amodal_mask > 0
+            if target.amodal_mask is not None
+            else modal
         )
-        target.reconstruction_write_mask = accepted_rgb_mask.copy()
-        target.reconstruction_support_mask = modal.copy()
+        baseline_support = modal | amodal | reconstruction_mask.astype(bool)
+        target.reconstruction_write_mask = reconstruction_mask.astype(
+            bool
+        ).copy()
+        target.reconstruction_support_mask = baseline_support.copy()
 
         if roi.image_size != source.size or canvas.size != (roi.size, roi.size):
             log_event(
@@ -148,17 +157,26 @@ def refine_reconstruction_supports(
             canvas.convert("RGB"), dtype=np.uint8
         )
         modal_crop = crop_array(modal, roi).astype(bool)
-        accepted_rgb_crop = crop_array(
-            accepted_rgb_mask, roi
-        ).astype(bool)
-        protected_mask = (
-            target.reconstruction_protected_mask.astype(bool)
-            if target.reconstruction_protected_mask is not None
-            else ~accepted_rgb_mask
+        amodal_crop = crop_array(amodal, roi).astype(bool)
+        reconstruction_crop = crop_array(
+            reconstruction_mask.astype(bool), roi
         )
-        protected_crop = crop_array(protected_mask, roi).astype(bool)
+        generation_mask = (
+            target.reconstruction_generation_mask
+            if target.reconstruction_generation_mask is not None
+            else reconstruction_mask
+        )
+        generation_crop = crop_array(
+            generation_mask.astype(bool), roi
+        )
 
-        core_crop = modal_crop
+        foreign_modal = np.zeros(source_shape, dtype=bool)
+        for other in objects:
+            if other.object_id != target.object_id:
+                foreign_modal |= other.modal_mask > 0
+        foreign_modal_crop = crop_array(foreign_modal, roi).astype(bool)
+
+        core_crop = modal_crop | amodal_crop | reconstruction_crop
         if connection_margin_pixels:
             radius = connection_margin_pixels
             kernel = np.ones((2 * radius + 1,) * 2, dtype=np.uint8)
@@ -170,7 +188,8 @@ def refine_reconstruction_supports(
 
         candidate = (
             (alpha_crop >= alpha_low_threshold)
-            & accepted_rgb_crop
+            & generation_crop
+            & ~foreign_modal_crop
         )
         strong_foreground = alpha_crop >= alpha_high_threshold
         change_distance = np.mean(
@@ -196,12 +215,31 @@ def refine_reconstruction_supports(
                 accepted |= component
 
         extension_crop = accepted & ~core_crop
+        core_area = int(np.count_nonzero(core_crop))
+        maximum_extension = math.ceil(
+            core_area * max_extension_area_ratio
+        )
+        if np.count_nonzero(extension_crop) > maximum_extension:
+            extension_crop[:] = False
+            log_event(
+                logger,
+                "reconstruction_support",
+                "extension_rejected",
+                object_id=target.object_id,
+                reason="maximum_area_growth_exceeded",
+                maximum_extension_pixels=maximum_extension,
+            )
 
         alpha_full = restore_array(alpha_crop, roi)
         extension_full = restore_array(extension_crop, roi).astype(bool)
         target.reconstruction_evidence_alpha = alpha_full
         target.reconstruction_extension_mask = extension_full
-        target.reconstruction_support_mask = modal | extension_full
+        target.reconstruction_write_mask = (
+            reconstruction_mask.astype(bool) | extension_full
+        )
+        target.reconstruction_support_mask = (
+            baseline_support | extension_full
+        )
 
         if diagnostics_directory is not None:
             directory = _reconstruction_artifact_directory(
@@ -213,10 +251,6 @@ def refine_reconstruction_supports(
             _save_mask(
                 directory / "reconstruction_extension_mask.png",
                 extension_crop,
-            )
-            _save_mask(
-                directory / "birefnet_candidate.png",
-                candidate,
             )
             _save_mask(
                 directory / "reconstruction_write_mask.png",
@@ -233,11 +267,11 @@ def refine_reconstruction_supports(
             "object_decision",
             object_id=target.object_id,
             decision=(
-                "extended" if np.any(extension_full) else "keep_modal_prior"
+                "extended" if np.any(extension_full) else "keep_amodal_prior"
             ),
             alpha_candidate_pixels=int(np.count_nonzero(candidate)),
-            protected_pixels_excluded=int(
-                np.count_nonzero(protected_crop)
+            foreign_modal_pixels_excluded=int(
+                np.count_nonzero(generation_crop & foreign_modal_crop)
             ),
             extension_pixels=int(np.count_nonzero(extension_full)),
             write_pixels=int(

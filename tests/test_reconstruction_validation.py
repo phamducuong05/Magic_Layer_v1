@@ -9,7 +9,6 @@ from backend.pipeline.reconstruction import reconstruct_objects
 from backend.pipeline.reconstruction.validate_reconstruction import (
     reconstruction_color_metrics,
 )
-from backend.pipeline.roi import SquareROI
 from backend.pipeline.types import DetectedObject
 
 
@@ -276,50 +275,6 @@ def test_reconstruction_uses_generation_mask_but_preserves_composition_mask():
     assert np.array_equal(detected.reconstruction_mask, composition)
 
 
-def test_reconstruction_keeps_full_roi_output_except_protected_modal_pixels():
-    detected = _object("person")
-    roi = SquareROI(2, 2, 5, 16, 12)
-    detected.reconstruction_input_roi = roi
-    detected.reconstruction_generation_mask = (
-        detected.reconstruction_mask.copy()
-    )
-
-    accepted = np.zeros_like(detected.reconstruction_mask, dtype=bool)
-    accepted[2:7, 2:7] = True
-    accepted[detected.modal_mask > 0] = False
-    protected = detected.modal_mask > 0
-    protected[2, 2] = True  # Foreign modal outside the target bbox.
-    accepted[protected] = False
-    detected.reconstruction_accepted_rgb_mask = accepted
-    detected.reconstruction_protected_mask = protected
-
-    captured = {}
-
-    def reconstruct(source, mask, _prompt):
-        captured["generation"] = np.asarray(mask) > 0
-        return Image.new("RGB", source.size, (200, 10, 10))
-
-    source = _source_image()
-    reconstruct_objects(
-        source,
-        [detected],
-        reconstruct,
-        context_ratio=0.0,
-        blend_allowance_ratio=0.0,
-    )
-
-    canvas = np.asarray(detected.reconstruction_canvas)
-    generation_crop = detected.reconstruction_generation_mask[2:7, 2:7]
-    assert np.array_equal(captured["generation"], generation_crop)
-    # This point is outside generation but inside accepted full-ROI output.
-    assert not generation_crop[0, 1]
-    assert tuple(canvas[0, 1]) == (200, 10, 10)
-    # Protected foreign modal and visible target modal retain source RGB.
-    assert tuple(canvas[0, 0]) == (30, 40, 50)
-    assert tuple(canvas[1, 0]) == (30, 40, 50)
-    assert np.array_equal(detected.reconstruction_write_mask, accepted)
-
-
 def test_reconstruction_prompt_names_target_and_occluder_classes():
     detected = _object("person")
     detected.occluder_classes = {"book", "camera"}
@@ -364,15 +319,6 @@ def test_reconstruction_prompt_appends_configured_style_hint():
 
 def test_target_palette_refinement_reduces_occluder_color_contamination():
     detected = _object("person")
-    roi = SquareROI(2, 2, 5, 16, 12)
-    detected.reconstruction_input_roi = roi
-    detected.reconstruction_generation_mask = (
-        detected.reconstruction_mask.copy()
-    )
-    accepted = np.zeros_like(detected.reconstruction_mask, dtype=bool)
-    accepted[2:7, 2:7] = True
-    accepted[detected.modal_mask > 0] = False
-    detected.reconstruction_accepted_rgb_mask = accepted
     source = np.full((12, 16, 3), (250, 250, 250), dtype=np.uint8)
     source[detected.modal_mask > 0] = (220, 20, 20)
 
@@ -385,17 +331,13 @@ def test_target_palette_refinement_reduces_occluder_color_contamination():
         color_refinement_strength=1.0,
     )
 
-    accepted_crop = accepted[
-        roi.y : roi.y + roi.size,
-        roi.x : roi.x + roi.size,
-    ]
-    generation_crop = detected.reconstruction_generation_mask[
+    roi = detected.reconstruction_roi
+    composition = detected.reconstruction_mask[
         roi.y : roi.y + roi.size,
         roi.x : roi.x + roi.size,
     ]
     refined = np.asarray(detected.reconstruction_canvas)
-    assert np.any(accepted_crop & ~generation_crop)
-    assert np.all(refined[accepted_crop] == (220, 20, 20))
+    assert np.all(refined[composition] == (220, 20, 20))
 
 
 def test_soft_color_metrics_include_generated_detail_ratio():
@@ -445,13 +387,6 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
         "full_occluder_in_roi.png",
         "generation_before_dilation.png",
         "generation_after_dilation.png",
-        "accepted_model_rgb_mask.png",
-        "protected_source_pixels.png",
-        "roi_real_pixels.png",
-        "target_bbox_mask.png",
-        "target_modal_protected.png",
-        "foreign_modal_inside_bbox.png",
-        "foreign_modal_outside_bbox.png",
         "color_refined_output.png",
         "base_output_512.png",
         "sr_output.png",

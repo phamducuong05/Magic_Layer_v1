@@ -29,7 +29,6 @@ class _PreparedReconstruction:
     source_crop: Image.Image
     mask_image: Image.Image
     mask_crop: np.ndarray
-    accepted_rgb_crop: np.ndarray | None
     composition_crop: np.ndarray
     hole_crop: np.ndarray
     modal_crop: np.ndarray
@@ -153,12 +152,6 @@ def reconstruct_objects(
                 )
             source_crop = crop_image(image.convert("RGB"), roi)
             mask_crop = crop_array(generation_mask.astype(bool), roi)
-            accepted_rgb_mask = detected.reconstruction_accepted_rgb_mask
-            accepted_rgb_crop = (
-                crop_array(accepted_rgb_mask.astype(bool), roi)
-                if accepted_rgb_mask is not None
-                else None
-            )
             composition_crop = crop_array(
                 reconstruction_mask.astype(bool), roi
             )
@@ -199,65 +192,6 @@ def reconstruct_objects(
                 source_crop.save(directory / "source.png")
                 _save_mask(directory / "composition_mask.png", composition_crop)
                 _save_mask(directory / "generation_mask.png", mask_crop)
-                real_pixels = np.zeros_like(mask_crop)
-                inner_left, inner_top, inner_right, inner_bottom = (
-                    roi.inner_box
-                )
-                real_pixels[
-                    inner_top:inner_bottom,
-                    inner_left:inner_right,
-                ] = True
-                diagnostic_accepted = (
-                    accepted_rgb_crop
-                    if accepted_rgb_crop is not None
-                    else mask_crop
-                )
-                protected_mask = detected.reconstruction_protected_mask
-                target_bbox_mask = (
-                    detected.reconstruction_target_bbox_mask
-                )
-                foreign_inside = (
-                    detected.reconstruction_foreign_modal_inside_bbox
-                )
-                foreign_outside = (
-                    detected.reconstruction_foreign_modal_outside_bbox
-                )
-                _save_mask(
-                    directory / "accepted_model_rgb_mask.png",
-                    diagnostic_accepted,
-                )
-                _save_mask(
-                    directory / "protected_source_pixels.png",
-                    crop_array(protected_mask.astype(bool), roi)
-                    if protected_mask is not None
-                    else real_pixels & ~diagnostic_accepted,
-                )
-                _save_mask(
-                    directory / "roi_real_pixels.png",
-                    real_pixels,
-                )
-                _save_mask(
-                    directory / "target_bbox_mask.png",
-                    crop_array(target_bbox_mask.astype(bool), roi)
-                    if target_bbox_mask is not None
-                    else np.zeros_like(mask_crop),
-                )
-                _save_mask(
-                    directory / "target_modal_protected.png",
-                    modal_crop,
-                )
-                _save_mask(
-                    directory / "foreign_modal_inside_bbox.png",
-                    crop_array(foreign_inside.astype(bool), roi)
-                    if foreign_inside is not None
-                    else np.zeros_like(mask_crop),
-                )
-                _save_mask(
-                    directory / "foreign_modal_outside_bbox.png",
-                    crop_array(foreign_outside.astype(bool), roi)
-                    if foreign_outside is not None
-                    else np.zeros_like(mask_crop),
-                )
                 _save_mask(directory / "completion_hole.png", hole_crop)
                 seed_mask = detected.reconstruction_seed_mask
                 _save_mask(
@@ -303,7 +237,6 @@ def reconstruct_objects(
                     source_crop=source_crop,
                     mask_image=mask_image,
                     mask_crop=mask_crop,
-                    accepted_rgb_crop=accepted_rgb_crop,
                     composition_crop=composition_crop,
                     hole_crop=hole_crop,
                     modal_crop=modal_crop,
@@ -389,7 +322,6 @@ def reconstruct_objects(
                 reconstructed,
                 source_crop=item.source_crop,
                 hard_mask=item.mask_crop,
-                accepted_model_rgb_mask=item.accepted_rgb_crop,
                 completion_hole=item.composition_crop,
                 modal_mask=item.modal_crop,
                 roi=item.roi,
@@ -404,11 +336,7 @@ def reconstruct_objects(
             color_metrics = reconstruction_color_metrics(
                 validated,
                 source_crop=item.source_crop,
-                composition_mask=(
-                    item.accepted_rgb_crop
-                    if item.accepted_rgb_crop is not None
-                    else item.composition_crop
-                ),
+                composition_mask=item.composition_crop,
                 modal_mask=item.modal_crop,
                 occluder_mask=occluder_crop,
             )
@@ -423,11 +351,7 @@ def reconstruct_objects(
                 refine_reconstruction_colors(
                     validated,
                     source_crop=item.source_crop,
-                    composition_mask=(
-                        item.accepted_rgb_crop
-                        if item.accepted_rgb_crop is not None
-                        else item.composition_crop
-                    ),
+                    composition_mask=item.composition_crop,
                     modal_mask=item.modal_crop,
                     strength=color_refinement_strength,
                 )
@@ -444,10 +368,6 @@ def reconstruct_objects(
 
         detected.reconstruction_canvas = refined
         detected.reconstruction_roi = item.roi
-        if detected.reconstruction_accepted_rgb_mask is not None:
-            detected.reconstruction_write_mask = (
-                detected.reconstruction_accepted_rgb_mask.astype(bool).copy()
-            )
         if diagnostics_directory is not None:
             directory = _artifact_directory(
                 diagnostics_directory, detected.object_id
