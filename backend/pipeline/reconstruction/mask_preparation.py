@@ -21,10 +21,33 @@ logger = get_logger(__name__)
 
 
 def _mask_inside_roi(shape: tuple[int, int], roi: SquareROI) -> np.ndarray:
-    """Return the source-image pixels covered by a possibly padded ROI."""
+    """Tạo ra một 'Mặt nạ Cửa sổ' (Window Mask) dạng boolean có kích thước bằng ảnh gốc.
+
+    Trong ma trận trả về:
+    - Tất cả các pixel nằm BÊN TRONG khung hình vuông ROI (`top:bottom, left:right`) có giá trị True (1).
+    - Tất cả các pixel nằm BÊN NGOÀI khung hình vuông ROI có giá trị False (0).
+
+    Dùng để giới hạn phạm vi mask của Occluder hoặc mask sinh ảnh không vượt ra ngoài biên của ô vuông crop ROI.
+    """
+    # Khởi tạo ma trận toàn bộ pixel = False (0) với kích thước bằng ảnh gốc
     result = np.zeros(shape, dtype=bool)
+    # Lấy tọa độ khung viền (left, top, right, bottom) của ô vuông ROI
     left, top, right, bottom = roi.clipped_box
+    # Gán True (1) cho vùng pixel nằm bên trong khung ROI
     result[top:bottom, left:right] = True
+    return result
+
+
+def _bbox_mask(mask: np.ndarray) -> np.ndarray:
+    """Return a full-image window covering the tight bounds of ``mask``."""
+    ys, xs = np.nonzero(mask)
+    if xs.size == 0:
+        raise ValueError("target support mask must be non-empty")
+    result = np.zeros_like(mask, dtype=bool)
+    result[
+        int(ys.min()) : int(ys.max()) + 1,
+        int(xs.min()) : int(xs.max()) + 1,
+    ] = True
     return result
 
 
@@ -34,13 +57,30 @@ def _directional_reconstruction_mask(
     *,
     composition_margin_pixels: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build a directional write-back mask anchored to real overlap evidence."""
+    """Tạo mask tái tạo có định hướng cho trường hợp đối tượng `target` bị che bởi `occluder`.
+
+    Args:
+        target: Đối tượng đóng vai trò bị che khuất (cần vẽ bù).
+        occluder: Đối tượng đóng vai trò che khuất (nằm đè lên trên).
+        composition_margin_pixels: Bán kính pixel mở rộng biên lề an toàn để bao trùm sai số ranh giới.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Bộ đôi gồm:
+            - exact_seed: Mask hạt giống giao nhau chính xác 100% giữa lỗ khuyết của target và mask hiển thị của occluder.
+            - filtered: Mask khôi phục hoàn chỉnh sau khi mở rộng biên lề, lọc thành phần liên thông và cắt xén hợp lệ.
+    """
+    # Lấy vùng lỗ khuyết (vùng bị che khuất) của đối tượng target
     hole = target.completion_hole_mask.astype(bool)
+    # Lấy vùng phần nhìn thấy được (modal mask) của đối tượng occluder
     occluder_modal = occluder.modal_mask > 0
+
+    # 1. Tìm vùng hạt giống giao nhau chính xác 100% (exact_seed)
     exact_seed = hole & occluder_modal
+    # Nếu không có pixel nào giao nhau -> target không thực sự bị occluder này che khuất
     if not np.any(exact_seed):
         return exact_seed, np.zeros_like(hole)
 
+    # 2. Nở rộng biên occluder thêm composition_margin_pixels để bao trùm sai số ranh giới & bóng mờ
     if composition_margin_pixels:
         radius = composition_margin_pixels
         occluder_support = expand_mask(
@@ -49,17 +89,25 @@ def _directional_reconstruction_mask(
         ).astype(bool)
     else:
         occluder_support = occluder_modal
+
+    # Vùng ứng viên mở rộng
     candidate = hole & occluder_support
 
+    # 3. Phân chia candidate thành các khối/đảo pixel liên thông (connectivity=8) bằng OpenCV
     _, labels = cv2.connectedComponents(
         candidate.astype(np.uint8), connectivity=8
     )
     filtered = np.zeros_like(candidate)
+
+    # Chỉ giữ lại những khối pixel nào NẰM TRÊN hoặc CHỨA hạt giống xác thực (exact_seed)
     for label in np.unique(labels[exact_seed]):
         if label != 0:
             filtered |= labels == label
+
+    # 4. Kiểm tra an toàn: Mask tái tạo phải nằm trong amodal_mask và nằm ngoài modal_mask của target
     filtered &= target.amodal_mask > 0
     filtered &= ~(target.modal_mask > 0)
+
     return exact_seed, filtered
 
 
@@ -136,6 +184,11 @@ def build_reconstruction_masks(
         detected.reconstruction_generation_mask = None
         detected.reconstruction_occluder_mask = None
         detected.reconstruction_input_roi = None
+        detected.reconstruction_target_bbox_mask = None
+        detected.reconstruction_foreign_modal_inside_bbox = None
+        detected.reconstruction_foreign_modal_outside_bbox = None
+        detected.reconstruction_protected_mask = None
+        detected.reconstruction_accepted_rgb_mask = None
 
         if (
             not detected.occluder_ids
@@ -216,12 +269,32 @@ def build_reconstruction_masks(
         generation_mask &= ~(detected.modal_mask > 0)
         generation_mask |= composition_mask
 
+        target_modal = detected.modal_mask > 0
+        target_bbox_mask = _bbox_mask(detected.amodal_mask > 0)
+        foreign_modal = np.zeros_like(target_modal)
+        for other in objects:
+            if other.object_id != detected.object_id:
+                foreign_modal |= other.modal_mask > 0
+        foreign_inside_bbox = foreign_modal & target_bbox_mask & roi_mask
+        foreign_outside_bbox = foreign_modal & ~target_bbox_mask & roi_mask
+        protected_mask = target_modal | foreign_outside_bbox
+        accepted_rgb_mask = roi_mask & ~protected_mask
+
         detected.reconstruction_seed_mask = exact_seed
         detected.reconstruction_mask = composition_mask
         detected.reconstruction_generation_seed_mask = generation_seed
         detected.reconstruction_generation_mask = generation_mask
         detected.reconstruction_occluder_mask = relevant_occluder
         detected.reconstruction_input_roi = roi
+        detected.reconstruction_target_bbox_mask = target_bbox_mask
+        detected.reconstruction_foreign_modal_inside_bbox = (
+            foreign_inside_bbox
+        )
+        detected.reconstruction_foreign_modal_outside_bbox = (
+            foreign_outside_bbox
+        )
+        detected.reconstruction_protected_mask = protected_mask
+        detected.reconstruction_accepted_rgb_mask = accepted_rgb_mask
         log_event(
             logger,
             "reconstruction_mask",
@@ -238,6 +311,13 @@ def build_reconstruction_masks(
             ),
             composition_pixels=int(np.count_nonzero(composition_mask)),
             generation_pixels=int(np.count_nonzero(generation_mask)),
+            accepted_rgb_pixels=int(np.count_nonzero(accepted_rgb_mask)),
+            foreign_modal_inside_bbox_pixels=int(
+                np.count_nonzero(foreign_inside_bbox)
+            ),
+            foreign_modal_outside_bbox_pixels=int(
+                np.count_nonzero(foreign_outside_bbox)
+            ),
             roi=(roi.x, roi.y, roi.size),
         )
 

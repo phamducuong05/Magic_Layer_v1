@@ -798,6 +798,56 @@ def test_generation_mask_contains_full_occluder_inside_target_centric_roi():
     )
 
 
+def test_modal_classification_expands_only_post_inference_rgb_acceptance():
+    target = _detected_object("target", "person", (4, 6, 8, 2))
+    assigned = _detected_object("assigned", "book", (6, 6, 1, 2))
+    crossing = _detected_object("crossing", "camera", (8, 6, 5, 2))
+
+    target.modal_mask.fill(0)
+    target.modal_mask[6:8, 4:6] = 255
+    target.modal_mask[6:8, 10:12] = 255
+    target.amodal_mask = target.modal_mask > 0
+    target.amodal_mask[6:8, 6] = True
+    target.completion_hole_mask = np.zeros_like(
+        target.modal_mask, dtype=bool
+    )
+    target.completion_hole_mask[6:8, 6] = True
+    target.occluder_ids = {"assigned"}
+
+    assigned.modal_mask.fill(0)
+    assigned.modal_mask[6:8, 6] = 255
+    crossing.modal_mask.fill(0)
+    crossing.modal_mask[6:8, 8] = 255  # Inside target amodal bbox.
+    crossing.modal_mask[6:8, 12] = 255  # Outside bbox, inside ROI.
+
+    reconstruction_stage.build_reconstruction_masks(
+        [target, assigned, crossing],
+        (3, 3),
+        generation_mask_dilation_pixels=0,
+        generation_mask_closing_pixels=0,
+        composition_margin_pixels=0,
+        context_ratio=0.25,
+    )
+
+    # The existing generation-mask contract remains directional and does not
+    # absorb an unrelated modal merely because it lies in the target bbox.
+    assert np.all(target.reconstruction_generation_mask[6:8, 6])
+    assert not np.any(target.reconstruction_generation_mask[6:8, 8])
+    assert not np.any(target.reconstruction_generation_mask[6:8, 12])
+
+    assert np.all(
+        target.reconstruction_foreign_modal_inside_bbox[6:8, 8]
+    )
+    assert np.all(
+        target.reconstruction_foreign_modal_outside_bbox[6:8, 12]
+    )
+    assert np.all(target.reconstruction_accepted_rgb_mask[6:8, 8])
+    assert not np.any(target.reconstruction_accepted_rgb_mask[6:8, 12])
+    assert not np.any(
+        target.reconstruction_accepted_rgb_mask[target.modal_mask > 0]
+    )
+
+
 def test_prepare_raw_reconstruction_masks_aggregates_pairwise_occluders_once():
     hidden = _detected_object("hidden", "person", (4, 4, 4, 4))
     chair = _detected_object("chair", "chair", (5, 5, 4, 4))
@@ -964,9 +1014,9 @@ def test_object_reconstruction_context_ratio_is_configured():
     reconstruction_config = config.get_pipeline_config(
         "object_reconstruction"
     )
-    assert reconstruction_config["context_ratio"] == 0.15
+    assert reconstruction_config["context_ratio"] == 0.025
     assert reconstruction_config["blend_allowance_ratio"] == 0.012
-    assert reconstruction_config["generation_mask_dilation_pixels"] == 18
+    assert reconstruction_config["generation_mask_dilation_pixels"] == 12
     assert reconstruction_config["generation_mask_closing_pixels"] == 7
     assert reconstruction_config["support_margin_pixels"] == 8
     assert config.get_model_config("object_reconstruction")[

@@ -28,7 +28,9 @@ def _object(
     )
 
 
-def test_reconstruction_rgb_alpha_excludes_every_other_modal_from_extension():
+def test_reconstruction_rgb_alpha_uses_full_accepted_region_not_generation(
+    tmp_path,
+):
     from backend.pipeline import matting
 
     shape = (8, 8)
@@ -40,7 +42,11 @@ def test_reconstruction_rgb_alpha_excludes_every_other_modal_from_extension():
     target.reconstruction_mask = np.zeros(shape, dtype=bool)
     target.reconstruction_mask[3:5, 3] = True
     target.reconstruction_generation_mask = np.zeros(shape, dtype=bool)
-    target.reconstruction_generation_mask[3:5, 3:7] = True
+    target.reconstruction_generation_mask[3:5, 3:5] = True
+    target.reconstruction_accepted_rgb_mask = np.zeros(shape, dtype=bool)
+    target.reconstruction_accepted_rgb_mask[3:5, 3:6] = True
+    target.reconstruction_protected_mask = np.zeros(shape, dtype=bool)
+    target.reconstruction_protected_mask[3:5, 6] = True
     target.reconstruction_roi = SquareROI(0, 0, 8, 8, 8)
     target.occluder_ids = {"camera"}
 
@@ -69,21 +75,29 @@ def test_reconstruction_rgb_alpha_excludes_every_other_modal_from_extension():
         alpha_high_threshold=0.7,
         change_threshold=8.0,
         connection_margin_pixels=4,
-        max_extension_area_ratio=2.0,
+        max_extension_area_ratio=0.0,
+        diagnostics_directory=tmp_path,
     )
 
     assert target.reconstruction_extension_mask is not None
     # The original reconstruction core remains writable below the occluder.
     assert np.all(target.reconstruction_write_mask[3:5, 3])
-    # Evidence-derived support must not absorb the assigned occluder itself.
-    assert not np.any(target.reconstruction_extension_mask[3:5, 4])
-    # Validated RGB evidence outside every other modal mask may still extend.
+    # Accepted foreground can extend beyond the old generation/amodal masks.
+    assert np.all(target.reconstruction_extension_mask[3:5, 4])
     assert np.all(target.reconstruction_extension_mask[3:5, 5])
+    # Protected modal pixels outside the target bbox remain excluded.
     assert not np.any(target.reconstruction_extension_mask[3:5, 6])
-    assert not np.any(target.reconstruction_write_mask[3:5, 4])
+    assert np.all(target.reconstruction_write_mask[3:5, 4])
     assert np.all(target.reconstruction_write_mask[3:5, 5])
+    assert not np.any(target.reconstruction_write_mask[3:5, 6])
     assert np.all(target.reconstruction_support_mask[3:5, 5])
     assert np.all(target.reconstruction_support_mask[target_modal])
+    assert {
+        "birefnet_candidate.png",
+        "reconstruction_extension_mask.png",
+        "reconstruction_write_mask.png",
+        "final_reconstruction_support.png",
+    } <= {path.name for path in (tmp_path / "person").iterdir()}
 
 
 def test_reconstruction_support_rejects_disconnected_alpha_component():
@@ -97,7 +111,9 @@ def test_reconstruction_support_rejects_disconnected_alpha_component():
     target.reconstruction_mask = np.zeros(shape, dtype=bool)
     target.reconstruction_mask[2:4, 3] = True
     target.reconstruction_generation_mask = np.zeros(shape, dtype=bool)
-    target.reconstruction_generation_mask[2:7, 3:7] = True
+    target.reconstruction_generation_mask[2:4, 3:5] = True
+    target.reconstruction_accepted_rgb_mask = np.zeros(shape, dtype=bool)
+    target.reconstruction_accepted_rgb_mask[2:7, 3:7] = True
     target.reconstruction_roi = SquareROI(0, 0, 8, 8, 8)
 
     source = np.full((*shape, 3), 255, dtype=np.uint8)
@@ -123,3 +139,5 @@ def test_reconstruction_support_rejects_disconnected_alpha_component():
 
     assert target.reconstruction_extension_mask[2, 4]
     assert not target.reconstruction_extension_mask[6, 6]
+    assert target.reconstruction_write_mask[6, 6]
+    assert not target.reconstruction_support_mask[6, 6]

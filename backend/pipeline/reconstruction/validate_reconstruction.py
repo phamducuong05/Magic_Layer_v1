@@ -210,6 +210,7 @@ def validate_reconstruction_result(
     modal_mask: np.ndarray,
     roi: SquareROI,
     blend_allowance_ratio: float,
+    accepted_model_rgb_mask: np.ndarray | None = None,
 ) -> Image.Image:
     """Return one safe RGB crop or raise a stage-specific validation error."""
     if not isinstance(result, Image.Image):
@@ -244,10 +245,24 @@ def validate_reconstruction_result(
 
     source_array = np.asarray(source_crop.convert("RGB"), dtype=np.uint8)
     real_pixels = _real_image_pixels(roi)
-    permitted = _permitted_reconstruction_region(
-        hard_mask,
-        blend_allowance_ratio=blend_allowance_ratio,
-    )
+    if accepted_model_rgb_mask is None:
+        permitted = _permitted_reconstruction_region(
+            hard_mask,
+            blend_allowance_ratio=blend_allowance_ratio,
+        )
+    else:
+        if accepted_model_rgb_mask.shape != hard_mask.shape:
+            raise ReconstructionValidationError(
+                "accepted_rgb_mask",
+                "accepted model RGB mask must match the reconstruction crop",
+            )
+        # Keep validating the configured allowance even though the explicit
+        # post-inference mask is authoritative for output composition.
+        _permitted_reconstruction_region(
+            hard_mask,
+            blend_allowance_ratio=blend_allowance_ratio,
+        )
+        permitted = accepted_model_rgb_mask.astype(bool) & real_pixels
 
     # HD-Painter resizes the complete crop during super resolution and applies
     # Poisson blending around the inpaint mask. Both operations can alter RGB
@@ -258,7 +273,7 @@ def validate_reconstruction_result(
     result_array[~permitted] = source_array[~permitted]
     rgb_result = Image.fromarray(result_array, mode="RGB")
 
-    usable_hole = completion_hole.astype(bool) & real_pixels
+    usable_hole = completion_hole.astype(bool) & permitted & real_pixels
     if not np.any(usable_hole):
         raise ReconstructionValidationError(
             "completion_hole", "completion-hole crop is empty"
