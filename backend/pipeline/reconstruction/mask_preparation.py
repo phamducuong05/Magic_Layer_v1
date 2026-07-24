@@ -51,6 +51,65 @@ def _bbox_mask(mask: np.ndarray) -> np.ndarray:
     return result
 
 
+def _fill_small_mask_holes(
+    mask: np.ndarray,
+    *,
+    max_hole_area_pixels: int,
+) -> np.ndarray:
+    """Fill enclosed background components up to a configured pixel area."""
+    result = mask.astype(bool).copy()
+    if max_hole_area_pixels <= 0 or not np.any(result):
+        return result
+
+    background = (~result).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        background,
+        connectivity=8,
+    )
+    height, width = result.shape
+    for label in range(1, component_count):
+        left = int(stats[label, cv2.CC_STAT_LEFT])
+        top = int(stats[label, cv2.CC_STAT_TOP])
+        component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        touches_border = (
+            left == 0
+            or top == 0
+            or left + component_width >= width
+            or top + component_height >= height
+        )
+        if not touches_border and area <= max_hole_area_pixels:
+            result[labels == label] = True
+    return result
+
+
+def _close_and_dilate_mask(
+    mask: np.ndarray,
+    *,
+    closing_pixels: int,
+    dilation_pixels: int,
+) -> np.ndarray:
+    """Apply the reconstruction morphology policy to one boolean mask."""
+    result = mask.astype(bool).copy()
+    if closing_pixels:
+        closing_kernel = np.ones(
+            (2 * closing_pixels + 1, 2 * closing_pixels + 1),
+            dtype=np.uint8,
+        )
+        result = cv2.morphologyEx(
+            result.astype(np.uint8),
+            cv2.MORPH_CLOSE,
+            closing_kernel,
+        ).astype(bool)
+    if dilation_pixels:
+        result = expand_mask(
+            result,
+            (2 * dilation_pixels + 1, 2 * dilation_pixels + 1),
+        ).astype(bool)
+    return result
+
+
 def _directional_reconstruction_mask(
     target: DetectedObject,
     occluder: DetectedObject,
@@ -158,6 +217,9 @@ def build_reconstruction_masks(
     *,
     generation_mask_dilation_pixels: int = 0,
     generation_mask_closing_pixels: int = 0,
+    foreign_modal_max_hole_area_pixels: int = 0,
+    foreign_modal_dilation_pixels: int = 0,
+    foreign_modal_closing_pixels: int = 0,
     support_margin_pixels: int | None = None,
     composition_margin_pixels: int | None = None,
     context_ratio: float = 0.0,
@@ -166,6 +228,9 @@ def build_reconstruction_masks(
     for value in (
         generation_mask_dilation_pixels,
         generation_mask_closing_pixels,
+        foreign_modal_max_hole_area_pixels,
+        foreign_modal_dilation_pixels,
+        foreign_modal_closing_pixels,
     ):
         if value < 0:
             raise ValueError("reconstruction morphology settings must be non-negative")
@@ -250,21 +315,11 @@ def build_reconstruction_masks(
             occluder_union & roi_mask & ~(detected.modal_mask > 0)
         )
         generation_seed = composition_mask | relevant_occluder
-        generation_mask = generation_seed.copy()
-        if generation_mask_closing_pixels:
-            radius = generation_mask_closing_pixels
-            closing_kernel = np.ones((2 * radius + 1,) * 2, np.uint8)
-            generation_mask = cv2.morphologyEx(
-                generation_mask.astype(np.uint8),
-                cv2.MORPH_CLOSE,
-                closing_kernel,
-            ).astype(bool)
-        if generation_mask_dilation_pixels:
-            radius = generation_mask_dilation_pixels
-            generation_mask = expand_mask(
-                generation_mask,
-                (2 * radius + 1, 2 * radius + 1),
-            ).astype(bool)
+        generation_mask = _close_and_dilate_mask(
+            generation_seed,
+            closing_pixels=generation_mask_closing_pixels,
+            dilation_pixels=generation_mask_dilation_pixels,
+        )
         generation_mask &= roi_mask
         generation_mask &= ~(detected.modal_mask > 0)
         generation_mask |= composition_mask
@@ -274,9 +329,21 @@ def build_reconstruction_masks(
         foreign_modal = np.zeros_like(target_modal)
         for other in objects:
             if other.object_id != detected.object_id:
-                foreign_modal |= other.modal_mask > 0
+                foreign_modal |= _fill_small_mask_holes(
+                    other.modal_mask > 0,
+                    max_hole_area_pixels=(
+                        foreign_modal_max_hole_area_pixels
+                    ),
+                )
         foreign_inside_bbox = foreign_modal & target_bbox_mask & roi_mask
         foreign_outside_bbox = foreign_modal & ~target_bbox_mask & roi_mask
+        foreign_outside_bbox = _close_and_dilate_mask(
+            foreign_outside_bbox,
+            closing_pixels=foreign_modal_closing_pixels,
+            dilation_pixels=foreign_modal_dilation_pixels,
+        )
+        foreign_outside_bbox &= ~target_bbox_mask
+        foreign_outside_bbox &= roi_mask
         protected_mask = target_modal | foreign_outside_bbox
         accepted_rgb_mask = roi_mask & ~protected_mask
 
@@ -332,6 +399,9 @@ def prepare_raw_reconstruction_masks(
     tie_tolerance_ratio: float,
     generation_mask_dilation_pixels: int = 0,
     generation_mask_closing_pixels: int = 0,
+    foreign_modal_max_hole_area_pixels: int = 0,
+    foreign_modal_dilation_pixels: int = 0,
+    foreign_modal_closing_pixels: int = 0,
     support_margin_pixels: int | None = None,
     composition_margin_pixels: int | None = None,
     context_ratio: float = 0.0,
@@ -415,6 +485,11 @@ def prepare_raw_reconstruction_masks(
         kernel_size,
         generation_mask_dilation_pixels=generation_mask_dilation_pixels,
         generation_mask_closing_pixels=generation_mask_closing_pixels,
+        foreign_modal_max_hole_area_pixels=(
+            foreign_modal_max_hole_area_pixels
+        ),
+        foreign_modal_dilation_pixels=foreign_modal_dilation_pixels,
+        foreign_modal_closing_pixels=foreign_modal_closing_pixels,
         support_margin_pixels=support_margin_pixels,
         composition_margin_pixels=composition_margin_pixels,
         context_ratio=context_ratio,

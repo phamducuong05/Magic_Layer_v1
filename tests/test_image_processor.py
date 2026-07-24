@@ -848,6 +848,77 @@ def test_modal_classification_expands_only_post_inference_rgb_acceptance():
     )
 
 
+def test_foreign_modal_fills_small_holes_before_bbox_classification():
+    target = _detected_object("target", "person", (4, 6, 8, 2))
+    assigned = _detected_object("assigned", "book", (6, 6, 1, 2))
+    crossing = _detected_object("crossing", "camera", (12, 5, 5, 5))
+
+    target.modal_mask.fill(0)
+    target.modal_mask[6:8, 4:6] = 255
+    target.modal_mask[6:8, 10:12] = 255
+    target.amodal_mask = target.modal_mask > 0
+    target.completion_hole_mask = np.zeros_like(
+        target.modal_mask, dtype=bool
+    )
+    target.completion_hole_mask[6:8, 6] = True
+    target.amodal_mask |= target.completion_hole_mask
+    target.occluder_ids = {"assigned"}
+
+    assigned.modal_mask.fill(0)
+    assigned.modal_mask[6:8, 6] = 255
+    crossing.modal_mask.fill(0)
+    crossing.modal_mask[5:10, 12:17] = 255
+    crossing.modal_mask[7, 14] = 0
+
+    reconstruction_stage.build_reconstruction_masks(
+        [target, assigned, crossing],
+        (3, 3),
+        composition_margin_pixels=0,
+        context_ratio=0.5,
+        foreign_modal_max_hole_area_pixels=1,
+    )
+
+    assert target.reconstruction_foreign_modal_outside_bbox[7, 14]
+    assert not target.reconstruction_accepted_rgb_mask[7, 14]
+
+
+def test_foreign_modal_outside_bbox_applies_closing_and_dilation():
+    target = _detected_object("target", "person", (4, 6, 8, 2))
+    assigned = _detected_object("assigned", "book", (6, 6, 1, 2))
+    crossing = _detected_object("crossing", "camera", (13, 5, 2, 5))
+
+    target.modal_mask.fill(0)
+    target.modal_mask[6:8, 4:6] = 255
+    target.modal_mask[6:8, 10:12] = 255
+    target.amodal_mask = target.modal_mask > 0
+    target.completion_hole_mask = np.zeros_like(
+        target.modal_mask, dtype=bool
+    )
+    target.completion_hole_mask[6:8, 6] = True
+    target.amodal_mask |= target.completion_hole_mask
+    target.occluder_ids = {"assigned"}
+
+    assigned.modal_mask.fill(0)
+    assigned.modal_mask[6:8, 6] = 255
+    crossing.modal_mask.fill(0)
+    crossing.modal_mask[5:7, 13:15] = 255
+    crossing.modal_mask[8:10, 13:15] = 255
+
+    reconstruction_stage.build_reconstruction_masks(
+        [target, assigned, crossing],
+        (3, 3),
+        composition_margin_pixels=0,
+        context_ratio=0.5,
+        foreign_modal_closing_pixels=1,
+        foreign_modal_dilation_pixels=1,
+    )
+
+    outside = target.reconstruction_foreign_modal_outside_bbox
+    assert outside[7, 13]  # Closing fills the one-pixel vertical gap.
+    assert outside[7, 12]  # Dilation expands protection by one pixel.
+    assert not np.any(outside[target.reconstruction_target_bbox_mask])
+
+
 def test_prepare_raw_reconstruction_masks_aggregates_pairwise_occluders_once():
     hidden = _detected_object("hidden", "person", (4, 4, 4, 4))
     chair = _detected_object("chair", "chair", (5, 5, 4, 4))
@@ -1018,6 +1089,9 @@ def test_object_reconstruction_context_ratio_is_configured():
     assert reconstruction_config["blend_allowance_ratio"] == 0.012
     assert reconstruction_config["generation_mask_dilation_pixels"] == 12
     assert reconstruction_config["generation_mask_closing_pixels"] == 7
+    assert reconstruction_config["foreign_modal_max_hole_area_pixels"] == 128
+    assert reconstruction_config["foreign_modal_dilation_pixels"] == 12
+    assert reconstruction_config["foreign_modal_closing_pixels"] == 7
     assert reconstruction_config["support_margin_pixels"] == 8
     assert "color_refinement_enabled" not in reconstruction_config
     assert "color_refinement_strength" not in reconstruction_config

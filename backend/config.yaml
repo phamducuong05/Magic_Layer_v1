@@ -15,6 +15,11 @@ pipeline:
     context_ratio: 0.025
     generation_mask_dilation_pixels: 12
     generation_mask_closing_pixels: 7
+    # Fill small enclosed holes on each foreign object before their modal masks
+    # are merged, then close/dilate only the outside-bbox protection mask.
+    foreign_modal_max_hole_area_pixels: 128
+    foreign_modal_dilation_pixels: 12
+    foreign_modal_closing_pixels: 7
     support_margin_pixels: 8
     # Completion-hole components must remain connected to an occluder within
     # this small geometric margin before they can enter reconstruction_mask.

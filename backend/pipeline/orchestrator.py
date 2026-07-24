@@ -348,6 +348,21 @@ def process_image(
                         "generation_mask_closing_pixels", 0
                     )
                 ),
+                foreign_modal_max_hole_area_pixels=int(
+                    reconstruction_config.get(
+                        "foreign_modal_max_hole_area_pixels", 0
+                    )
+                ),
+                foreign_modal_dilation_pixels=int(
+                    reconstruction_config.get(
+                        "foreign_modal_dilation_pixels", 0
+                    )
+                ),
+                foreign_modal_closing_pixels=int(
+                    reconstruction_config.get(
+                        "foreign_modal_closing_pixels", 0
+                    )
+                ),
                 support_margin_pixels=int(
                     reconstruction_config.get(
                         "support_margin_pixels", max(kernel_size) // 2
