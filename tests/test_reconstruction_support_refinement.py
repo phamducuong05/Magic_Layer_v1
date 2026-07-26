@@ -92,12 +92,13 @@ def test_reconstruction_rgb_alpha_uses_full_accepted_region_not_generation(
     assert not np.any(target.reconstruction_write_mask[3:5, 6])
     assert np.all(target.reconstruction_support_mask[3:5, 5])
     assert np.all(target.reconstruction_support_mask[target_modal])
-    assert {
-        "birefnet_candidate.png",
-        "reconstruction_extension_mask.png",
-        "reconstruction_write_mask.png",
-        "final_reconstruction_support.png",
-    } <= {path.name for path in (tmp_path / "person").iterdir()}
+    assert sorted(path.name for path in (tmp_path / "person").iterdir()) == [
+        "25_reconstruction_write_mask.png",
+        "26_reconstruction_birefnet_alpha.png",
+        "27_birefnet_candidate.png",
+        "28_reconstruction_extension_mask.png",
+        "29_final_reconstruction_support.png",
+    ]
 
 
 def test_reconstruction_support_rejects_disconnected_alpha_component():

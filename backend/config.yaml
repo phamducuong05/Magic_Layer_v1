@@ -17,10 +17,19 @@ pipeline:
     generation_mask_closing_pixels: 7
     # Fill small enclosed holes on each foreign object before their modal masks
     # are merged, then close/dilate only the outside-bbox protection mask.
-    foreign_modal_max_hole_area_pixels: 128
-    foreign_modal_dilation_pixels: 12
-    foreign_modal_closing_pixels: 7
+    foreign_modal_max_hole_area_pixels: 64
+    foreign_modal_dilation_pixels: 2
+    foreign_modal_closing_pixels: 1
     support_margin_pixels: 8
+    # BiRefNet reconstruction-support refinement. Low alpha builds candidate
+    # pixels; each accepted component must also contain strong alpha, changed
+    # model RGB, and connect to the visible target within the configured margin.
+    support_alpha_low_threshold: 0.2
+    support_alpha_high_threshold: 0.7
+    support_change_threshold: 8.0
+    support_connection_margin_pixels: 4
+    # Currently validated and passed through; the area cap is not yet applied.
+    support_max_extension_area_ratio: 2.0
     # Completion-hole components must remain connected to an occluder within
     # this small geometric margin before they can enter reconstruction_mask.
     composition_margin_pixels: 4
@@ -33,7 +42,7 @@ pipeline:
     # Set to a directory path to save per-object source/mask/output PNGs.
     diagnostics_directory: outputs/reconstruction_debug
   matting:
-    context_ratio: 0.25
+    context_ratio: 0.025
     support_dilation_pixels: 2
   diagnostics:
     enabled: true

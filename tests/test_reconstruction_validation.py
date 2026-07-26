@@ -425,40 +425,42 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
     )
 
     object_directory = tmp_path / "person"
-    assert {
-        "source.png",
-        "occluder_mask.png",
-        "composition_mask.png",
-        "generation_mask.png",
-        "completion_hole.png",
-        "model_output.png",
-        "validated_output.png",
-        "directional_seed.png",
-        "filtered_reconstruction_mask.png",
-        "full_occluder_in_roi.png",
-        "generation_before_dilation.png",
-        "generation_after_dilation.png",
-        "accepted_model_rgb_mask.png",
-        "protected_source_pixels.png",
-        "roi_real_pixels.png",
-        "initial_modal_mask.png",
-        "completed_amodal_mask.png",
-        "amodal_bbox_mask.png",
-        "target_bbox_mask.png",
-        "target_modal_protected.png",
-        "foreign_modal_inside_bbox.png",
-        "foreign_modal_outside_bbox.png",
-        "base_output_512.png",
-        "sr_output.png",
-    } <= {path.name for path in object_directory.iterdir()}
+    expected_names = [
+        "01_initial_modal_mask.png",
+        "02_completed_amodal_mask.png",
+        "03_completion_hole.png",
+        "04_amodal_bbox_mask.png",
+        "05_target_bbox_mask.png",
+        "06_directional_seed.png",
+        "07_filtered_reconstruction_mask.png",
+        "08_composition_mask.png",
+        "09_source.png",
+        "10_roi_real_pixels.png",
+        "11_target_modal_protected.png",
+        "12_occluder_mask.png",
+        "13_full_occluder_in_roi.png",
+        "14_generation_before_dilation.png",
+        "15_generation_after_dilation.png",
+        "16_generation_mask.png",
+        "17_foreign_modal_inside_bbox.png",
+        "18_foreign_modal_outside_bbox.png",
+        "19_protected_source_pixels.png",
+        "20_accepted_model_rgb_mask.png",
+        "21_base_output_512.png",
+        "22_sr_output.png",
+        "23_model_output.png",
+        "24_validated_output.png",
+    ]
+    actual_names = sorted(path.name for path in object_directory.iterdir())
+    assert expected_names == actual_names
     initial_modal = np.asarray(
-        Image.open(object_directory / "initial_modal_mask.png")
+        Image.open(object_directory / "01_initial_modal_mask.png")
     ) > 0
     completed_amodal = np.asarray(
-        Image.open(object_directory / "completed_amodal_mask.png")
+        Image.open(object_directory / "02_completed_amodal_mask.png")
     ) > 0
     amodal_bbox = np.asarray(
-        Image.open(object_directory / "amodal_bbox_mask.png")
+        Image.open(object_directory / "04_amodal_bbox_mask.png")
     ) > 0
     assert np.all(completed_amodal[initial_modal])
     assert np.any(completed_amodal & ~initial_modal)

@@ -1089,10 +1089,15 @@ def test_object_reconstruction_context_ratio_is_configured():
     assert reconstruction_config["blend_allowance_ratio"] == 0.012
     assert reconstruction_config["generation_mask_dilation_pixels"] == 12
     assert reconstruction_config["generation_mask_closing_pixels"] == 7
-    assert reconstruction_config["foreign_modal_max_hole_area_pixels"] == 128
-    assert reconstruction_config["foreign_modal_dilation_pixels"] == 12
-    assert reconstruction_config["foreign_modal_closing_pixels"] == 7
+    assert reconstruction_config["foreign_modal_max_hole_area_pixels"] == 64
+    assert reconstruction_config["foreign_modal_dilation_pixels"] == 2
+    assert reconstruction_config["foreign_modal_closing_pixels"] == 1
     assert reconstruction_config["support_margin_pixels"] == 8
+    assert reconstruction_config["support_alpha_low_threshold"] == 0.2
+    assert reconstruction_config["support_alpha_high_threshold"] == 0.7
+    assert reconstruction_config["support_change_threshold"] == 8.0
+    assert reconstruction_config["support_connection_margin_pixels"] == 4
+    assert reconstruction_config["support_max_extension_area_ratio"] == 2.0
     assert "color_refinement_enabled" not in reconstruction_config
     assert "color_refinement_strength" not in reconstruction_config
     assert config.get_model_config("object_reconstruction")[

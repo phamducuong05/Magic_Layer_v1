@@ -20,6 +20,7 @@ from .roi import (
     square_roi_from_support,
 )
 from .types import DetectedObject, GroupedObject
+from .reconstruction.artifacts import artifact_path
 
 THRESHOLD_ALPHA = 0.005
 logger = get_logger(__name__)
@@ -209,21 +210,21 @@ def refine_reconstruction_supports(
             )
             Image.fromarray(
                 np.rint(alpha_crop * 255).astype(np.uint8), mode="L"
-            ).save(directory / "reconstruction_birefnet_alpha.png")
+            ).save(artifact_path(directory, "reconstruction_birefnet_alpha"))
             _save_mask(
-                directory / "reconstruction_extension_mask.png",
+                artifact_path(directory, "reconstruction_extension_mask"),
                 extension_crop,
             )
             _save_mask(
-                directory / "birefnet_candidate.png",
+                artifact_path(directory, "birefnet_candidate"),
                 candidate,
             )
             _save_mask(
-                directory / "reconstruction_write_mask.png",
+                artifact_path(directory, "reconstruction_write_mask"),
                 crop_array(target.reconstruction_write_mask, roi),
             )
             _save_mask(
-                directory / "final_reconstruction_support.png",
+                artifact_path(directory, "final_reconstruction_support"),
                 crop_array(target.reconstruction_support_mask, roi),
             )
 

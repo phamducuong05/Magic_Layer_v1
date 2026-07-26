@@ -16,6 +16,7 @@ from .validate_reconstruction import (
     reconstruction_color_metrics,
     validate_reconstruction_result,
 )
+from .artifacts import artifact_path
 
 
 logger = get_logger(__name__)
@@ -193,9 +194,15 @@ def reconstruct_objects(
                 directory = _artifact_directory(
                     diagnostics_directory, detected.object_id
                 )
-                source_crop.save(directory / "source.png")
-                _save_mask(directory / "composition_mask.png", composition_crop)
-                _save_mask(directory / "generation_mask.png", mask_crop)
+                source_crop.save(artifact_path(directory, "source"))
+                _save_mask(
+                    artifact_path(directory, "composition_mask"),
+                    composition_crop,
+                )
+                _save_mask(
+                    artifact_path(directory, "generation_mask"),
+                    mask_crop,
+                )
                 real_pixels = np.zeros_like(mask_crop)
                 inner_left, inner_top, inner_right, inner_bottom = (
                     roi.inner_box
@@ -231,15 +238,15 @@ def reconstruct_objects(
                             int(bbox_x.min()) : int(bbox_x.max()) + 1,
                         ] = True
                 _save_mask(
-                    directory / "initial_modal_mask.png",
+                    artifact_path(directory, "initial_modal_mask"),
                     modal_crop,
                 )
                 _save_mask(
-                    directory / "completed_amodal_mask.png",
+                    artifact_path(directory, "completed_amodal_mask"),
                     completed_amodal,
                 )
                 _save_mask(
-                    directory / "amodal_bbox_mask.png",
+                    artifact_path(directory, "amodal_bbox_mask"),
                     diagnostic_bbox,
                 )
                 foreign_inside = (
@@ -249,73 +256,76 @@ def reconstruct_objects(
                     detected.reconstruction_foreign_modal_outside_bbox
                 )
                 _save_mask(
-                    directory / "accepted_model_rgb_mask.png",
+                    artifact_path(directory, "accepted_model_rgb_mask"),
                     diagnostic_accepted,
                 )
                 _save_mask(
-                    directory / "protected_source_pixels.png",
+                    artifact_path(directory, "protected_source_pixels"),
                     crop_array(protected_mask.astype(bool), roi)
                     if protected_mask is not None
                     else real_pixels & ~diagnostic_accepted,
                 )
                 _save_mask(
-                    directory / "roi_real_pixels.png",
+                    artifact_path(directory, "roi_real_pixels"),
                     real_pixels,
                 )
                 _save_mask(
-                    directory / "target_bbox_mask.png",
+                    artifact_path(directory, "target_bbox_mask"),
                     diagnostic_bbox,
                 )
                 _save_mask(
-                    directory / "target_modal_protected.png",
+                    artifact_path(directory, "target_modal_protected"),
                     modal_crop,
                 )
                 _save_mask(
-                    directory / "foreign_modal_inside_bbox.png",
+                    artifact_path(directory, "foreign_modal_inside_bbox"),
                     crop_array(foreign_inside.astype(bool), roi)
                     if foreign_inside is not None
                     else np.zeros_like(mask_crop),
                 )
                 _save_mask(
-                    directory / "foreign_modal_outside_bbox.png",
+                    artifact_path(directory, "foreign_modal_outside_bbox"),
                     crop_array(foreign_outside.astype(bool), roi)
                     if foreign_outside is not None
                     else np.zeros_like(mask_crop),
                 )
-                _save_mask(directory / "completion_hole.png", hole_crop)
+                _save_mask(
+                    artifact_path(directory, "completion_hole"),
+                    hole_crop,
+                )
                 seed_mask = detected.reconstruction_seed_mask
                 _save_mask(
-                    directory / "directional_seed.png",
+                    artifact_path(directory, "directional_seed"),
                     crop_array(seed_mask.astype(bool), roi)
                     if seed_mask is not None
                     else np.zeros_like(mask_crop),
                 )
                 _save_mask(
-                    directory / "filtered_reconstruction_mask.png",
+                    artifact_path(directory, "filtered_reconstruction_mask"),
                     composition_crop,
                 )
                 generation_seed = (
                     detected.reconstruction_generation_seed_mask
                 )
                 _save_mask(
-                    directory / "generation_before_dilation.png",
+                    artifact_path(directory, "generation_before_dilation"),
                     crop_array(generation_seed.astype(bool), roi)
                     if generation_seed is not None
                     else composition_crop,
                 )
                 _save_mask(
-                    directory / "generation_after_dilation.png",
+                    artifact_path(directory, "generation_after_dilation"),
                     mask_crop,
                 )
                 occluder_mask = detected.reconstruction_occluder_mask
                 _save_mask(
-                    directory / "occluder_mask.png",
+                    artifact_path(directory, "occluder_mask"),
                     crop_array(
                         occluder_mask.astype(bool), roi
                     ) if occluder_mask is not None else np.zeros_like(mask_crop),
                 )
                 _save_mask(
-                    directory / "full_occluder_in_roi.png",
+                    artifact_path(directory, "full_occluder_in_roi"),
                     crop_array(occluder_mask.astype(bool), roi)
                     if occluder_mask is not None
                     else np.zeros_like(mask_crop),
@@ -393,7 +403,7 @@ def reconstruct_objects(
             for artifact_name in ("base_output_512", "sr_output"):
                 artifact = debug_artifacts[index].get(artifact_name)
                 if isinstance(artifact, Image.Image):
-                    artifact.save(directory / f"{artifact_name}.png")
+                    artifact.save(artifact_path(directory, artifact_name))
         if isinstance(reconstructed, Exception):
             _store_reconstruction_failure(
                 detected,
@@ -408,7 +418,7 @@ def reconstruct_objects(
                 directory = _artifact_directory(
                     diagnostics_directory, detected.object_id
                 )
-                reconstructed.save(directory / "model_output.png")
+                reconstructed.save(artifact_path(directory, "model_output"))
             validated = validate_reconstruction_result(
                 reconstructed,
                 source_crop=item.source_crop,
@@ -461,7 +471,7 @@ def reconstruct_objects(
             directory = _artifact_directory(
                 diagnostics_directory, detected.object_id
             )
-            validated.save(directory / "validated_output.png")
+            validated.save(artifact_path(directory, "validated_output"))
         log_event(
             logger,
             "object_reconstruction",
