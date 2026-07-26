@@ -298,12 +298,15 @@ def build_reconstruction_masks(
         occluder_union = np.zeros_like(detected.modal_mask, dtype=bool)
         exact_seed = np.zeros_like(detected.modal_mask, dtype=bool)
         composition_mask = np.zeros_like(detected.modal_mask, dtype=bool)
+        assigned_occluder_modal_masks: list[np.ndarray] = []
         for occluder_id in detected.occluder_ids:
             occluder = objects_by_id[occluder_id]
-            occluder_union |= _fill_small_mask_holes(
+            occluder_modal = _fill_small_mask_holes(
                 occluder.modal_mask > 0,
                 max_hole_area_pixels=foreign_modal_max_hole_area_pixels,
             )
+            occluder_union |= occluder_modal
+            assigned_occluder_modal_masks.append(occluder_modal)
             directional_seed, directional_mask = (
                 _directional_reconstruction_mask(
                     detected,
@@ -380,15 +383,27 @@ def build_reconstruction_masks(
         foreign_protection &= ~replaceable_foreign_inside
         foreign_protection &= roi_mask
 
-        generation_seed = composition_mask | replaceable_foreign_inside
+        qualifying_occluders_in_roi = np.zeros_like(target_modal)
+        for occluder_modal in assigned_occluder_modal_masks:
+            if np.any(occluder_modal & replaceable_foreign_inside):
+                qualifying_occluders_in_roi |= occluder_modal & roi_mask
+
+        generation_seed = composition_mask | qualifying_occluders_in_roi
         generation_mask = _close_and_dilate_mask(
             generation_seed,
             closing_pixels=generation_mask_closing_pixels,
             dilation_pixels=generation_mask_dilation_pixels,
         )
+        qualifying_occluder_allowance = _close_and_dilate_mask(
+            qualifying_occluders_in_roi,
+            closing_pixels=generation_mask_closing_pixels,
+            dilation_pixels=generation_mask_dilation_pixels,
+        )
         generation_mask &= roi_mask
         generation_mask &= ~target_modal
-        generation_mask &= ~foreign_protection
+        generation_mask &= (
+            ~foreign_protection | qualifying_occluder_allowance
+        )
         generation_mask |= composition_mask
 
         protected_mask = target_modal | foreign_protection

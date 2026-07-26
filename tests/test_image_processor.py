@@ -766,9 +766,10 @@ def test_reconstruction_mask_keeps_only_hole_components_anchored_to_occluder():
     )
 
 
-def test_generation_mask_contains_only_replaceable_occluder_region():
+def test_generation_mask_contains_full_qualifying_occluder_inside_roi():
     hidden = _detected_object("hidden", "person", (5, 5, 4, 4))
     occluder = _detected_object("book", "book", (8, 6, 8, 2))
+    unrelated = _detected_object("lamp", "lamp", (11, 4, 1, 1))
     hidden.amodal_mask = hidden.modal_mask > 0
     hidden.completion_hole_mask = np.zeros_like(hidden.modal_mask, dtype=bool)
     hidden.completion_hole_mask[6:8, 8:10] = True
@@ -776,8 +777,10 @@ def test_generation_mask_contains_only_replaceable_occluder_region():
     hidden.occluder_ids = {"book"}
 
     reconstruction_stage.build_reconstruction_masks(
-        [hidden, occluder],
+        [hidden, occluder, unrelated],
         (3, 3),
+        generation_mask_dilation_pixels=0,
+        generation_mask_closing_pixels=0,
         composition_margin_pixels=0,
         context_ratio=0.5,
     )
@@ -787,26 +790,29 @@ def test_generation_mask_contains_only_replaceable_occluder_region():
     roi_mask = np.zeros_like(hidden.reconstruction_mask, dtype=bool)
     left, top, right, bottom = roi.clipped_box
     roi_mask[top:bottom, left:right] = True
-    expected_occluder = (
+    qualifying_overlap = (
         (occluder.modal_mask > 0)
         & hidden.reconstruction_foreign_modal_inside_bbox
         & hidden.reconstruction_replacement_domain_mask
         & ~(hidden.modal_mask > 0)
     )
+    assert np.any(qualifying_overlap)
+    expected_full_occluder = (
+        (occluder.modal_mask > 0)
+        & roi_mask
+        & ~(hidden.modal_mask > 0)
+    )
     assert np.all(
-        hidden.reconstruction_generation_mask[expected_occluder]
+        hidden.reconstruction_generation_mask[expected_full_occluder]
     )
     assert np.array_equal(
         hidden.reconstruction_occluder_mask,
-        expected_occluder,
-    )
-    non_replaceable = (
-        (occluder.modal_mask > 0)
-        & roi_mask
-        & ~expected_occluder
+        qualifying_overlap,
     )
     assert not np.any(
-        hidden.reconstruction_generation_mask[non_replaceable]
+        hidden.reconstruction_generation_mask[
+            (unrelated.modal_mask > 0) & roi_mask
+        ]
     )
 
 
