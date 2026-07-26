@@ -225,6 +225,49 @@ def test_group_composition_uses_evidence_guided_write_and_support_masks():
     assert group.composed_source.getpixel((local_x, local_y)) == (255, 0, 0)
 
 
+def test_group_composition_blends_reconstruction_with_soft_write_alpha():
+    from backend.pipeline.grouping import (
+        compose_group_sources,
+        group_reconstructed_objects,
+    )
+
+    image = Image.new("RGB", (6, 6), (10, 20, 30))
+    detected = _detected(
+        "person",
+        "person",
+        (1, 1, 2, 2),
+        segmentation_index=0,
+        shape=(6, 6),
+    )
+    detected.amodal_mask = detected.modal_mask > 0
+    detected.reconstruction_roi = SquareROI(0, 0, 6, 6, 6)
+    detected.reconstruction_canvas = Image.new("RGB", (6, 6), (210, 20, 30))
+    detected.reconstruction_mask = np.zeros((6, 6), dtype=bool)
+    detected.reconstruction_mask[2, 3] = True
+    detected.reconstruction_write_mask = (
+        detected.reconstruction_mask.copy()
+    )
+    detected.reconstruction_write_alpha = np.zeros(
+        (6, 6), dtype=np.float64
+    )
+    detected.reconstruction_write_alpha[2, 3] = 0.5
+    detected.reconstruction_support_mask = (
+        detected.amodal_mask.copy()
+    )
+    detected.reconstruction_support_mask[2, 3] = True
+
+    group = group_reconstructed_objects([detected])[0]
+    compose_group_sources(image, [group])
+
+    local_x = 3 - group.composed_roi.x
+    local_y = 2 - group.composed_roi.y
+    assert group.composed_source.getpixel((local_x, local_y)) == (
+        110,
+        20,
+        30,
+    )
+
+
 def test_group_rgb_composition_initializes_fallback_group_from_original():
     from backend.pipeline.grouping import (
         compose_group_sources,
@@ -305,11 +348,17 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
     def refine_support(_image, supplied, _matte, **kwargs):
         assert supplied == objects
         assert kwargs == {
-            "alpha_low_threshold": 0.2,
+            "alpha_low_threshold": 0.35,
             "alpha_high_threshold": 0.7,
             "change_threshold": 8.0,
             "connection_margin_pixels": 4,
             "max_extension_area_ratio": 2.0,
+            "min_component_area_pixels": 8,
+            "generation_evidence_margin_pixels": 2,
+            "require_generation_evidence": True,
+            "alpha_write_epsilon": 0.01,
+            "alpha_feather_pixels": 0,
+            "fallback_to_validated_output": True,
             "diagnostics_directory": "outputs/reconstruction_debug",
         }
         events.append("support")
@@ -348,7 +397,7 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
     def matte(_image, supplied, _matte, **kwargs):
         assert supplied == final_groups
         assert kwargs == {
-            "context_ratio": 0.25,
+            "context_ratio": 0.025,
             "support_dilation_pixels": 2,
         }
         events.append("matte")

@@ -61,8 +61,11 @@ def _store_reconstruction_failure(
     reason: str,
 ) -> None:
     """Clear only one invalid result and retain its mask diagnostics."""
+    detected.raw_reconstruction_canvas = None
     detected.reconstruction_canvas = None
     detected.reconstruction_roi = None
+    detected.reconstruction_write_alpha = None
+    detected.reconstruction_write_mask = None
     detected.reconstruction_failure_stage = stage
     detected.reconstruction_failure_reason = reason
     logger.warning(
@@ -105,8 +108,14 @@ def reconstruct_objects(
     """Reconstruct and validate hidden RGB independently for each raw object."""
     prepared: list[_PreparedReconstruction] = []
     for detected in objects:
+        detected.raw_reconstruction_canvas = None
         detected.reconstruction_canvas = None
         detected.reconstruction_roi = None
+        detected.reconstruction_evidence_alpha = None
+        detected.reconstruction_extension_mask = None
+        detected.reconstruction_write_alpha = None
+        detected.reconstruction_write_mask = None
+        detected.reconstruction_support_mask = None
         detected.reconstruction_failure_stage = None
         detected.reconstruction_failure_reason = None
         reconstruction_mask = detected.reconstruction_mask
@@ -255,6 +264,18 @@ def reconstruct_objects(
                 foreign_outside = (
                     detected.reconstruction_foreign_modal_outside_bbox
                 )
+                replacement_domain = (
+                    detected.reconstruction_replacement_domain_mask
+                )
+                replaceable_foreign_inside = (
+                    detected.reconstruction_replaceable_foreign_inside
+                )
+                protected_foreign_inside = (
+                    detected.reconstruction_protected_foreign_inside
+                )
+                foreign_protection = (
+                    detected.reconstruction_foreign_protection_mask
+                )
                 _save_mask(
                     artifact_path(directory, "accepted_model_rgb_mask"),
                     diagnostic_accepted,
@@ -287,6 +308,32 @@ def reconstruct_objects(
                     artifact_path(directory, "foreign_modal_outside_bbox"),
                     crop_array(foreign_outside.astype(bool), roi)
                     if foreign_outside is not None
+                    else np.zeros_like(mask_crop),
+                )
+                _save_mask(
+                    artifact_path(directory, "replacement_domain"),
+                    crop_array(replacement_domain.astype(bool), roi)
+                    if replacement_domain is not None
+                    else np.zeros_like(mask_crop),
+                )
+                _save_mask(
+                    artifact_path(directory, "replaceable_foreign_inside"),
+                    crop_array(
+                        replaceable_foreign_inside.astype(bool), roi
+                    )
+                    if replaceable_foreign_inside is not None
+                    else np.zeros_like(mask_crop),
+                )
+                _save_mask(
+                    artifact_path(directory, "protected_foreign_inside"),
+                    crop_array(protected_foreign_inside.astype(bool), roi)
+                    if protected_foreign_inside is not None
+                    else np.zeros_like(mask_crop),
+                )
+                _save_mask(
+                    artifact_path(directory, "foreign_protection"),
+                    crop_array(foreign_protection.astype(bool), roi)
+                    if foreign_protection is not None
                     else np.zeros_like(mask_crop),
                 )
                 _save_mask(
@@ -429,6 +476,7 @@ def reconstruct_objects(
                 roi=item.roi,
                 blend_allowance_ratio=blend_allowance_ratio,
             )
+            raw_reconstructed = reconstructed.convert("RGB")
             occluder_crop = crop_array(
                 detected.reconstruction_occluder_mask.astype(bool),
                 item.roi,
@@ -461,11 +509,15 @@ def reconstruct_objects(
             )
             continue
 
+        detected.raw_reconstruction_canvas = raw_reconstructed
         detected.reconstruction_canvas = validated
         detected.reconstruction_roi = item.roi
         if detected.reconstruction_accepted_rgb_mask is not None:
             detected.reconstruction_write_mask = (
                 detected.reconstruction_accepted_rgb_mask.astype(bool).copy()
+            )
+            detected.reconstruction_write_alpha = (
+                detected.reconstruction_write_mask.astype(np.float64)
             )
         if diagnostics_directory is not None:
             directory = _artifact_directory(

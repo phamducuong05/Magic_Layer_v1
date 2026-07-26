@@ -766,7 +766,7 @@ def test_reconstruction_mask_keeps_only_hole_components_anchored_to_occluder():
     )
 
 
-def test_generation_mask_contains_full_occluder_inside_target_centric_roi():
+def test_generation_mask_contains_only_replaceable_occluder_region():
     hidden = _detected_object("hidden", "person", (5, 5, 4, 4))
     occluder = _detected_object("book", "book", (8, 6, 8, 2))
     hidden.amodal_mask = hidden.modal_mask > 0
@@ -787,8 +787,12 @@ def test_generation_mask_contains_full_occluder_inside_target_centric_roi():
     roi_mask = np.zeros_like(hidden.reconstruction_mask, dtype=bool)
     left, top, right, bottom = roi.clipped_box
     roi_mask[top:bottom, left:right] = True
-    expected_occluder = (occluder.modal_mask > 0) & roi_mask
-    expected_occluder &= ~(hidden.modal_mask > 0)
+    expected_occluder = (
+        (occluder.modal_mask > 0)
+        & hidden.reconstruction_foreign_modal_inside_bbox
+        & hidden.reconstruction_replacement_domain_mask
+        & ~(hidden.modal_mask > 0)
+    )
     assert np.all(
         hidden.reconstruction_generation_mask[expected_occluder]
     )
@@ -796,9 +800,17 @@ def test_generation_mask_contains_full_occluder_inside_target_centric_roi():
         hidden.reconstruction_occluder_mask,
         expected_occluder,
     )
+    non_replaceable = (
+        (occluder.modal_mask > 0)
+        & roi_mask
+        & ~expected_occluder
+    )
+    assert not np.any(
+        hidden.reconstruction_generation_mask[non_replaceable]
+    )
 
 
-def test_modal_classification_expands_only_post_inference_rgb_acceptance():
+def test_modal_classification_protects_unassigned_foreign_inside_bbox():
     target = _detected_object("target", "person", (4, 6, 8, 2))
     assigned = _detected_object("assigned", "book", (6, 6, 1, 2))
     crossing = _detected_object("crossing", "camera", (8, 6, 5, 2))
@@ -841,8 +853,17 @@ def test_modal_classification_expands_only_post_inference_rgb_acceptance():
     assert np.all(
         target.reconstruction_foreign_modal_outside_bbox[6:8, 12]
     )
-    assert np.all(target.reconstruction_accepted_rgb_mask[6:8, 8])
+    assert np.all(
+        target.reconstruction_protected_foreign_inside[6:8, 8]
+    )
+    assert not np.any(target.reconstruction_accepted_rgb_mask[6:8, 8])
     assert not np.any(target.reconstruction_accepted_rgb_mask[6:8, 12])
+    assert np.all(
+        target.reconstruction_replaceable_foreign_inside[6:8, 6]
+    )
+    assert not np.any(
+        target.reconstruction_protected_foreign_inside[6:8, 6]
+    )
     assert not np.any(
         target.reconstruction_accepted_rgb_mask[target.modal_mask > 0]
     )
@@ -1087,17 +1108,30 @@ def test_object_reconstruction_context_ratio_is_configured():
     )
     assert reconstruction_config["context_ratio"] == 0.025
     assert reconstruction_config["blend_allowance_ratio"] == 0.012
-    assert reconstruction_config["generation_mask_dilation_pixels"] == 12
-    assert reconstruction_config["generation_mask_closing_pixels"] == 7
+    assert reconstruction_config["generation_mask_dilation_pixels"] == 2
+    assert reconstruction_config["generation_mask_closing_pixels"] == 1
     assert reconstruction_config["foreign_modal_max_hole_area_pixels"] == 64
     assert reconstruction_config["foreign_modal_dilation_pixels"] == 2
     assert reconstruction_config["foreign_modal_closing_pixels"] == 1
+    assert reconstruction_config["replacement_domain_margin_pixels"] == 2
+    assert reconstruction_config["foreign_protection_dilation_pixels"] == 1
     assert reconstruction_config["support_margin_pixels"] == 8
-    assert reconstruction_config["support_alpha_low_threshold"] == 0.2
+    assert reconstruction_config["support_alpha_low_threshold"] == 0.35
     assert reconstruction_config["support_alpha_high_threshold"] == 0.7
     assert reconstruction_config["support_change_threshold"] == 8.0
     assert reconstruction_config["support_connection_margin_pixels"] == 4
     assert reconstruction_config["support_max_extension_area_ratio"] == 2.0
+    assert reconstruction_config["support_min_component_area_pixels"] == 8
+    assert (
+        reconstruction_config["support_generation_evidence_margin_pixels"]
+        == 2
+    )
+    assert reconstruction_config["support_require_generation_evidence"] is True
+    assert reconstruction_config["support_alpha_write_epsilon"] == 0.01
+    assert reconstruction_config["support_alpha_feather_pixels"] == 0
+    assert (
+        reconstruction_config["support_fallback_to_validated_output"] is True
+    )
     assert "color_refinement_enabled" not in reconstruction_config
     assert "color_refinement_strength" not in reconstruction_config
     assert config.get_model_config("object_reconstruction")[
@@ -1257,7 +1291,7 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
         assert isinstance(_image, Image.Image)
         assert supplied_matte is matte
         assert kwargs == {
-            "context_ratio": 0.25,
+            "context_ratio": 0.025,
             "support_dilation_pixels": 2,
         }
         objects[0].soft_alpha = alpha

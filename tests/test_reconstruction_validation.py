@@ -68,6 +68,8 @@ def test_valid_low_texture_reconstruction_is_retained():
 
     assert detected.reconstruction_canvas is not None
     assert detected.reconstruction_canvas.mode == "RGB"
+    assert detected.raw_reconstruction_canvas is not None
+    assert detected.raw_reconstruction_canvas.mode == "RGB"
     assert detected.reconstruction_failure_stage is None
     assert detected.reconstruction_failure_reason is None
 
@@ -94,6 +96,7 @@ def test_invalid_result_contract_uses_modal_fallback(
     )
 
     assert detected.reconstruction_canvas is None
+    assert detected.raw_reconstruction_canvas is None
     assert detected.reconstruction_roi is None
     assert detected.reconstruction_failure_stage == expected_stage
     assert detected.reconstruction_failure_reason
@@ -121,6 +124,11 @@ def test_change_outside_permitted_region_is_restored_to_source():
     assert detected.reconstruction_failure_stage is None
     assert detected.reconstruction_canvas.getpixel((0, 0)) == source.getpixel(
         (detected.reconstruction_roi.x, detected.reconstruction_roi.y)
+    )
+    assert detected.raw_reconstruction_canvas.getpixel((0, 0)) == (
+        200,
+        10,
+        10,
     )
     mask_crop = np.asarray(
         detected.reconstruction_mask[
@@ -439,17 +447,21 @@ def test_reconstruction_can_save_per_object_debug_artifacts(tmp_path):
         "11_target_modal_protected.png",
         "12_occluder_mask.png",
         "13_full_occluder_in_roi.png",
-        "14_generation_before_dilation.png",
-        "15_generation_after_dilation.png",
-        "16_generation_mask.png",
-        "17_foreign_modal_inside_bbox.png",
-        "18_foreign_modal_outside_bbox.png",
-        "19_protected_source_pixels.png",
-        "20_accepted_model_rgb_mask.png",
-        "21_base_output_512.png",
-        "22_sr_output.png",
-        "23_model_output.png",
-        "24_validated_output.png",
+        "14_foreign_modal_inside_bbox.png",
+        "15_foreign_modal_outside_bbox.png",
+        "16_replacement_domain.png",
+        "17_replaceable_foreign_inside.png",
+        "18_protected_foreign_inside.png",
+        "19_foreign_protection.png",
+        "20_protected_source_pixels.png",
+        "21_accepted_model_rgb_mask.png",
+        "22_generation_before_dilation.png",
+        "23_generation_after_dilation.png",
+        "24_generation_mask.png",
+        "25_base_output_512.png",
+        "26_sr_output.png",
+        "27_model_output.png",
+        "28_validated_output.png",
     ]
     actual_names = sorted(path.name for path in object_directory.iterdir())
     assert expected_names == actual_names

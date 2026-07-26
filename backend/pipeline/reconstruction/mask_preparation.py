@@ -220,6 +220,8 @@ def build_reconstruction_masks(
     foreign_modal_max_hole_area_pixels: int = 0,
     foreign_modal_dilation_pixels: int = 0,
     foreign_modal_closing_pixels: int = 0,
+    replacement_domain_margin_pixels: int = 0,
+    foreign_protection_dilation_pixels: int = 0,
     support_margin_pixels: int | None = None,
     composition_margin_pixels: int | None = None,
     context_ratio: float = 0.0,
@@ -231,6 +233,8 @@ def build_reconstruction_masks(
         foreign_modal_max_hole_area_pixels,
         foreign_modal_dilation_pixels,
         foreign_modal_closing_pixels,
+        replacement_domain_margin_pixels,
+        foreign_protection_dilation_pixels,
     ):
         if value < 0:
             raise ValueError("reconstruction morphology settings must be non-negative")
@@ -252,8 +256,22 @@ def build_reconstruction_masks(
         detected.reconstruction_target_bbox_mask = None
         detected.reconstruction_foreign_modal_inside_bbox = None
         detected.reconstruction_foreign_modal_outside_bbox = None
+        detected.reconstruction_replacement_domain_mask = None
+        detected.reconstruction_replaceable_foreign_inside = None
+        detected.reconstruction_protected_foreign_inside = None
+        detected.reconstruction_foreign_protection_mask = None
         detected.reconstruction_protected_mask = None
         detected.reconstruction_accepted_rgb_mask = None
+        detected.raw_reconstruction_canvas = None
+        detected.reconstruction_canvas = None
+        detected.reconstruction_roi = None
+        detected.reconstruction_evidence_alpha = None
+        detected.reconstruction_extension_mask = None
+        detected.reconstruction_write_alpha = None
+        detected.reconstruction_write_mask = None
+        detected.reconstruction_support_mask = None
+        detected.reconstruction_failure_stage = None
+        detected.reconstruction_failure_reason = None
 
         if (
             not detected.occluder_ids
@@ -282,7 +300,10 @@ def build_reconstruction_masks(
         composition_mask = np.zeros_like(detected.modal_mask, dtype=bool)
         for occluder_id in detected.occluder_ids:
             occluder = objects_by_id[occluder_id]
-            occluder_union |= occluder.modal_mask > 0
+            occluder_union |= _fill_small_mask_holes(
+                occluder.modal_mask > 0,
+                max_hole_area_pixels=foreign_modal_max_hole_area_pixels,
+            )
             directional_seed, directional_mask = (
                 _directional_reconstruction_mask(
                     detected,
@@ -311,19 +332,6 @@ def build_reconstruction_masks(
             context_ratio=context_ratio,
         )
         roi_mask = _mask_inside_roi(composition_mask.shape, roi)
-        relevant_occluder = (
-            occluder_union & roi_mask & ~(detected.modal_mask > 0)
-        )
-        generation_seed = composition_mask | relevant_occluder
-        generation_mask = _close_and_dilate_mask(
-            generation_seed,
-            closing_pixels=generation_mask_closing_pixels,
-            dilation_pixels=generation_mask_dilation_pixels,
-        )
-        generation_mask &= roi_mask
-        generation_mask &= ~(detected.modal_mask > 0)
-        generation_mask |= composition_mask
-
         target_modal = detected.modal_mask > 0
         target_bbox_mask = _bbox_mask(detected.amodal_mask > 0)
         foreign_modal = np.zeros_like(target_modal)
@@ -344,14 +352,53 @@ def build_reconstruction_masks(
         )
         foreign_outside_bbox &= ~target_bbox_mask
         foreign_outside_bbox &= roi_mask
-        protected_mask = target_modal | foreign_outside_bbox
+
+        assigned_occluder = (
+            occluder_union & foreign_inside_bbox & ~target_modal
+        )
+        replacement_domain = _close_and_dilate_mask(
+            (detected.amodal_mask > 0) | composition_mask,
+            closing_pixels=0,
+            dilation_pixels=replacement_domain_margin_pixels,
+        )
+        replacement_domain &= target_bbox_mask
+        replacement_domain &= roi_mask
+        replaceable_foreign_inside = (
+            assigned_occluder
+            & replacement_domain
+            & roi_mask
+            & ~target_modal
+        )
+        protected_foreign_inside = (
+            foreign_inside_bbox & ~replaceable_foreign_inside
+        )
+        foreign_protection = _close_and_dilate_mask(
+            foreign_outside_bbox | protected_foreign_inside,
+            closing_pixels=0,
+            dilation_pixels=foreign_protection_dilation_pixels,
+        )
+        foreign_protection &= ~replaceable_foreign_inside
+        foreign_protection &= roi_mask
+
+        generation_seed = composition_mask | replaceable_foreign_inside
+        generation_mask = _close_and_dilate_mask(
+            generation_seed,
+            closing_pixels=generation_mask_closing_pixels,
+            dilation_pixels=generation_mask_dilation_pixels,
+        )
+        generation_mask &= roi_mask
+        generation_mask &= ~target_modal
+        generation_mask &= ~foreign_protection
+        generation_mask |= composition_mask
+
+        protected_mask = target_modal | foreign_protection
         accepted_rgb_mask = roi_mask & ~protected_mask
 
         detected.reconstruction_seed_mask = exact_seed
         detected.reconstruction_mask = composition_mask
         detected.reconstruction_generation_seed_mask = generation_seed
         detected.reconstruction_generation_mask = generation_mask
-        detected.reconstruction_occluder_mask = relevant_occluder
+        detected.reconstruction_occluder_mask = assigned_occluder
         detected.reconstruction_input_roi = roi
         detected.reconstruction_target_bbox_mask = target_bbox_mask
         detected.reconstruction_foreign_modal_inside_bbox = (
@@ -360,6 +407,14 @@ def build_reconstruction_masks(
         detected.reconstruction_foreign_modal_outside_bbox = (
             foreign_outside_bbox
         )
+        detected.reconstruction_replacement_domain_mask = replacement_domain
+        detected.reconstruction_replaceable_foreign_inside = (
+            replaceable_foreign_inside
+        )
+        detected.reconstruction_protected_foreign_inside = (
+            protected_foreign_inside
+        )
+        detected.reconstruction_foreign_protection_mask = foreign_protection
         detected.reconstruction_protected_mask = protected_mask
         detected.reconstruction_accepted_rgb_mask = accepted_rgb_mask
         log_event(
@@ -373,8 +428,20 @@ def build_reconstruction_masks(
                 np.count_nonzero(detected.completion_hole_mask)
             ),
             directional_seed_pixels=int(np.count_nonzero(exact_seed)),
-            relevant_occluder_pixels=int(
-                np.count_nonzero(relevant_occluder)
+            assigned_occluder_pixels=int(
+                np.count_nonzero(assigned_occluder)
+            ),
+            replacement_domain_pixels=int(
+                np.count_nonzero(replacement_domain)
+            ),
+            replaceable_foreign_inside_pixels=int(
+                np.count_nonzero(replaceable_foreign_inside)
+            ),
+            protected_foreign_inside_pixels=int(
+                np.count_nonzero(protected_foreign_inside)
+            ),
+            foreign_protection_pixels=int(
+                np.count_nonzero(foreign_protection)
             ),
             composition_pixels=int(np.count_nonzero(composition_mask)),
             generation_pixels=int(np.count_nonzero(generation_mask)),
@@ -402,6 +469,8 @@ def prepare_raw_reconstruction_masks(
     foreign_modal_max_hole_area_pixels: int = 0,
     foreign_modal_dilation_pixels: int = 0,
     foreign_modal_closing_pixels: int = 0,
+    replacement_domain_margin_pixels: int = 0,
+    foreign_protection_dilation_pixels: int = 0,
     support_margin_pixels: int | None = None,
     composition_margin_pixels: int | None = None,
     context_ratio: float = 0.0,
@@ -490,6 +559,10 @@ def prepare_raw_reconstruction_masks(
         ),
         foreign_modal_dilation_pixels=foreign_modal_dilation_pixels,
         foreign_modal_closing_pixels=foreign_modal_closing_pixels,
+        replacement_domain_margin_pixels=replacement_domain_margin_pixels,
+        foreign_protection_dilation_pixels=(
+            foreign_protection_dilation_pixels
+        ),
         support_margin_pixels=support_margin_pixels,
         composition_margin_pixels=composition_margin_pixels,
         context_ratio=context_ratio,

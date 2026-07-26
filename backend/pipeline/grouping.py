@@ -246,6 +246,15 @@ def compose_group_sources(
                 if member.reconstruction_write_mask is not None
                 else reconstruction_mask
             )
+            write_alpha = (
+                member.reconstruction_write_alpha
+                if member.reconstruction_write_alpha is not None
+                else (
+                    write_mask.astype(np.float64)
+                    if write_mask is not None
+                    else None
+                )
+            )
             if canvas is None and member_roi is None:
                 log_event(
                     logger,
@@ -262,6 +271,7 @@ def compose_group_sources(
                 or member_roi is None
                 or reconstruction_mask is None
                 or write_mask is None
+                or write_alpha is None
             ):
                 raise ValueError(
                     f"incomplete reconstruction record for {member.object_id}"
@@ -279,6 +289,7 @@ def compose_group_sources(
             if (
                 reconstruction_mask.shape != (source_height, source_width)
                 or write_mask.shape != (source_height, source_width)
+                or write_alpha.shape != (source_height, source_width)
             ):
                 raise ValueError(
                     f"reconstruction mask for {member.object_id} does not "
@@ -321,6 +332,15 @@ def compose_group_sources(
                 overlap_top:overlap_bottom,
                 overlap_left:overlap_right,
             ].astype(bool)
+            permitted_alpha = np.clip(
+                write_alpha[
+                    overlap_top:overlap_bottom,
+                    overlap_left:overlap_right,
+                ].astype(np.float64),
+                0.0,
+                1.0,
+            )
+            permitted &= permitted_alpha > 0.0
             # Preserve visible pixels and reconstruction from earlier members.
             writable = (
                 permitted
@@ -355,7 +375,14 @@ def compose_group_sources(
             candidate = np.asarray(canvas.convert("RGB"), dtype=np.uint8)[
                 canvas_y, canvas_x
             ]
-            destination[writable] = candidate[writable]
+            effective_alpha = np.where(
+                writable, permitted_alpha, 0.0
+            )[..., None]
+            blended = np.rint(
+                candidate.astype(np.float64) * effective_alpha
+                + destination.astype(np.float64) * (1.0 - effective_alpha)
+            ).clip(0, 255).astype(np.uint8)
+            destination[writable] = blended[writable]
             # Block later members from overwriting these accepted pixels.
             filled_reconstruction[destination_y, destination_x] |= writable
             owner_crop[writable] = member_index

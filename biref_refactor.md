@@ -342,7 +342,7 @@ reconstruction_canvas: Optional[Image.Image] = None
 Ý nghĩa:
 
 - `raw_reconstruction_canvas`: crop RGB nguyên bản do HD-Painter trả về.
-- `reconstruction_canvas`: crop RGB đã được lọc và blend an toàn để dùng cho group composition.
+- `reconstruction_canvas`: raw crop đã vượt qua validation/component filtering và được phép đưa vào group composition; quyền ghi thực tế nằm ở `reconstruction_write_alpha`.
 
 Không dùng chung một field cho hai ý nghĩa này vì:
 
@@ -778,9 +778,15 @@ target.reconstruction_support_mask = (
 
 ---
 
-## 7. Tạo reconstruction canvas bằng alpha blend
+## 7. Chuẩn bị reconstruction canvas và composed preview
 
-Sau khi có `extension_alpha`, tạo canvas an toàn:
+Sau khi có `extension_alpha`, giữ raw RGB làm candidate:
+
+```python
+target.reconstruction_canvas = raw_canvas.convert("RGB")
+```
+
+Không blend vào `reconstruction_canvas` ở đây, vì group composition sẽ thực hiện alpha blend đúng một lần. Đồng thời tạo một composed preview cho diagnostics:
 
 ```python
 source_rgb = np.asarray(source_crop, dtype=np.float32)
@@ -790,15 +796,6 @@ alpha = extension_alpha[..., None]
 composed_rgb = (
     raw_rgb * alpha
     + source_rgb * (1.0 - alpha)
-)
-```
-
-Sau đó:
-
-```python
-target.reconstruction_canvas = Image.fromarray(
-    np.clip(np.rint(composed_rgb), 0, 255).astype(np.uint8),
-    mode="RGB",
 )
 ```
 
@@ -846,8 +843,9 @@ destination = (
 )
 ```
 
-Nếu `reconstruction_canvas` đã được blend với source từ bước trước, group composition vẫn cần `write_alpha` để:
+Group composition dùng raw candidate và `write_alpha` để:
 
+- alpha blend đúng một lần;
 - không xem toàn bộ ROI là reconstruction;
 - giải quyết conflict giữa nhiều member;
 - không block member sau ở pixel alpha bằng zero;
@@ -960,7 +958,7 @@ Thứ tự mới:
 3. lưu raw_reconstruction_canvas
 4. load BiRefNet
 5. refine_reconstruction_supports trên raw canvas
-6. tạo reconstruction_canvas đã alpha blend
+6. tạo reconstruction_canvas raw candidate và soft write alpha
 7. group objects
 8. compose reconstructed members
 9. refine_objects bằng BiRefNet lần hai
@@ -1002,7 +1000,7 @@ pipeline:
     support_refinement_enabled: true
     support_input_source: raw_hd_painter
 
-    support_alpha_low_threshold: 0.2
+    support_alpha_low_threshold: 0.35
     support_alpha_high_threshold: 0.7
     support_change_threshold: 8.0
     support_connection_margin_pixels: 4
@@ -1096,16 +1094,19 @@ backend/pipeline/reconstruction/reconstruction.py
 backend/pipeline/matting.py
 ```
 
-Thứ tự artifact đề xuất từ đoạn HD-Painter output:
+Thứ tự artifact đã triển khai cho các bước mới:
 
 ```text
-23_model_output.png
-24_raw_birefnet_alpha.png
-25_assigned_occluder.png
-26_replacement_domain.png
-27_replaceable_foreign_inside.png
-28_protected_foreign_inside.png
-29_foreign_protection.png
+12_occluder_mask.png
+14_foreign_modal_inside_bbox.png
+15_foreign_modal_outside_bbox.png
+16_replacement_domain.png
+17_replaceable_foreign_inside.png
+18_protected_foreign_inside.png
+19_foreign_protection.png
+27_model_output.png
+28_validated_output.png
+29_raw_birefnet_alpha.png
 30_target_connection_anchor.png
 31_birefnet_candidate.png
 32_changed_by_model.png
@@ -1114,39 +1115,44 @@ Thứ tự artifact đề xuất từ đoạn HD-Painter output:
 35_reconstruction_extension_alpha.png
 36_reconstruction_extension_mask.png
 37_reconstruction_write_alpha.png
-38_composed_reconstruction.png
-39_final_reconstruction_support.png
+38_reconstruction_write_mask.png
+39_composed_reconstruction.png
+40_final_reconstruction_support.png
 ```
 
 Ý nghĩa:
 
-### `23_model_output.png`
+### `27_model_output.png`
 
 Raw RGB do HD-Painter trả về, trước mọi restore/blend.
 
-### `24_raw_birefnet_alpha.png`
+### `28_validated_output.png`
 
-Alpha remove-background nguyên bản của BiRefNet.
+Output fallback đã được validator khôi phục các pixel bảo vệ. BiRefNet pass đầu không dùng ảnh này khi raw output hợp lệ.
 
-### `25_assigned_occluder.png`
+### `12_occluder_mask.png`
 
 Union modal của các object đã được depth ordering xác định đang che target.
 
-### `26_replacement_domain.png`
+### `16_replacement_domain.png`
 
 Vùng amodal/composition được mở rộng nhẹ, giới hạn nơi occluder có thể bị thay.
 
-### `27_replaceable_foreign_inside.png`
+### `17_replaceable_foreign_inside.png`
 
 Phần assigned occluder nằm trong replacement domain và được phép reconstruction.
 
-### `28_protected_foreign_inside.png`
+### `18_protected_foreign_inside.png`
 
 Phần foreign inside không được chứng minh là occluder cần thay và phải giữ RGB nguồn.
 
-### `29_foreign_protection.png`
+### `19_foreign_protection.png`
 
 Union foreign outside và protected foreign inside sau protection dilation, nhưng đã loại lại replaceable region.
+
+### `29_raw_birefnet_alpha.png`
+
+Alpha remove-background nguyên bản của BiRefNet.
 
 ### `30_target_connection_anchor.png`
 
@@ -1180,11 +1186,15 @@ Binary support suy ra từ extension alpha.
 
 Alpha thực tế được phép ghi RGB sau khi áp dụng mọi protection.
 
-### `38_composed_reconstruction.png`
+### `38_reconstruction_write_mask.png`
+
+Binary mask suy ra từ `reconstruction_write_alpha > support_alpha_write_epsilon`, dùng cho conflict detection.
+
+### `39_composed_reconstruction.png`
 
 Raw HD-Painter RGB đã alpha blend với source.
 
-### `39_final_reconstruction_support.png`
+### `40_final_reconstruction_support.png`
 
 ```python
 target_modal | reconstruction_extension_mask

@@ -363,6 +363,16 @@ def process_image(
                         "foreign_modal_closing_pixels", 0
                     )
                 ),
+                replacement_domain_margin_pixels=int(
+                    reconstruction_config.get(
+                        "replacement_domain_margin_pixels", 2
+                    )
+                ),
+                foreign_protection_dilation_pixels=int(
+                    reconstruction_config.get(
+                        "foreign_protection_dilation_pixels", 1
+                    )
+                ),
                 support_margin_pixels=int(
                     reconstruction_config.get(
                         "support_margin_pixels", max(kernel_size) // 2
@@ -549,6 +559,37 @@ def process_image(
                         max_extension_area_ratio=float(
                             reconstruction_config.get(
                                 "support_max_extension_area_ratio", 2.0
+                            )
+                        ),
+                        min_component_area_pixels=int(
+                            reconstruction_config.get(
+                                "support_min_component_area_pixels", 8
+                            )
+                        ),
+                        generation_evidence_margin_pixels=int(
+                            reconstruction_config.get(
+                                "support_generation_evidence_margin_pixels",
+                                2,
+                            )
+                        ),
+                        require_generation_evidence=bool(
+                            reconstruction_config.get(
+                                "support_require_generation_evidence", True
+                            )
+                        ),
+                        alpha_write_epsilon=float(
+                            reconstruction_config.get(
+                                "support_alpha_write_epsilon", 0.01
+                            )
+                        ),
+                        alpha_feather_pixels=int(
+                            reconstruction_config.get(
+                                "support_alpha_feather_pixels", 0
+                            )
+                        ),
+                        fallback_to_validated_output=bool(
+                            reconstruction_config.get(
+                                "support_fallback_to_validated_output", True
                             )
                         ),
                         diagnostics_directory=(

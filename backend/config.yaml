@@ -20,6 +20,10 @@ pipeline:
     foreign_modal_max_hole_area_pixels: 64
     foreign_modal_dilation_pixels: 2
     foreign_modal_closing_pixels: 1
+    # Only confirmed occluder pixels inside the expanded target domain may be
+    # replaced. Other foreign pixels remain protected.
+    replacement_domain_margin_pixels: 2
+    foreign_protection_dilation_pixels: 1
     support_margin_pixels: 8
     # BiRefNet reconstruction-support refinement. The low threshold creates
     # candidate foreground; accepted components must also contain strong alpha,
@@ -29,6 +33,12 @@ pipeline:
     support_change_threshold: 8.0
     support_connection_margin_pixels: 4
     support_max_extension_area_ratio: 2.0
+    support_min_component_area_pixels: 8
+    support_generation_evidence_margin_pixels: 2
+    support_require_generation_evidence: true
+    support_alpha_write_epsilon: 0.01
+    support_alpha_feather_pixels: 0
+    support_fallback_to_validated_output: true
     # Completion-hole components must remain connected to an occluder within
     # this small geometric margin before they can enter reconstruction_mask.
     composition_margin_pixels: 4

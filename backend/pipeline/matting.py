@@ -39,6 +39,22 @@ def _save_mask(path: Path, mask: np.ndarray) -> None:
     Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(path)
 
 
+def _save_alpha(path: Path, alpha: np.ndarray) -> None:
+    Image.fromarray(
+        np.rint(np.clip(alpha, 0.0, 1.0) * 255).astype(np.uint8),
+        mode="L",
+    ).save(path)
+
+
+def _dilate_mask(mask: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return mask.astype(bool).copy()
+    kernel = np.ones((2 * radius + 1,) * 2, dtype=np.uint8)
+    return cv2.dilate(
+        mask.astype(np.uint8), kernel, iterations=1
+    ).astype(bool)
+
+
 def _resize_alpha(alpha: torch.Tensor, size: int) -> np.ndarray:
     if not isinstance(alpha, torch.Tensor) or alpha.ndim != 2:
         raise ValueError("matting output must be a two-dimensional tensor")
@@ -66,15 +82,15 @@ def refine_reconstruction_supports(
     change_threshold: float,
     connection_margin_pixels: int,
     max_extension_area_ratio: float,
+    min_component_area_pixels: int = 0,
+    generation_evidence_margin_pixels: int = 0,
+    require_generation_evidence: bool = True,
+    alpha_write_epsilon: float = 0.01,
+    alpha_feather_pixels: int = 0,
+    fallback_to_validated_output: bool = True,
     diagnostics_directory: str | Path | None = None,
 ) -> None:
-    """Extend incomplete amodal support using reconstructed RGB evidence.
-
-    BiRefNet supplies class-agnostic foreground confidence on each accepted
-    reconstruction crop. The model-generation mask remains an inference input
-    only; foreground evidence may use the wider post-inference accepted RGB
-    region when it connects to the visible target and was changed by the model.
-    """
+    """Extract target extension directly from raw HD-Painter RGB."""
     if not 0.0 <= alpha_low_threshold <= alpha_high_threshold <= 1.0:
         raise ValueError(
             "support alpha thresholds must satisfy 0 <= low <= high <= 1"
@@ -83,6 +99,18 @@ def refine_reconstruction_supports(
         raise ValueError("support change threshold must be non-negative")
     if connection_margin_pixels < 0:
         raise ValueError("support connection margin must be non-negative")
+    if min_component_area_pixels < 0:
+        raise ValueError("support minimum component area must be non-negative")
+    if generation_evidence_margin_pixels < 0:
+        raise ValueError(
+            "support generation evidence margin must be non-negative"
+        )
+    if not math.isfinite(alpha_write_epsilon) or not (
+        0.0 <= alpha_write_epsilon <= 1.0
+    ):
+        raise ValueError("support alpha write epsilon must be in [0, 1]")
+    if alpha_feather_pixels < 0:
+        raise ValueError("support alpha feather radius must be non-negative")
     if (
         not math.isfinite(max_extension_area_ratio)
         or max_extension_area_ratio < 0
@@ -96,10 +124,14 @@ def refine_reconstruction_supports(
         target.reconstruction_support_mask = None
 
         reconstruction_mask = target.reconstruction_mask
-        canvas = target.reconstruction_canvas
+        raw_canvas = (
+            target.raw_reconstruction_canvas
+            if target.raw_reconstruction_canvas is not None
+            else target.reconstruction_canvas
+        )
         roi = target.reconstruction_roi
         if (
-            canvas is None
+            raw_canvas is None
             or roi is None
             or reconstruction_mask is None
             or not np.any(reconstruction_mask)
@@ -107,15 +139,32 @@ def refine_reconstruction_supports(
             continue
 
         modal = target.modal_mask > 0
-        accepted_rgb_mask = (
+        fallback_write_mask = (
             target.reconstruction_accepted_rgb_mask.astype(bool)
             if target.reconstruction_accepted_rgb_mask is not None
             else reconstruction_mask.astype(bool)
         )
-        target.reconstruction_write_mask = accepted_rgb_mask.copy()
-        target.reconstruction_support_mask = modal.copy()
+        target.reconstruction_write_mask = fallback_write_mask.copy()
+        target.reconstruction_write_alpha = fallback_write_mask.astype(
+            np.float64
+        )
+        target.reconstruction_support_mask = (
+            modal | reconstruction_mask.astype(bool)
+            if fallback_to_validated_output
+            else modal.copy()
+        )
 
-        if roi.image_size != source.size or canvas.size != (roi.size, roi.size):
+        if (
+            roi.image_size != source.size
+            or raw_canvas.size != (roi.size, roi.size)
+        ):
+            if not fallback_to_validated_output:
+                target.reconstruction_canvas = None
+                target.reconstruction_write_alpha = np.zeros_like(
+                    modal, dtype=np.float64
+                )
+                target.reconstruction_write_mask = np.zeros_like(modal)
+                target.reconstruction_support_mask = modal.copy()
             log_event(
                 logger,
                 "reconstruction_support",
@@ -127,7 +176,9 @@ def refine_reconstruction_supports(
             continue
 
         try:
-            alpha_crop = _resize_alpha(matte(canvas.convert("RGB")), roi.size)
+            alpha_crop = _resize_alpha(
+                matte(raw_canvas.convert("RGB")), roi.size
+            )
         except Exception as exc:
             logger.warning(
                 "Could not refine reconstruction support for %s: %s",
@@ -142,41 +193,60 @@ def refine_reconstruction_supports(
                 decision="fallback",
                 reason="matting_failed",
             )
+            if not fallback_to_validated_output:
+                target.reconstruction_canvas = None
+                target.reconstruction_write_alpha = np.zeros_like(
+                    modal, dtype=np.float64
+                )
+                target.reconstruction_write_mask = np.zeros_like(modal)
+                target.reconstruction_support_mask = modal.copy()
             continue
 
         source_crop = np.asarray(crop_image(source, roi), dtype=np.uint8)
-        reconstructed_crop = np.asarray(
-            canvas.convert("RGB"), dtype=np.uint8
+        raw_reconstructed_crop = np.asarray(
+            raw_canvas.convert("RGB"), dtype=np.uint8
         )
         modal_crop = crop_array(modal, roi).astype(bool)
-        accepted_rgb_crop = crop_array(
-            accepted_rgb_mask, roi
+        valid_roi_crop = crop_array(
+            np.ones_like(modal, dtype=bool), roi
         ).astype(bool)
-        protected_mask = (
-            target.reconstruction_protected_mask.astype(bool)
-            if target.reconstruction_protected_mask is not None
-            else ~accepted_rgb_mask
-        )
-        protected_crop = crop_array(protected_mask, roi).astype(bool)
-
-        core_crop = modal_crop
-        if connection_margin_pixels:
-            radius = connection_margin_pixels
-            kernel = np.ones((2 * radius + 1,) * 2, dtype=np.uint8)
-            connection_anchor = cv2.dilate(
-                core_crop.astype(np.uint8), kernel, iterations=1
-            ).astype(bool)
+        if target.reconstruction_foreign_protection_mask is not None:
+            foreign_protection = (
+                target.reconstruction_foreign_protection_mask.astype(bool)
+            )
+        elif target.reconstruction_protected_mask is not None:
+            foreign_protection = (
+                target.reconstruction_protected_mask.astype(bool) & ~modal
+            )
         else:
-            connection_anchor = core_crop
+            foreign_protection = np.zeros_like(modal)
+        foreign_protection_crop = crop_array(
+            foreign_protection, roi
+        ).astype(bool)
+
+        generation_mask = (
+            target.reconstruction_generation_mask.astype(bool)
+            if target.reconstruction_generation_mask is not None
+            else reconstruction_mask.astype(bool)
+        )
+        generation_evidence = _dilate_mask(
+            crop_array(generation_mask, roi).astype(bool),
+            generation_evidence_margin_pixels,
+        )
+
+        connection_anchor = _dilate_mask(
+            modal_crop, connection_margin_pixels
+        )
 
         candidate = (
             (alpha_crop >= alpha_low_threshold)
-            & accepted_rgb_crop
+            & valid_roi_crop
+            & ~foreign_protection_crop
         )
         strong_foreground = alpha_crop >= alpha_high_threshold
         change_distance = np.mean(
             np.abs(
-                reconstructed_crop.astype(np.int16)
+                raw_reconstructed_crop.astype(np.int16)
                 - source_crop.astype(np.int16)
             ),
             axis=2,
@@ -184,45 +254,132 @@ def refine_reconstruction_supports(
         changed_by_model = change_distance >= change_threshold
 
         accepted = np.zeros_like(candidate)
-        _, labels = cv2.connectedComponents(
-            candidate.astype(np.uint8), connectivity=8
+        component_count, labels, stats, _ = (
+            cv2.connectedComponentsWithStats(
+                candidate.astype(np.uint8), connectivity=8
+            )
         )
-        for label in range(1, int(labels.max()) + 1):
+        modal_area = int(np.count_nonzero(modal))
+        max_extension_area = int(
+            math.floor(modal_area * max_extension_area_ratio)
+        )
+        rejected_area_components = 0
+        for label in range(1, component_count):
             component = labels == label
+            extension_part = component & ~modal_crop
+            component_area = int(stats[label, cv2.CC_STAT_AREA])
+            extension_area = int(np.count_nonzero(extension_part))
+            if component_area < min_component_area_pixels:
+                continue
+            if not np.any(component & connection_anchor):
+                continue
+            if not np.any(component & strong_foreground):
+                continue
+            if not np.any(extension_part & changed_by_model):
+                continue
             if (
-                np.any(component & connection_anchor)
-                and np.any(component & strong_foreground)
-                and np.any(component & changed_by_model)
+                require_generation_evidence
+                and not np.any(extension_part & generation_evidence)
             ):
-                accepted |= component
+                continue
+            if extension_area > max_extension_area:
+                rejected_area_components += 1
+                continue
+            accepted |= component
 
-        extension_crop = accepted & ~core_crop
+        extension_support = (
+            accepted
+            & ~modal_crop
+            & ~foreign_protection_crop
+            & valid_roi_crop
+        )
+        extension_alpha = (
+            alpha_crop * extension_support.astype(np.float64)
+        )
+        if alpha_feather_pixels and np.any(extension_alpha):
+            kernel_size = 2 * alpha_feather_pixels + 1
+            feather_domain = _dilate_mask(
+                extension_support, alpha_feather_pixels
+            )
+            extension_alpha = cv2.GaussianBlur(
+                extension_alpha,
+                (kernel_size, kernel_size),
+                sigmaX=0,
+            )
+            extension_alpha *= feather_domain
+        extension_alpha[modal_crop] = 0.0
+        extension_alpha[foreign_protection_crop] = 0.0
+        extension_alpha[~valid_roi_crop] = 0.0
+        write_crop = extension_alpha > alpha_write_epsilon
 
         alpha_full = restore_array(alpha_crop, roi)
-        extension_full = restore_array(extension_crop, roi).astype(bool)
+        write_alpha_full = restore_array(extension_alpha, roi)
+        extension_full = restore_array(write_crop, roi).astype(bool)
         target.reconstruction_evidence_alpha = alpha_full
+        target.reconstruction_write_alpha = write_alpha_full
+        target.reconstruction_write_mask = extension_full.copy()
         target.reconstruction_extension_mask = extension_full
         target.reconstruction_support_mask = modal | extension_full
+
+        composed_crop = np.rint(
+            raw_reconstructed_crop.astype(np.float64)
+            * extension_alpha[..., None]
+            + source_crop.astype(np.float64)
+            * (1.0 - extension_alpha[..., None])
+        ).clip(0, 255).astype(np.uint8)
+        if np.any(extension_full):
+            # Group composition performs the soft-alpha blend exactly once.
+            target.reconstruction_canvas = raw_canvas.convert("RGB")
+        else:
+            target.reconstruction_canvas = None
 
         if diagnostics_directory is not None:
             directory = _reconstruction_artifact_directory(
                 diagnostics_directory, target.object_id
             )
-            Image.fromarray(
-                np.rint(alpha_crop * 255).astype(np.uint8), mode="L"
-            ).save(artifact_path(directory, "reconstruction_birefnet_alpha"))
+            _save_alpha(
+                artifact_path(directory, "raw_birefnet_alpha"),
+                alpha_crop,
+            )
             _save_mask(
-                artifact_path(directory, "reconstruction_extension_mask"),
-                extension_crop,
+                artifact_path(directory, "target_connection_anchor"),
+                connection_anchor,
             )
             _save_mask(
                 artifact_path(directory, "birefnet_candidate"),
                 candidate,
             )
             _save_mask(
+                artifact_path(directory, "changed_by_model"),
+                changed_by_model,
+            )
+            _save_mask(
+                artifact_path(directory, "generation_evidence"),
+                generation_evidence,
+            )
+            _save_mask(
+                artifact_path(directory, "accepted_target_component"),
+                accepted,
+            )
+            _save_alpha(
+                artifact_path(directory, "reconstruction_extension_alpha"),
+                extension_alpha,
+            )
+            _save_mask(
+                artifact_path(directory, "reconstruction_extension_mask"),
+                write_crop,
+            )
+            _save_alpha(
+                artifact_path(directory, "reconstruction_write_alpha"),
+                extension_alpha,
+            )
+            _save_mask(
                 artifact_path(directory, "reconstruction_write_mask"),
                 crop_array(target.reconstruction_write_mask, roi),
             )
+            Image.fromarray(
+                composed_crop, mode="RGB"
+            ).save(artifact_path(directory, "composed_reconstruction"))
             _save_mask(
                 artifact_path(directory, "final_reconstruction_support"),
                 crop_array(target.reconstruction_support_mask, roi),
@@ -238,9 +395,11 @@ def refine_reconstruction_supports(
             ),
             alpha_candidate_pixels=int(np.count_nonzero(candidate)),
             protected_pixels_excluded=int(
-                np.count_nonzero(protected_crop)
+                np.count_nonzero(foreign_protection_crop)
             ),
             extension_pixels=int(np.count_nonzero(extension_full)),
+            max_extension_pixels=max_extension_area,
+            rejected_area_components=rejected_area_components,
             write_pixels=int(
                 np.count_nonzero(target.reconstruction_write_mask)
             ),
