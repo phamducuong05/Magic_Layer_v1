@@ -25,7 +25,7 @@ pipeline:
     replacement_domain_margin_pixels: 2
     # BiRefNet may accept generated foreground anywhere inside this expanded
     # amodal bounding box. Pixels outside it are blacked out before matting.
-    accepted_target_bbox_margin_pixels: 5
+    accepted_target_bbox_margin_pixels: 12
     foreign_protection_dilation_pixels: 1
     support_margin_pixels: 8
     # BiRefNet reconstruction-support refinement. The low threshold creates
@@ -56,7 +56,7 @@ pipeline:
   matting:
     context_ratio: 0.025
     support_dilation_pixels: 2
-    final_alpha_threshold: 0.03
+    final_alpha_threshold: 0.05
     final_min_component_area_pixels: 4
   diagnostics:
     enabled: true
@@ -101,10 +101,19 @@ models:
         use_sam_mask: false
         prompt_suffix: "high resolution, crisp edges, consistent colors"
   background_inpainting:
-    active: lama
+    active: original_lama
     lama:
       # SimpleLama tự động quản lý trọng số
       dummy: true
+      generation_mask_expansion: 21
+      composition_mask_expansion: 15
+      feather_radius: 2.0
+    original_lama:
+      source_root: "lama"
+      checkpoint_config_path: "backend/models/background_inpainting/original_lama/checkpoints/config.yaml"
+      generator_weights_path: "backend/models/background_inpainting/original_lama/checkpoints/generator_state.pt"
+      legacy_checkpoint_path: "backend/models/background_inpainting/original_lama/checkpoints/best.ckpt"
+      pad_out_to_modulo: 8
       generation_mask_expansion: 21
       composition_mask_expansion: 15
       feather_radius: 2.0

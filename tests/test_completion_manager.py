@@ -17,11 +17,11 @@ sys.modules["backend.models"] = models_package
 for category, adapter_names in {
     "segmentation": ["sam3"],
     "matting": ["birefnet"],
-    "background_inpainting": ["lama", "sdxl"],
+    "background_inpainting": [],
 }.items():
     package_name = f"backend.models.{category}"
     package = types.ModuleType(package_name)
-    package.__path__ = []
+    package.__path__ = [str(MODELS_PATH / category)]
     sys.modules[package_name] = package
     for adapter_name in adapter_names:
         module_name = f"{package_name}.{adapter_name}"
@@ -290,8 +290,10 @@ def test_inpainting_configuration_has_two_isolated_categories():
     assert "inpainting" not in models
     assert models["object_reconstruction"]["active"] == "hd_painter"
     assert "hd_painter" in models["object_reconstruction"]
-    assert models["background_inpainting"]["active"] == "lama"
-    assert {"lama", "sdxl"} <= set(models["background_inpainting"])
+    assert models["background_inpainting"]["active"] == "original_lama"
+    assert {"lama", "original_lama", "sdxl"} <= set(
+        models["background_inpainting"]
+    )
     assert runtime_config.has_active_model("object_reconstruction") is True
     assert runtime_config.has_active_model("background_inpainting") is True
 

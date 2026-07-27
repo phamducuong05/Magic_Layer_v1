@@ -11,6 +11,7 @@ torchvision>=0.20
 transformers>=4.46
 huggingface-hub>=0.26
 simple-lama-inpainting>=0.1.2
+kornia>=0.5
 # Optional for models.inpainting.active: sdxl
 diffusers>=0.31
 accelerate>=1.0

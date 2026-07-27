@@ -8,7 +8,12 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 import torch
-from PIL import Image, ImageFilter
+from PIL import Image
+
+from ..models.background_inpainting.common.masks import (
+    prepare_inpaint_masks as _prepare_inpaint_masks,
+    preserve_unmasked_pixels as _preserve_unmasked_pixels,
+)
 
 # Keep a small dilation margin to remove edge residue without regenerating a
 # large amount of surrounding background. This was previously 0.015.
@@ -19,62 +24,6 @@ def _image_to_base64(image: Image.Image, fmt: str = "PNG") -> str:
     buffer = io.BytesIO()
     image.save(buffer, format=fmt)
     return base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-def _preserve_unmasked_pixels(
-    original: Image.Image,
-    inpainted: Image.Image,
-    blend_mask: Image.Image,
-) -> Image.Image:
-    """Blend generated pixels near the mask and preserve distant source pixels."""
-    original = original.convert("RGB")
-    if inpainted.size != original.size:
-        inpainted = inpainted.resize(original.size, Image.Resampling.LANCZOS)
-    inpainted = inpainted.convert("RGB")
-
-    blend_mask = blend_mask.convert("L").resize(
-        original.size, Image.Resampling.BILINEAR
-    )
-    # Where blend mask is 255, use the inpainted image. Where it is 0, use the original image. 
-    # Where it is between 0 and 255, blend the two images.
-    return Image.composite(inpainted, original, blend_mask)
-
-
-def _prepare_inpaint_masks(
-    mask: Image.Image,
-    generation_expansion: int = 17,
-    composition_expansion: int = 11,
-    feather_radius: float = 2.0,
-) -> tuple[Image.Image, Image.Image]:
-    """Create a wide model mask and a smaller feathered composition mask.
-    The output of this function is used in lama.py and sdxl.py
-    """
-    if generation_expansion < composition_expansion:
-        raise ValueError("generation_expansion must cover composition_expansion")
-    if generation_expansion < 1 or generation_expansion % 2 == 0:
-        raise ValueError("generation_expansion must be a positive odd integer")
-    if composition_expansion < 1 or composition_expansion % 2 == 0:
-        raise ValueError("composition_expansion must be a positive odd integer")
-    if feather_radius < 0:
-        raise ValueError("feather_radius must be non-negative")
-
-    binary_mask = mask.convert("L").point(
-        lambda value: 255 if value > 127 else 0
-    )
-    # Generation masks are used to provide a large enough area for the model to
-    # generate new pixels. Composition masks are used to blend the generated
-    # pixels with the original image.
-    generation_mask = binary_mask.filter(
-        ImageFilter.MaxFilter(generation_expansion)
-    )
-    composition_core = binary_mask.filter(
-        ImageFilter.MaxFilter(composition_expansion)
-    )
-    # Blend mask to smooth edges
-    blend_mask = composition_core.filter(
-        ImageFilter.GaussianBlur(feather_radius)
-    )
-    return generation_mask, blend_mask
 
 
 def _bbox_from_mask(mask: np.ndarray) -> Tuple[int, int, int, int] | None:

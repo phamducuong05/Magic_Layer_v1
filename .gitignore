@@ -131,6 +131,11 @@ weights/
 checkpoints/
 backend/models/completion/checkpoints/
 backend/models/object_reconstruction/checkpoints/
+!backend/models/background_inpainting/original_lama/checkpoints/
+backend/models/background_inpainting/original_lama/checkpoints/*
+!backend/models/background_inpainting/original_lama/checkpoints/config.yaml
+backend/models/background_inpainting/original_lama/checkpoints/best.ckpt
+backend/models/background_inpainting/original_lama/checkpoints/generator_state.pt
 sam3_logs/
 backend/out/
 outputs/

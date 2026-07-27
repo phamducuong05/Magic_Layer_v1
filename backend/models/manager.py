@@ -16,7 +16,7 @@ from .base import (
 
 from .segmentation import sam3
 from .matting import birefnet
-from .background_inpainting import lama, sdxl
+from .background_inpainting import lama, original_lama, sdxl
 from .completion import adapter
 from .object_reconstruction import adapter as object_reconstruction_adapter
 
