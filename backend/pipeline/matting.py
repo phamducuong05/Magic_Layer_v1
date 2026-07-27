@@ -313,6 +313,7 @@ def refine_reconstruction_supports(
         extension_support = (
             accepted
             & ~modal_crop
+            & target_domain
             & accepted_bbox
             & valid_roi_crop
         )
@@ -331,6 +332,7 @@ def refine_reconstruction_supports(
             )
             extension_alpha *= feather_domain
         extension_alpha[modal_crop] = 0.0
+        extension_alpha[~target_domain] = 0.0
         extension_alpha[~accepted_bbox] = 0.0
         extension_alpha[~valid_roi_crop] = 0.0
         write_crop = extension_alpha > alpha_write_epsilon
