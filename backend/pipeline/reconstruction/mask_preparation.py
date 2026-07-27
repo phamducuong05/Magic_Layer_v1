@@ -221,6 +221,7 @@ def build_reconstruction_masks(
     foreign_modal_dilation_pixels: int = 0,
     foreign_modal_closing_pixels: int = 0,
     replacement_domain_margin_pixels: int = 0,
+    accepted_target_bbox_margin_pixels: int = 0,
     foreign_protection_dilation_pixels: int = 0,
     support_margin_pixels: int | None = None,
     composition_margin_pixels: int | None = None,
@@ -234,6 +235,7 @@ def build_reconstruction_masks(
         foreign_modal_dilation_pixels,
         foreign_modal_closing_pixels,
         replacement_domain_margin_pixels,
+        accepted_target_bbox_margin_pixels,
         foreign_protection_dilation_pixels,
     ):
         if value < 0:
@@ -254,6 +256,7 @@ def build_reconstruction_masks(
         detected.reconstruction_occluder_mask = None
         detected.reconstruction_input_roi = None
         detected.reconstruction_target_bbox_mask = None
+        detected.reconstruction_accepted_target_bbox = None
         detected.reconstruction_foreign_modal_inside_bbox = None
         detected.reconstruction_foreign_modal_outside_bbox = None
         detected.reconstruction_replacement_domain_mask = None
@@ -337,6 +340,11 @@ def build_reconstruction_masks(
         roi_mask = _mask_inside_roi(composition_mask.shape, roi)
         target_modal = detected.modal_mask > 0
         target_bbox_mask = _bbox_mask(detected.amodal_mask > 0)
+        accepted_target_bbox = _close_and_dilate_mask(
+            target_bbox_mask,
+            closing_pixels=0,
+            dilation_pixels=accepted_target_bbox_margin_pixels,
+        )
         foreign_modal = np.zeros_like(target_modal)
         for other in objects:
             if other.object_id != detected.object_id:
@@ -416,6 +424,7 @@ def build_reconstruction_masks(
         detected.reconstruction_occluder_mask = assigned_occluder
         detected.reconstruction_input_roi = roi
         detected.reconstruction_target_bbox_mask = target_bbox_mask
+        detected.reconstruction_accepted_target_bbox = accepted_target_bbox
         detected.reconstruction_foreign_modal_inside_bbox = (
             foreign_inside_bbox
         )
@@ -485,6 +494,7 @@ def prepare_raw_reconstruction_masks(
     foreign_modal_dilation_pixels: int = 0,
     foreign_modal_closing_pixels: int = 0,
     replacement_domain_margin_pixels: int = 0,
+    accepted_target_bbox_margin_pixels: int = 0,
     foreign_protection_dilation_pixels: int = 0,
     support_margin_pixels: int | None = None,
     composition_margin_pixels: int | None = None,
@@ -575,6 +585,9 @@ def prepare_raw_reconstruction_masks(
         foreign_modal_dilation_pixels=foreign_modal_dilation_pixels,
         foreign_modal_closing_pixels=foreign_modal_closing_pixels,
         replacement_domain_margin_pixels=replacement_domain_margin_pixels,
+        accepted_target_bbox_margin_pixels=(
+            accepted_target_bbox_margin_pixels
+        ),
         foreign_protection_dilation_pixels=(
             foreign_protection_dilation_pixels
         ),

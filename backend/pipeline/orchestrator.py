@@ -368,6 +368,11 @@ def process_image(
                         "replacement_domain_margin_pixels", 2
                     )
                 ),
+                accepted_target_bbox_margin_pixels=int(
+                    reconstruction_config.get(
+                        "accepted_target_bbox_margin_pixels", 4
+                    )
+                ),
                 foreign_protection_dilation_pixels=int(
                     reconstruction_config.get(
                         "foreign_protection_dilation_pixels", 1

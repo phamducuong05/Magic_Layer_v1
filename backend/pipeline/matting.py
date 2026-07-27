@@ -175,9 +175,35 @@ def refine_reconstruction_supports(
             )
             continue
 
+        source_crop = np.asarray(crop_image(source, roi), dtype=np.uint8)
+        raw_reconstructed_crop = np.asarray(
+            raw_canvas.convert("RGB"), dtype=np.uint8
+        )
+        modal_crop = crop_array(modal, roi).astype(bool)
+        valid_roi_crop = crop_array(
+            np.ones_like(modal, dtype=bool), roi
+        ).astype(bool)
+        if target.reconstruction_accepted_target_bbox is not None:
+            accepted_bbox = crop_array(
+                target.reconstruction_accepted_target_bbox.astype(bool),
+                roi,
+            ).astype(bool)
+        elif target.reconstruction_accepted_rgb_mask is not None:
+            accepted_bbox = crop_array(
+                target.reconstruction_accepted_rgb_mask.astype(bool),
+                roi,
+            ).astype(bool)
+        else:
+            accepted_bbox = valid_roi_crop.copy()
+        accepted_bbox &= valid_roi_crop
+
+        masked_input = np.zeros_like(raw_reconstructed_crop)
+        masked_input[accepted_bbox] = raw_reconstructed_crop[accepted_bbox]
+
         try:
             alpha_crop = _resize_alpha(
-                matte(raw_canvas.convert("RGB")), roi.size
+                matte(Image.fromarray(masked_input, mode="RGB")),
+                roi.size,
             )
         except Exception as exc:
             logger.warning(
@@ -202,14 +228,6 @@ def refine_reconstruction_supports(
                 target.reconstruction_support_mask = modal.copy()
             continue
 
-        source_crop = np.asarray(crop_image(source, roi), dtype=np.uint8)
-        raw_reconstructed_crop = np.asarray(
-            raw_canvas.convert("RGB"), dtype=np.uint8
-        )
-        modal_crop = crop_array(modal, roi).astype(bool)
-        valid_roi_crop = crop_array(
-            np.ones_like(modal, dtype=bool), roi
-        ).astype(bool)
         if target.reconstruction_foreign_protection_mask is not None:
             foreign_protection = (
                 target.reconstruction_foreign_protection_mask.astype(bool)
@@ -233,6 +251,7 @@ def refine_reconstruction_supports(
             crop_array(generation_mask, roi).astype(bool),
             generation_evidence_margin_pixels,
         )
+        target_domain = generation_evidence | modal_crop
 
         connection_anchor = _dilate_mask(
             modal_crop, connection_margin_pixels
@@ -241,7 +260,7 @@ def refine_reconstruction_supports(
         candidate = (
             (alpha_crop >= alpha_low_threshold)
             & valid_roi_crop
-            & ~foreign_protection_crop
+            & accepted_bbox
         )
         strong_foreground = alpha_crop >= alpha_high_threshold
         change_distance = np.mean(
@@ -271,6 +290,8 @@ def refine_reconstruction_supports(
             extension_area = int(np.count_nonzero(extension_part))
             if component_area < min_component_area_pixels:
                 continue
+            if not np.any(component & target_domain):
+                continue
             if not np.any(component & connection_anchor):
                 continue
             if not np.any(component & strong_foreground):
@@ -290,7 +311,7 @@ def refine_reconstruction_supports(
         extension_support = (
             accepted
             & ~modal_crop
-            & ~foreign_protection_crop
+            & accepted_bbox
             & valid_roi_crop
         )
         extension_alpha = (
@@ -308,7 +329,7 @@ def refine_reconstruction_supports(
             )
             extension_alpha *= feather_domain
         extension_alpha[modal_crop] = 0.0
-        extension_alpha[foreign_protection_crop] = 0.0
+        extension_alpha[~accepted_bbox] = 0.0
         extension_alpha[~valid_roi_crop] = 0.0
         write_crop = extension_alpha > alpha_write_epsilon
 
@@ -336,6 +357,9 @@ def refine_reconstruction_supports(
         if diagnostics_directory is not None:
             directory = _reconstruction_artifact_directory(
                 diagnostics_directory, target.object_id
+            )
+            Image.fromarray(masked_input, mode="RGB").save(
+                artifact_path(directory, "birefnet_masked_input")
             )
             _save_alpha(
                 artifact_path(directory, "raw_birefnet_alpha"),

@@ -49,6 +49,10 @@ def test_reconstruction_birefnet_uses_raw_output_and_soft_extension_alpha(
         shape, dtype=bool
     )
     target.reconstruction_foreign_protection_mask[3:5, 6] = True
+    target.reconstruction_accepted_target_bbox = np.zeros(
+        shape, dtype=bool
+    )
+    target.reconstruction_accepted_target_bbox[2:6, :7] = True
     target.reconstruction_roi = SquareROI(0, 0, 8, 8, 8)
     target.occluder_ids = {"camera"}
 
@@ -90,18 +94,21 @@ def test_reconstruction_birefnet_uses_raw_output_and_soft_extension_alpha(
         diagnostics_directory=tmp_path,
     )
 
-    assert np.array_equal(matte_inputs[0], raw_reconstructed)
+    expected_matte_input = np.zeros_like(raw_reconstructed)
+    expected_matte_input[2:6, :7] = raw_reconstructed[2:6, :7]
+    assert np.array_equal(matte_inputs[0], expected_matte_input)
     assert target.reconstruction_extension_mask is not None
     # The original reconstruction core remains writable below the occluder.
     assert np.all(target.reconstruction_write_mask[3:5, 3])
     # Accepted foreground can extend beyond the old generation/amodal masks.
     assert np.all(target.reconstruction_extension_mask[3:5, 4])
     assert np.all(target.reconstruction_extension_mask[3:5, 5])
-    # Protected modal pixels outside the target bbox remain excluded.
-    assert not np.any(target.reconstruction_extension_mask[3:5, 6])
+    # Jagged foreign protection no longer clips valid generated foreground
+    # inside the accepted target bbox.
+    assert np.all(target.reconstruction_extension_mask[3:5, 6])
     assert np.all(target.reconstruction_write_mask[3:5, 4])
     assert np.all(target.reconstruction_write_mask[3:5, 5])
-    assert not np.any(target.reconstruction_write_mask[3:5, 6])
+    assert np.all(target.reconstruction_write_mask[3:5, 6])
     assert np.all(target.reconstruction_support_mask[3:5, 5])
     assert np.all(target.reconstruction_support_mask[target_modal])
     assert np.allclose(
@@ -112,19 +119,63 @@ def test_reconstruction_birefnet_uses_raw_output_and_soft_extension_alpha(
         np.asarray(target.reconstruction_canvas), raw_reconstructed
     )
     assert sorted(path.name for path in (tmp_path / "person").iterdir()) == [
-        "29_raw_birefnet_alpha.png",
-        "30_target_connection_anchor.png",
-        "31_birefnet_candidate.png",
-        "32_changed_by_model.png",
-        "33_generation_evidence.png",
-        "34_accepted_target_component.png",
-        "35_reconstruction_extension_alpha.png",
-        "36_reconstruction_extension_mask.png",
-        "37_reconstruction_write_alpha.png",
-        "38_reconstruction_write_mask.png",
-        "39_composed_reconstruction.png",
-        "40_final_reconstruction_support.png",
+        "30_birefnet_masked_input.png",
+        "31_raw_birefnet_alpha.png",
+        "32_target_connection_anchor.png",
+        "33_birefnet_candidate.png",
+        "34_changed_by_model.png",
+        "35_generation_evidence.png",
+        "36_accepted_target_component.png",
+        "37_reconstruction_extension_alpha.png",
+        "38_reconstruction_extension_mask.png",
+        "39_reconstruction_write_alpha.png",
+        "40_reconstruction_write_mask.png",
+        "41_composed_reconstruction.png",
+        "42_final_reconstruction_support.png",
     ]
+
+
+def test_reconstruction_support_rejects_component_outside_target_domain():
+    from backend.pipeline import matting
+
+    shape = (8, 8)
+    target_modal = np.zeros(shape, dtype=bool)
+    target_modal[3:5, 1:3] = True
+    target = _object("person", target_modal, semantic_class="person")
+    target.reconstruction_mask = np.zeros(shape, dtype=bool)
+    target.reconstruction_mask[3:5, 3] = True
+    target.reconstruction_generation_mask = np.zeros(shape, dtype=bool)
+    target.reconstruction_generation_mask[3:5, 3:5] = True
+    target.reconstruction_accepted_target_bbox = np.ones(shape, dtype=bool)
+    target.reconstruction_roi = SquareROI(0, 0, 8, 8, 8)
+
+    source = np.full((*shape, 3), 255, dtype=np.uint8)
+    reconstructed = source.copy()
+    reconstructed[3:5, 3:5] = 0
+    reconstructed[1, 2:4] = 0
+    target.raw_reconstruction_canvas = Image.fromarray(
+        reconstructed, mode="RGB"
+    )
+    target.reconstruction_canvas = Image.fromarray(source, mode="RGB")
+
+    alpha = torch.zeros(shape, dtype=torch.float32)
+    alpha[3:5, 1:5] = 0.95
+    alpha[1, 2:4] = 0.95
+
+    matting.refine_reconstruction_supports(
+        Image.fromarray(source, mode="RGB"),
+        [target],
+        lambda _image: alpha,
+        alpha_low_threshold=0.2,
+        alpha_high_threshold=0.7,
+        change_threshold=8.0,
+        connection_margin_pixels=2,
+        max_extension_area_ratio=2.0,
+        require_generation_evidence=False,
+    )
+
+    assert target.reconstruction_extension_mask[3, 3]
+    assert not np.any(target.reconstruction_extension_mask[1, 2:4])
 
 
 def test_reconstruction_support_rejects_disconnected_alpha_component():

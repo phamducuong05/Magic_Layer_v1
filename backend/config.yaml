@@ -13,8 +13,8 @@ pipeline:
   object_reconstruction:
     # A tighter crop reduces foreground-occluder distraction for HD-Painter.
     context_ratio: 0.025
-    generation_mask_dilation_pixels: 2
-    generation_mask_closing_pixels: 1
+    generation_mask_dilation_pixels: 3
+    generation_mask_closing_pixels: 3
     # Fill small enclosed holes on each foreign object before their modal masks
     # are merged, then close/dilate only the outside-bbox protection mask.
     foreign_modal_max_hole_area_pixels: 64
@@ -23,6 +23,9 @@ pipeline:
     # Only confirmed occluder pixels inside the expanded target domain may be
     # replaced. Other foreign pixels remain protected.
     replacement_domain_margin_pixels: 2
+    # BiRefNet may accept generated foreground anywhere inside this expanded
+    # amodal bounding box. Pixels outside it are blacked out before matting.
+    accepted_target_bbox_margin_pixels: 4
     foreign_protection_dilation_pixels: 1
     support_margin_pixels: 8
     # BiRefNet reconstruction-support refinement. The low threshold creates

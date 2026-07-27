@@ -229,6 +229,9 @@ def reconstruct_objects(
                 target_bbox_mask = (
                     detected.reconstruction_target_bbox_mask
                 )
+                accepted_target_bbox = (
+                    detected.reconstruction_accepted_target_bbox
+                )
                 completed_amodal = (
                     crop_array(detected.amodal_mask.astype(bool), roi)
                     if detected.amodal_mask is not None
@@ -293,6 +296,12 @@ def reconstruct_objects(
                 _save_mask(
                     artifact_path(directory, "target_bbox_mask"),
                     diagnostic_bbox,
+                )
+                _save_mask(
+                    artifact_path(directory, "accepted_target_bbox"),
+                    crop_array(accepted_target_bbox.astype(bool), roi)
+                    if accepted_target_bbox is not None
+                    else diagnostic_bbox,
                 )
                 _save_mask(
                     artifact_path(directory, "target_modal_protected"),

@@ -946,6 +946,33 @@ def test_foreign_modal_outside_bbox_applies_closing_and_dilation():
     assert not np.any(outside[target.reconstruction_target_bbox_mask])
 
 
+def test_accepted_target_bbox_expands_amodal_bbox_by_configured_margin():
+    target = _detected_object("target", "person", (5, 5, 4, 4))
+    occluder = _detected_object("book", "book", (8, 6, 2, 2))
+    target.amodal_mask = target.modal_mask > 0
+    target.amodal_mask[6:8, 9] = True
+    target.completion_hole_mask = np.zeros_like(
+        target.modal_mask, dtype=bool
+    )
+    target.completion_hole_mask[6:8, 8:10] = True
+    target.occluder_ids = {"book"}
+
+    reconstruction_stage.build_reconstruction_masks(
+        [target, occluder],
+        (3, 3),
+        accepted_target_bbox_margin_pixels=2,
+        composition_margin_pixels=0,
+        context_ratio=0.5,
+    )
+
+    expected = np.zeros_like(target.modal_mask, dtype=bool)
+    expected[3:11, 3:12] = True
+    assert np.array_equal(
+        target.reconstruction_accepted_target_bbox,
+        expected,
+    )
+
+
 def test_prepare_raw_reconstruction_masks_aggregates_pairwise_occluders_once():
     hidden = _detected_object("hidden", "person", (4, 4, 4, 4))
     chair = _detected_object("chair", "chair", (5, 5, 4, 4))
@@ -1114,12 +1141,15 @@ def test_object_reconstruction_context_ratio_is_configured():
     )
     assert reconstruction_config["context_ratio"] == 0.025
     assert reconstruction_config["blend_allowance_ratio"] == 0.012
-    assert reconstruction_config["generation_mask_dilation_pixels"] == 2
-    assert reconstruction_config["generation_mask_closing_pixels"] == 1
+    assert reconstruction_config["generation_mask_dilation_pixels"] == 3
+    assert reconstruction_config["generation_mask_closing_pixels"] == 3
     assert reconstruction_config["foreign_modal_max_hole_area_pixels"] == 64
     assert reconstruction_config["foreign_modal_dilation_pixels"] == 2
     assert reconstruction_config["foreign_modal_closing_pixels"] == 1
     assert reconstruction_config["replacement_domain_margin_pixels"] == 2
+    assert (
+        reconstruction_config["accepted_target_bbox_margin_pixels"] == 4
+    )
     assert reconstruction_config["foreign_protection_dilation_pixels"] == 1
     assert reconstruction_config["support_margin_pixels"] == 8
     assert reconstruction_config["support_alpha_low_threshold"] == 0.35

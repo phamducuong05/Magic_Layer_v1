@@ -58,6 +58,7 @@ class DetectedObject:
     reconstruction_occluder_mask: Optional[np.ndarray] = None
     reconstruction_input_roi: Optional[SquareROI] = None
     reconstruction_target_bbox_mask: Optional[np.ndarray] = None
+    reconstruction_accepted_target_bbox: Optional[np.ndarray] = None
     reconstruction_foreign_modal_inside_bbox: Optional[np.ndarray] = None
     reconstruction_foreign_modal_outside_bbox: Optional[np.ndarray] = None
     reconstruction_replacement_domain_mask: Optional[np.ndarray] = None
