@@ -160,6 +160,7 @@ def refine_reconstruction_supports(
         ):
             if not fallback_to_validated_output:
                 target.reconstruction_canvas = None
+                target.reconstruction_roi = None
                 target.reconstruction_write_alpha = np.zeros_like(
                     modal, dtype=np.float64
                 )
@@ -221,6 +222,7 @@ def refine_reconstruction_supports(
             )
             if not fallback_to_validated_output:
                 target.reconstruction_canvas = None
+                target.reconstruction_roi = None
                 target.reconstruction_write_alpha = np.zeros_like(
                     modal, dtype=np.float64
                 )
@@ -352,7 +354,11 @@ def refine_reconstruction_supports(
             # Group composition performs the soft-alpha blend exactly once.
             target.reconstruction_canvas = raw_canvas.convert("RGB")
         else:
-            target.reconstruction_canvas = None
+            if fallback_to_validated_output and target.reconstruction_canvas is not None:
+                pass  # Giữ nguyên validated canvas đã lưu trước đó
+            else:
+                target.reconstruction_canvas = None
+                target.reconstruction_roi = None
 
         if diagnostics_directory is not None:
             directory = _reconstruction_artifact_directory(

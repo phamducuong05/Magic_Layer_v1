@@ -255,7 +255,7 @@ def compose_group_sources(
                     else None
                 )
             )
-            if canvas is None and member_roi is None:
+            if canvas is None:
                 log_event(
                     logger,
                     "group_composition",
@@ -267,8 +267,7 @@ def compose_group_sources(
                 )
                 continue
             if (
-                canvas is None
-                or member_roi is None
+                member_roi is None
                 or reconstruction_mask is None
                 or write_mask is None
                 or write_alpha is None

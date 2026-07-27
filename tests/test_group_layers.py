@@ -136,3 +136,55 @@ def test_fallback_group_layer_uses_modal_support_not_unrendered_amodal_hole(
     assert not captured["hard_mask"][5, 5]
     inpaint.assert_called_once()
     assert inpaint.call_args.args[0] is group.matting_source
+
+
+def test_layer_cleanup_removes_weak_fringe_and_tiny_unanchored_component(
+    monkeypatch,
+):
+    from backend.pipeline import layers as layer_stage
+
+    group = _group(reconstructed=False)
+    encoded = []
+
+    monkeypatch.setattr(
+        layer_stage,
+        "build_inpaint_mask",
+        Mock(side_effect=lambda _source, hard_mask, _kernel: hard_mask),
+    )
+    monkeypatch.setattr(
+        layer_stage,
+        "refine_background",
+        Mock(side_effect=lambda background, *_args, **_kwargs: background),
+    )
+
+    def refine(source, _background, alpha, *_args):
+        refined = np.zeros_like(alpha)
+        refined[2:4, 2:4] = 0.8  # Main component, anchored to support.
+        refined[2, 4] = 0.02  # Attached weak fringe.
+        refined[0, 5] = 0.8  # Detached one-pixel artifact.
+        return refined, source
+
+    monkeypatch.setattr(layer_stage, "refine_alpha_with_colors", refine)
+    monkeypatch.setattr(
+        layer_stage,
+        "_image_to_base64",
+        Mock(side_effect=lambda image: encoded.append(image.copy()) or "rgba"),
+    )
+
+    result = layer_stage.extract_object_layers(
+        [group],
+        (1, 1),
+        Mock(return_value=Image.new("RGB", (6, 6), "black")),
+        final_alpha_threshold=0.03,
+        final_min_component_area_pixels=4,
+    )
+
+    assert len(result) == 1
+    assert (result[0].x, result[0].y, result[0].width, result[0].height) == (
+        4,
+        4,
+        2,
+        2,
+    )
+    assert encoded[0].size == (2, 2)
+    assert np.all(np.asarray(encoded[0])[..., 3] == 204)

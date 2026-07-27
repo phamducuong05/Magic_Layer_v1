@@ -644,7 +644,17 @@ def process_image(
             logger, "layer_extraction", group_count=len(final_groups)
         ):
             layers = extract_object_layers(
-                final_groups, kernel_size, background_inpaint
+                final_groups,
+                kernel_size,
+                background_inpaint,
+                final_alpha_threshold=float(
+                    matting_config.get("final_alpha_threshold", 0.03)
+                ),
+                final_min_component_area_pixels=int(
+                    matting_config.get(
+                        "final_min_component_area_pixels", 4
+                    )
+                ),
             )
             log_event(
                 logger,

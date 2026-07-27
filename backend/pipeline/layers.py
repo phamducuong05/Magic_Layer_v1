@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Sequence
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -19,12 +20,51 @@ BG_REFINE_NUM_COLORS = 10
 BG_REFINE_OUTER_RATIO = 0.2
 
 
+def _clean_final_alpha(
+    alpha: np.ndarray,
+    support: np.ndarray,
+    *,
+    threshold: float,
+    min_component_area_pixels: int,
+) -> np.ndarray:
+    """Remove weak alpha fringe and tiny components detached from support."""
+    cleaned = np.clip(alpha.astype(np.float64), 0.0, 1.0)
+    cleaned[cleaned < threshold] = 0.0
+    if min_component_area_pixels <= 0 or not np.any(cleaned):
+        return cleaned
+
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (cleaned > 0.0).astype(np.uint8),
+        connectivity=8,
+    )
+    for label in range(1, component_count):
+        component = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_component_area_pixels and not np.any(
+            component & support
+        ):
+            cleaned[component] = 0.0
+    return cleaned
+
+
 def extract_object_layers(
     objects: Sequence[GroupedObject],
     kernel_size: tuple[int, int],
     background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
+    *,
+    final_alpha_threshold: float = THRESHOLD_ALPHA,
+    final_min_component_area_pixels: int = 0,
 ) -> list[ObjectLayer]:
     """Render final groups from their exact matting RGB source and ROI."""
+    if not np.isfinite(final_alpha_threshold) or not (
+        0.0 <= final_alpha_threshold <= 1.0
+    ):
+        raise ValueError("final alpha threshold must be in [0, 1]")
+    if final_min_component_area_pixels < 0:
+        raise ValueError(
+            "final minimum component area must be non-negative"
+        )
+
     layers: list[ObjectLayer] = []
 
     for group in objects:
@@ -115,7 +155,14 @@ def extract_object_layers(
             hard_mask,
             kernel_size,
         )
-        refined_alpha = np.clip(refined_alpha, 0.0, 1.0)
+        refined_alpha = _clean_final_alpha(
+            refined_alpha,
+            support_crop,
+            threshold=final_alpha_threshold,
+            min_component_area_pixels=(
+                final_min_component_area_pixels
+            ),
+        )
 
         real_pixels = np.zeros((roi.size, roi.size), dtype=bool)
         left, top, right, bottom = roi.inner_box

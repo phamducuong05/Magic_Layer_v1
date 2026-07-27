@@ -1148,11 +1148,11 @@ def test_object_reconstruction_context_ratio_is_configured():
     assert reconstruction_config["foreign_modal_closing_pixels"] == 1
     assert reconstruction_config["replacement_domain_margin_pixels"] == 2
     assert (
-        reconstruction_config["accepted_target_bbox_margin_pixels"] == 4
+        reconstruction_config["accepted_target_bbox_margin_pixels"] == 5
     )
     assert reconstruction_config["foreign_protection_dilation_pixels"] == 1
     assert reconstruction_config["support_margin_pixels"] == 8
-    assert reconstruction_config["support_alpha_low_threshold"] == 0.35
+    assert reconstruction_config["support_alpha_low_threshold"] == 0.45
     assert reconstruction_config["support_alpha_high_threshold"] == 0.7
     assert reconstruction_config["support_change_threshold"] == 8.0
     assert reconstruction_config["support_connection_margin_pixels"] == 4
@@ -1163,6 +1163,9 @@ def test_object_reconstruction_context_ratio_is_configured():
         == 2
     )
     assert reconstruction_config["support_require_generation_evidence"] is True
+    matting_config = config.get_pipeline_config("matting")
+    assert matting_config["final_alpha_threshold"] == 0.03
+    assert matting_config["final_min_component_area_pixels"] == 4
     assert reconstruction_config["support_alpha_write_epsilon"] == 0.01
     assert reconstruction_config["support_alpha_feather_pixels"] == 0
     assert (

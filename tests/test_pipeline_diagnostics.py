@@ -188,7 +188,11 @@ def test_process_image_returns_step34_diagnostics(monkeypatch):
     )
     monkeypatch.setattr(orchestrator, "refine_objects", Mock())
 
-    def extract_layers(groups, _kernel, inpaint):
+    def extract_layers(groups, _kernel, inpaint, **kwargs):
+        assert kwargs == {
+            "final_alpha_threshold": 0.03,
+            "final_min_component_area_pixels": 4,
+        }
         inpaint(Image.new("RGB", (2, 2)), Image.new("L", (2, 2)))
         return []
 

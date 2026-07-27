@@ -25,13 +25,13 @@ pipeline:
     replacement_domain_margin_pixels: 2
     # BiRefNet may accept generated foreground anywhere inside this expanded
     # amodal bounding box. Pixels outside it are blacked out before matting.
-    accepted_target_bbox_margin_pixels: 4
+    accepted_target_bbox_margin_pixels: 5
     foreign_protection_dilation_pixels: 1
     support_margin_pixels: 8
     # BiRefNet reconstruction-support refinement. The low threshold creates
     # candidate foreground; accepted components must also contain strong alpha,
     # changed HD-Painter RGB, and connect to the visible target.
-    support_alpha_low_threshold: 0.35
+    support_alpha_low_threshold: 0.45
     support_alpha_high_threshold: 0.7
     support_change_threshold: 8.0
     support_connection_margin_pixels: 4
@@ -56,6 +56,8 @@ pipeline:
   matting:
     context_ratio: 0.025
     support_dilation_pixels: 2
+    final_alpha_threshold: 0.03
+    final_min_component_area_pixels: 4
   diagnostics:
     enabled: true
     log_summary: true

@@ -348,7 +348,7 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
     def refine_support(_image, supplied, _matte, **kwargs):
         assert supplied == objects
         assert kwargs == {
-            "alpha_low_threshold": 0.35,
+            "alpha_low_threshold": 0.45,
             "alpha_high_threshold": 0.7,
             "change_threshold": 8.0,
             "connection_margin_pixels": 4,
@@ -408,8 +408,12 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         Mock(side_effect=matte),
     )
 
-    def layers(supplied, _kernel_size, _background_inpaint):
+    def layers(supplied, _kernel_size, _background_inpaint, **kwargs):
         assert supplied == final_groups
+        assert kwargs == {
+            "final_alpha_threshold": 0.03,
+            "final_min_component_area_pixels": 4,
+        }
         events.append("layers")
         return []
 
