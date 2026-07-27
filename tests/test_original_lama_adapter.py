@@ -78,6 +78,47 @@ def test_original_lama_adapter_uses_generation_mask_and_preserves_outside(
     assert np.all(result_array[0, 0] == 255)
 
 
+def test_original_lama_adapter_reports_raw_and_composed_artifacts(monkeypatch):
+    from backend.models.background_inpainting.original_lama import adapter
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def inpaint(self, image, mask):
+            return Image.new("RGB", image.size, (10, 20, 30))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(adapter, "OriginalLamaRuntime", FakeRuntime)
+    model = adapter.OriginalLamaBackgroundInpaintingModel(
+        config=_config(),
+        device="cpu",
+    )
+    source = Image.new("RGB", (7, 7), (200, 210, 220))
+    mask = np.zeros((7, 7), dtype=np.uint8)
+    mask[3, 3] = 255
+    artifacts = []
+
+    result = model.process(
+        source,
+        Image.fromarray(mask, mode="L"),
+        artifact_callback=lambda stage, image: artifacts.append(
+            (stage, image.copy())
+        ),
+    )
+
+    assert [stage for stage, _ in artifacts] == [
+        "after_lama",
+        "after_composition_blend",
+    ]
+    assert np.all(np.asarray(artifacts[0][1]) == (10, 20, 30))
+    assert np.all(np.asarray(artifacts[1][1])[0, 0] == (200, 210, 220))
+    assert np.all(np.asarray(artifacts[1][1])[3, 3] == (10, 20, 30))
+    assert np.array_equal(np.asarray(result), np.asarray(artifacts[1][1]))
+
+
 def test_original_lama_adapter_closes_runtime_before_base_cleanup(monkeypatch):
     from backend.models.background_inpainting.original_lama import adapter
 

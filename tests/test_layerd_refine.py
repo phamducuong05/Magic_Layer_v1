@@ -1,6 +1,30 @@
 import numpy as np
 
-from backend.core.layerd_refine import refine_with_reference_mask
+from backend.core.helpers import _calc_kernel_size
+from backend.core.layerd_refine import (
+    expand_mask,
+    normalize_morphology_kernel,
+    refine_with_reference_mask,
+)
+
+
+def test_even_morphology_kernel_is_centered_without_growing():
+    assert normalize_morphology_kernel((4, 6)) == (3, 5)
+
+    mask = np.zeros((9, 11), dtype=bool)
+    mask[4, 5] = True
+    expanded = expand_mask(mask, (4, 6))
+
+    expected = np.zeros_like(mask)
+    expected[3:6, 3:8] = True
+    assert np.array_equal(expanded, expected)
+
+
+def test_dynamic_kernel_size_is_always_positive_and_odd():
+    image = np.zeros((100, 160, 3), dtype=np.uint8)
+
+    assert _calc_kernel_size(image, 0.04) == (3, 5)
+    assert _calc_kernel_size(image, 0.001) == (1, 1)
 
 
 def test_reference_mask_refiner_changes_only_edit_pixels():

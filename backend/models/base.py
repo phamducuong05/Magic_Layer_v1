@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Dict, List
 
 import numpy as np
@@ -41,6 +41,8 @@ class BaseBackgroundInpaintingModel(BaseModel):
         image: Image.Image,
         mask: Image.Image,
         prompt: str = "",
+        *,
+        artifact_callback: Callable[[str, Image.Image], None] | None = None,
     ) -> Image.Image:
         pass
 

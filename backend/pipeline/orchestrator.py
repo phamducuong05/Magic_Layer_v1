@@ -91,6 +91,19 @@ def _get_diagnostics_config() -> dict[str, bool]:
     return defaults
 
 
+def _get_background_inpainting_config() -> dict[str, Any]:
+    """Return defaults compatible with configurations predating artifacts."""
+    defaults: dict[str, Any] = {
+        "mask_dilation_scale": 0.00375,
+        "diagnostics_directory": None,
+    }
+    try:
+        defaults.update(config.get_pipeline_config("background_inpainting"))
+    except (KeyError, ValueError):
+        pass
+    return defaults
+
+
 def _mark_missing_reconstruction_model(objects: Sequence) -> None:
     """Record why eligible raw objects retained their modal RGB fallback."""
     for detected in objects:
@@ -266,6 +279,14 @@ def process_image(
         )
 
     kernel_size = _calc_kernel_size(image_np, 0.0075)
+    background_config = _get_background_inpainting_config()
+    background_kernel_size = _calc_kernel_size(
+        image_np,
+        float(background_config.get("mask_dilation_scale", 0.00375)),
+    )
+    background_diagnostics_directory = background_config.get(
+        "diagnostics_directory"
+    )
     with trace_stage(logger, "overlap_detection"):
         potential_overlap_pairs = link_overlap_partners(objects)
         log_event(
@@ -663,9 +684,23 @@ def process_image(
                 layer_count=len(layers),
             )
         with trace_stage(logger, "background_inpainting"):
-            background = generate_final_background(
-                image, final_groups, kernel_size, background_inpaint
-            )
+            if background_diagnostics_directory is None:
+                background = generate_final_background(
+                    image,
+                    final_groups,
+                    background_kernel_size,
+                    background_inpaint,
+                )
+            else:
+                background = generate_final_background(
+                    image,
+                    final_groups,
+                    background_kernel_size,
+                    background_inpaint,
+                    diagnostics_directory=(
+                        background_diagnostics_directory
+                    ),
+                )
     finally:
         background_inpaint = None
         background_model = None

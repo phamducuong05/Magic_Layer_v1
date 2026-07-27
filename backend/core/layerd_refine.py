@@ -4,13 +4,35 @@ from typing import Literal
 import cv2
 import numpy as np
 
+
+def normalize_morphology_kernel(
+    kernel_size: tuple[int, int] | int,
+) -> tuple[int, int]:
+    """Return positive odd kernel dimensions centered on the target pixel.
+
+    Even dimensions are rounded down instead of up so normalization never
+    expands a mask farther than the caller requested.
+    """
+    kernel_tuple = (
+        (kernel_size, kernel_size)
+        if isinstance(kernel_size, int)
+        else kernel_size
+    )
+
+    def normalize_dimension(value: int) -> int:
+        value = max(1, int(value))
+        return value if value % 2 else value - 1
+
+    return tuple(normalize_dimension(value) for value in kernel_tuple)
+
+
 def expand_mask(mask: np.ndarray, kernel_size: tuple[int, int] | int = (5, 5)) -> np.ndarray:
     """Expand mask using dilation.
     If mask is bool, return bool mask; if uint8, return uint8 mask.
     """
     is_bool = mask.dtype == bool
     mask = mask.astype(np.uint8)
-    kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+    kernel_size = normalize_morphology_kernel(kernel_size)
     mask = cv2.dilate(mask, np.ones(kernel_size, np.uint8))
     return mask > 0 if is_bool else mask
 
@@ -21,7 +43,7 @@ def shrink_mask(mask: np.ndarray, kernel_size: tuple[int, int] | int = (5, 5)) -
     """
     is_bool = mask.dtype == bool
     mask = mask.astype(np.uint8)
-    kernel_tuple = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+    kernel_tuple = normalize_morphology_kernel(kernel_size)
 
     # Add padding to avoid border effects
     pad_h, pad_w = kernel_tuple[0] // 2, kernel_tuple[1] // 2

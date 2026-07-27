@@ -62,6 +62,11 @@ pipeline:
     enabled: true
     log_summary: true
     track_peak_gpu_memory: true
+  background_inpainting:
+    # Use a smaller, centered dilation than foreground-layer extraction.
+    mask_dilation_scale: 0.00375
+    # Save ordered final-background checkpoints for visual diagnosis.
+    diagnostics_directory: outputs/background_debug
 models:
   matting:
     active: birefnet
@@ -114,8 +119,8 @@ models:
       generator_weights_path: "backend/models/background_inpainting/original_lama/checkpoints/generator_state.pt"
       legacy_checkpoint_path: "backend/models/background_inpainting/original_lama/checkpoints/best.ckpt"
       pad_out_to_modulo: 8
-      generation_mask_expansion: 21
-      composition_mask_expansion: 15
+      generation_mask_expansion: 11
+      composition_mask_expansion: 7
       feather_radius: 2.0
     sdxl:
       model_id: "runwayml/stable-diffusion-inpainting"

@@ -1295,6 +1295,49 @@ def test_generate_final_background_unions_masks(monkeypatch, rgb_image):
     refine.assert_called_once()
 
 
+def test_background_diagnostics_save_lama_composition_and_palette_stages(
+    monkeypatch,
+    rgb_image,
+    tmp_path,
+):
+    mask = np.zeros((6, 8), dtype=np.uint8)
+    mask[2:4, 3:5] = 255
+    after_lama = Image.new("RGB", rgb_image.size, (10, 20, 30))
+    after_composition = Image.new("RGB", rgb_image.size, (40, 50, 60))
+    after_palette = np.full((6, 8, 3), (70, 80, 90), dtype=np.uint8)
+
+    def inpaint(_image, _mask, *, artifact_callback=None):
+        artifact_callback("after_lama", after_lama)
+        artifact_callback("after_composition_blend", after_composition)
+        return after_composition
+
+    monkeypatch.setattr(
+        background_stage,
+        "refine_background",
+        lambda *_args, **_kwargs: after_palette.copy(),
+    )
+
+    result = background_stage.generate_background_from_masks(
+        rgb_image,
+        [mask],
+        [],
+        (1, 1),
+        inpaint,
+        diagnostics_directory=tmp_path,
+    )
+
+    expected = {
+        "01_after_lama.png": (10, 20, 30),
+        "02_after_composition_blend.png": (40, 50, 60),
+        "03_after_palette_refine.png": (70, 80, 90),
+    }
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(expected)
+    for filename, color in expected.items():
+        saved = np.asarray(Image.open(tmp_path / filename).convert("RGB"))
+        assert np.all(saved == color)
+    assert np.all(np.asarray(result) == (70, 80, 90))
+
+
 def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     raw_mask = np.zeros((6, 8), dtype=np.uint8)
     raw_mask[1:5, 2:6] = 255
@@ -1339,6 +1382,15 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     extract_layers = Mock(return_value=[expected_layer])
     generate_background = Mock(return_value=expected_background)
     encode = Mock(side_effect=lambda image, fmt="PNG": f"encoded-{image.size}")
+    kernel_scales = []
+
+    def calculate_kernel(_image, scale):
+        kernel_scales.append(scale)
+        return (7, 7) if scale == 0.0075 else (3, 3)
+
+    monkeypatch.setattr(
+        pipeline_orchestrator, "_calc_kernel_size", calculate_kernel
+    )
     monkeypatch.setattr(
         pipeline_orchestrator, "extract_raw_objects", extract_raw_objects
     )
@@ -1393,6 +1445,12 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     refine_objects.assert_called_once()
     extract_layers.assert_called_once()
     generate_background.assert_called_once()
+    assert kernel_scales == [0.0075, 0.00375]
+    assert extract_layers.call_args.args[1] == (7, 7)
+    assert generate_background.call_args.args[2] == (3, 3)
+    assert generate_background.call_args.kwargs == {
+        "diagnostics_directory": "outputs/background_debug"
+    }
     assert (
         extract_layers.call_args.args[-1].__wrapped__ is background_inpaint
     )

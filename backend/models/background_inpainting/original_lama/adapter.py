@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import numpy as np
 from PIL import Image
 
@@ -41,6 +43,8 @@ class OriginalLamaBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
         image: Image.Image,
         mask: Image.Image,
         prompt: str = "",
+        *,
+        artifact_callback: Callable[[str, Image.Image], None] | None = None,
     ) -> Image.Image:
         del prompt
         source = image.convert("RGB")
@@ -59,7 +63,12 @@ class OriginalLamaBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
             feather_radius=self.feather_radius,
         )
         generated = self.runtime.inpaint(source, generation_mask)
-        return preserve_unmasked_pixels(source, generated, blend_mask)
+        if artifact_callback is not None:
+            artifact_callback("after_lama", generated)
+        composed = preserve_unmasked_pixels(source, generated, blend_mask)
+        if artifact_callback is not None:
+            artifact_callback("after_composition_blend", composed)
+        return composed
 
     def unload(self) -> None:
         runtime = getattr(self, "runtime", None)

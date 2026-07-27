@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from .layerd_refine import normalize_morphology_kernel
 from ..models.background_inpainting.common.masks import (
     prepare_inpaint_masks as _prepare_inpaint_masks,
     preserve_unmasked_pixels as _preserve_unmasked_pixels,
@@ -38,9 +39,11 @@ def _bbox_from_mask(mask: np.ndarray) -> Tuple[int, int, int, int] | None:
 
 def _calc_kernel_size(image: np.ndarray, kernel_scale: float = _KERNEL_SCALE) -> tuple[int, int]:
     height, width = image.shape[:2]
-    return (
-        max(1, round(height * kernel_scale)),
-        max(1, round(width * kernel_scale)),
+    return normalize_morphology_kernel(
+        (
+            round(height * kernel_scale),
+            round(width * kernel_scale),
+        )
     )
 
 

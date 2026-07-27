@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from PIL import Image
 from simple_lama_inpainting import SimpleLama
 
@@ -30,6 +32,8 @@ class LamaBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
         image: Image.Image,
         mask: Image.Image,
         prompt: str = "",
+        *,
+        artifact_callback: Callable[[str, Image.Image], None] | None = None,
     ) -> Image.Image:
         del prompt
         source = image.convert("RGB")
@@ -40,4 +44,9 @@ class LamaBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
             feather_radius=self.feather_radius,
         )
         result = self.model(source, generation_mask)
-        return preserve_unmasked_pixels(source, result, blend_mask)
+        if artifact_callback is not None:
+            artifact_callback("after_lama", result)
+        composed = preserve_unmasked_pixels(source, result, blend_mask)
+        if artifact_callback is not None:
+            artifact_callback("after_composition_blend", composed)
+        return composed

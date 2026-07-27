@@ -1,6 +1,7 @@
 """Final background removal with a background-only inpainter."""
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -14,6 +15,26 @@ from .types import DetectedObject, GroupedObject
 
 VISIBLE_ALPHA_DILATION = (3, 3)
 logger = get_logger(__name__)
+
+
+def _background_artifact_callback(
+    diagnostics_directory: str | Path,
+) -> Callable[[str, Image.Image], None]:
+    """Create a stage callback that writes ordered background diagnostics."""
+    directory = Path(diagnostics_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    filenames = {
+        "after_lama": "01_after_lama.png",
+        "after_model": "01_after_model.png",
+        "after_composition_blend": "02_after_composition_blend.png",
+    }
+
+    def save_artifact(stage: str, image: Image.Image) -> None:
+        filename = filenames.get(stage)
+        if filename is not None:
+            image.convert("RGB").save(directory / filename)
+
+    return save_artifact
 
 
 def _visible_soft_alpha(
@@ -33,6 +54,7 @@ def generate_background_from_masks(
     soft_alphas: Sequence[np.ndarray],
     kernel_size: tuple[int, int],
     background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
+    diagnostics_directory: str | Path | None = None,
 ) -> Image.Image:
     """Inpaint all components using hard masks and soft-alpha coverage."""
     union_mask = np.logical_or.reduce([mask > 0 for mask in raw_masks])
@@ -50,7 +72,19 @@ def generate_background_from_masks(
     )
     final_mask = Image.fromarray(union_mask.astype(np.uint8) * 255, mode="L")
 
-    background = background_inpaint(image, final_mask)
+    artifact_callback = (
+        _background_artifact_callback(diagnostics_directory)
+        if diagnostics_directory is not None
+        else None
+    )
+    if artifact_callback is None:
+        background = background_inpaint(image, final_mask)
+    else:
+        background = background_inpaint(
+            image,
+            final_mask,
+            artifact_callback=artifact_callback,
+        )
     log_event(
         logger,
         "background_inpainting",
@@ -68,6 +102,10 @@ def generate_background_from_masks(
         n_outer_ratio=BG_REFINE_OUTER_RATIO,
         max_num_colors=BG_REFINE_NUM_COLORS,
     )
+    if diagnostics_directory is not None:
+        Image.fromarray(background_np, mode="RGB").save(
+            Path(diagnostics_directory) / "03_after_palette_refine.png"
+        )
     return Image.fromarray(background_np, mode="RGB")
 
 
@@ -76,6 +114,7 @@ def generate_final_background(
     objects: Sequence[DetectedObject | GroupedObject],
     kernel_size: tuple[int, int],
     background_inpaint: Callable[[Image.Image, Image.Image], Image.Image],
+    diagnostics_directory: str | Path | None = None,
 ) -> Image.Image:
     """Inpaint visible object coverage once on the original source image."""
     log_event(
@@ -99,4 +138,5 @@ def generate_final_background(
         ],
         kernel_size,
         background_inpaint,
+        diagnostics_directory=diagnostics_directory,
     )

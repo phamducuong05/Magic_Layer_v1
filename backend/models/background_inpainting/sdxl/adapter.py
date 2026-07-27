@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import torch
 from diffusers import AutoPipelineForInpainting
 from PIL import Image
@@ -67,6 +69,8 @@ class SDXLBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
         image: Image.Image,
         mask: Image.Image,
         prompt: str = "",
+        *,
+        artifact_callback: Callable[[str, Image.Image], None] | None = None,
     ) -> Image.Image:
         source = image.convert("RGB")
         generation_mask, blend_mask = prepare_inpaint_masks(
@@ -84,4 +88,9 @@ class SDXLBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
             num_inference_steps=self.num_inference_steps,
             guidance_scale=self.guidance_scale,
         ).images[0]
-        return preserve_unmasked_pixels(source, result, blend_mask)
+        if artifact_callback is not None:
+            artifact_callback("after_model", result)
+        composed = preserve_unmasked_pixels(source, result, blend_mask)
+        if artifact_callback is not None:
+            artifact_callback("after_composition_blend", composed)
+        return composed
