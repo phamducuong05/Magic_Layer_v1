@@ -46,8 +46,6 @@ KEYWORD_OUTPUT_SCHEMA = {
         "keywords": {
             "type": "array",
             "items": {"type": "string"},
-            "minItems": 1,
-            "maxItems": 10,
         }
     },
     "required": ["keywords"],
