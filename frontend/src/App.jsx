@@ -39,15 +39,19 @@ export default function App() {
 
   // ── Submit ──
   const handleSubmit = async () => {
-    if (!file) { setError("Vui lòng chọn ảnh."); return; }
-    if (!keywords.trim()) { setError("Vui lòng nhập ít nhất một từ khóa."); return; }
+    if (!file) {
+      setError("Vui lòng chọn ảnh.");
+      return;
+    }
 
     setLoading(true);
     setError(null);
 
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("keywords", keywords);
+    if (keywords.trim()) {
+      formData.append("keywords", keywords.trim());
+    }
 
     try {
       const res = await fetch(`${API_BASE}/api/process-image`, {
@@ -80,8 +84,8 @@ export default function App() {
           </span>
           <div className="flex-1" />
           <span className="text-gray-400 text-sm">
-            {canvasData.layers.length} đối tượng •{" "}
-            {canvasData.original_width} × {canvasData.original_height}px
+            {canvasData.layers.length} đối tượng • {canvasData.original_width} ×{" "}
+            {canvasData.original_height}px
           </span>
           <button
             onClick={() => setCanvasData(null)}
@@ -95,7 +99,9 @@ export default function App() {
         <div className="flex flex-1 overflow-hidden">
           {/* Layer panel */}
           <aside className="w-56 bg-gray-900 border-r border-gray-800 p-3 flex flex-col gap-2 overflow-y-auto">
-            <p className="text-gray-400 text-xs uppercase tracking-wider mb-1">Layers</p>
+            <p className="text-gray-400 text-xs uppercase tracking-wider mb-1">
+              Layers
+            </p>
             <div className="flex items-center gap-2 px-2 py-2 rounded-lg bg-gray-800 text-sm text-gray-300">
               <span className="w-3 h-3 rounded-sm bg-gray-500 inline-block" />
               Background (LaMa)
@@ -128,7 +134,8 @@ export default function App() {
           ✦ AI Magic Canvas
         </h1>
         <p className="text-gray-400 mb-8 text-sm">
-          Upload ảnh, nhập từ khóa đối tượng — AI tự động tách layer và inpaint nền.
+          Upload ảnh, nhập từ khóa đối tượng — AI tự động tách layer và inpaint
+          nền.
         </p>
 
         {/* Drop zone */}
@@ -148,7 +155,9 @@ export default function App() {
             <div className="text-gray-500">
               <div className="text-4xl mb-2">🖼</div>
               <p className="text-sm">Kéo thả ảnh vào đây hoặc click để chọn</p>
-              <p className="text-xs mt-1 text-gray-600">JPEG, PNG, WEBP — tối đa 10MB</p>
+              <p className="text-xs mt-1 text-gray-600">
+                JPEG, PNG, WEBP — tối đa 10MB
+              </p>
             </div>
           )}
           <input
