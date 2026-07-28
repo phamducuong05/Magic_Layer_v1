@@ -11,7 +11,6 @@ vlm:
     api_key_env: ANTHROPIC_API_KEY
     model: claude-sonnet-5
     max_tokens: 256
-    temperature: 0
     timeout_seconds: 30
     max_retries: 2
     max_image_edge: 1568

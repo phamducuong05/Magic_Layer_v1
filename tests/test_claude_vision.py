@@ -72,10 +72,14 @@ def test_extract_keywords_sends_image_first_and_parses_structured_output():
     assert result == ["person", "hand"]
     request = client.messages.last_request
     assert request["model"] == "claude-sonnet-5"
+    assert "temperature" not in request
     assert request["output_config"]["format"]["type"] == "json_schema"
-    assert request["output_config"]["format"]["schema"]["required"] == [
-        "keywords"
-    ]
+    schema = request["output_config"]["format"]["schema"]
+    assert schema["required"] == ["keywords"]
+    assert schema["properties"]["keywords"] == {
+        "type": "array",
+        "items": {"type": "string"},
+    }
     content = request["messages"][0]["content"]
     assert [block["type"] for block in content] == ["image", "text"]
     image_source = content[0]["source"]
@@ -111,6 +115,24 @@ def test_extract_keywords_rejects_malformed_json():
 
     with pytest.raises(InvalidKeywordExtraction, match="valid JSON"):
         asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
+
+
+def test_extract_keywords_keeps_only_the_first_configured_keywords():
+    keywords = [f"object-{index}" for index in range(12)]
+    client = FakeClient(
+        response=make_response(
+            '{"keywords": ['
+            + ", ".join(f'"{keyword}"' for keyword in keywords)
+            + "]}"
+        )
+    )
+    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
+
+    result = asyncio.run(
+        extractor.extract_keywords(Image.new("RGB", (8, 8)))
+    )
+
+    assert result == keywords[:10]
 
 
 def test_extract_keywords_maps_transient_anthropic_error():

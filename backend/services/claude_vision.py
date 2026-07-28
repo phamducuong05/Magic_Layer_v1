@@ -34,11 +34,49 @@ Exclude:
 2. Tiny incidental objects, decorations, textures, shadows, reflections,
    printed images, and object parts that should remain attached to their
    parent object.
-3. Objects that are uncertain or not visibly distinguishable.
+3. Clothing, apparel, wearable items, and accessories belonging or attached
+   to a person, animal, or object. This includes shirts, pants, dresses,
+   shoes, hats, glasses, jewelry, watches, belts, bags, backpacks, collars,
+   leashes, straps, handles, and similar attachments. Treat them as part of
+   their parent object instead of separate segmentation keywords.
+4. Objects that are uncertain or not visibly distinguishable.
+
+Object hierarchy and grouping rules:
+1. Select only root-level, independently meaningful scene objects. Do not
+   return components, attachments, contents, or subparts as separate keywords.
+2. For vehicles, return only the complete vehicle. Do not return wheels,
+   tires, mirrors, doors, windows, lights, license plates, seats, steering
+   wheels, handlebars, or other vehicle components.
+3. For containers such as shopping bags, baskets, shopping carts, suitcases,
+   boxes, bins, trays, shelves, cabinets, and drawers, do not enumerate the
+   many small or incidental items inside. Return the container or collection
+   as one object when it is visually important.
+4. For furniture, electronics, appliances, and buildings, return the complete
+   parent object instead of legs, armrests, cushions, handles, screens, keys,
+   buttons, ports, cables, doors, windows, roofs, balconies, signs, or other
+   attached structural details.
+5. For people and animals, return the whole subject. Do not return body parts,
+   clothing, footwear, or accessories separately.
+6. For plants and food, prefer the complete plant, tree, flower pot, dish, or
+   meal instead of individual leaves, branches, flowers, fruits, ingredients,
+   toppings, or small pieces.
+7. For crowded collections such as racks, shelves, baskets, trays, toy boxes,
+   piles, or displays, do not list every visible item.
+
+The small-occluder exception applies only to an independent object. It never
+promotes a component, attachment, accessory, body part, clothing item, or one
+of many incidental container contents into a separate keyword.
 
 Use short, concrete English nouns or noun phrases that work as SAM3 text
 prompts. Return one keyword per semantic object class. Prefer recall for
-significant occluders, but do not list irrelevant background objects."""
+significant occluders, but do not list irrelevant background objects,
+clothing, or accessories. Focus only on scene-defining foreground objects
+and objects necessary to preserve important occlusion relationships.
+
+Return at most 10 keywords total. Order them by priority:
+1. Objects that significantly occlude another important foreground object.
+2. Main foreground objects ordered by visual importance and occupied area.
+"""
 
 KEYWORD_OUTPUT_SCHEMA = {
     "type": "object",
@@ -101,7 +139,6 @@ class ClaudeVisionKeywordExtractor:
             response = await client.messages.create(
                 model=str(self._settings["model"]),
                 max_tokens=int(self._settings.get("max_tokens", 256)),
-                temperature=float(self._settings.get("temperature", 0)),
                 messages=[
                     {
                         "role": "user",
@@ -178,9 +215,11 @@ class ClaudeVisionKeywordExtractor:
                 "Claude returned an invalid keyword structure."
             )
 
+        max_keywords = int(self._settings.get("max_keywords", 10))
+
         return normalize_keywords(
-            payload["keywords"],
-            max_keywords=int(self._settings.get("max_keywords", 10)),
+            payload["keywords"][:max_keywords],
+            max_keywords=max_keywords,
             max_length=int(
                 self._settings.get("max_keyword_length", 80)
             ),
