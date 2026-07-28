@@ -3,6 +3,19 @@ logging:
   level: INFO
   workflow_detail: compact
   third_party_level: WARNING
+vlm:
+  active: claude
+  max_keywords: 10
+  max_keyword_length: 80
+  claude:
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-sonnet-5
+    max_tokens: 256
+    temperature: 0
+    timeout_seconds: 30
+    max_retries: 2
+    max_image_edge: 1568
+    jpeg_quality: 85
 pipeline:
   completion:
     max_area_growth_ratio: 4.0

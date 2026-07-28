@@ -60,6 +60,33 @@ class ConfigManager:
             )
         return dict(stage_config)
 
+    def get_vlm_config(self) -> Dict[str, Any]:
+        """Return shared settings merged with the active VLM provider."""
+        vlm_config = self.config_dict.get("vlm", {})
+        if not isinstance(vlm_config, dict):
+            raise ValueError("VLM configuration must be a mapping")
+
+        active_name = vlm_config.get("active")
+        if not active_name:
+            raise ValueError("No active VLM provider is configured")
+
+        provider_config = vlm_config.get(active_name, {})
+        if not isinstance(provider_config, dict):
+            raise ValueError(
+                f"VLM provider {active_name!r} must be a mapping"
+            )
+
+        shared_config = {
+            key: value
+            for key, value in vlm_config.items()
+            if key not in {"active", active_name}
+        }
+        return {
+            "name": active_name,
+            **shared_config,
+            **provider_config,
+        }
+
     def get_logging_config(self) -> Dict[str, Any]:
         """Return terminal logging settings with safe compact defaults."""
         logging_config = self.config_dict.get("logging", {})

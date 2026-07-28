@@ -7,7 +7,7 @@ Endpoints:
 """
 
 import io
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,11 +22,25 @@ try:
     from .core.logging import configure_logging, get_logger
     from .image_processor import ProcessResult, process_image
     from .models import model_manager
+    from .services import (
+        ClaudeVisionKeywordExtractor,
+        InvalidKeywordExtraction,
+        KeywordExtractor,
+        KeywordExtractorUnavailable,
+        normalize_keywords,
+    )
 except ImportError:  # Legacy: run uvicorn from inside backend/.
     from config import config
     from core.logging import configure_logging, get_logger
     from image_processor import ProcessResult, process_image
     from models import model_manager
+    from services import (
+        ClaudeVisionKeywordExtractor,
+        InvalidKeywordExtraction,
+        KeywordExtractor,
+        KeywordExtractorUnavailable,
+        normalize_keywords,
+    )
 
 # ──────────────────────────────────────────────
 # Logging
@@ -42,6 +56,7 @@ configure_logging(
     force=True,
 )
 logger = get_logger(__name__)
+_keyword_extractor: Optional[KeywordExtractor] = None
 
 
 # ──────────────────────────────────────────────
@@ -101,15 +116,63 @@ async def health():
     return {"status": "ok"}
 
 
+def get_keyword_extractor() -> KeywordExtractor:
+    """Create the configured VLM adapter only when auto extraction is used."""
+    global _keyword_extractor
+    if _keyword_extractor is not None:
+        return _keyword_extractor
+
+    settings = config.get_vlm_config()
+    if settings["name"] != "claude":
+        raise KeywordExtractorUnavailable(
+            f"Unsupported VLM provider: {settings['name']!r}"
+        )
+    _keyword_extractor = ClaudeVisionKeywordExtractor(settings)
+    return _keyword_extractor
+
+
+async def resolve_keywords(
+    image: Image.Image,
+    supplied_keywords: Optional[str],
+    *,
+    extractor: Optional[KeywordExtractor] = None,
+) -> List[str]:
+    """Resolve a transitional manual override or invoke the configured VLM."""
+    settings = config.get_vlm_config()
+    max_keywords = int(settings.get("max_keywords", 10))
+    max_length = int(settings.get("max_keyword_length", 80))
+
+    if supplied_keywords is not None:
+        return normalize_keywords(
+            supplied_keywords.split(","),
+            max_keywords=max_keywords,
+            max_length=max_length,
+        )
+
+    active_extractor = extractor or get_keyword_extractor()
+    extracted = await active_extractor.extract_keywords(image)
+    return normalize_keywords(
+        extracted,
+        max_keywords=max_keywords,
+        max_length=max_length,
+    )
+
+
 @app.post("/api/process-image", response_model=ProcessResponse)
 async def api_process_image(
     file: UploadFile = File(..., description="Ảnh cần xử lý (JPEG/PNG)"),
-    keywords: str = Form(..., description="Danh sách từ khóa cách nhau bởi dấu phẩy, vd: 'dog,cat'"),
+    keywords: Optional[str] = Form(
+        None,
+        description=(
+            "Manual override tùy chọn; nếu bỏ trống, VLM sẽ tự sinh "
+            "keyword cho SAM3"
+        ),
+    ),
 ):
     """
     Pipeline chính:
     1. Đọc ảnh upload
-    2. Parse keywords (tách bởi dấu phẩy)
+    2. Dùng manual keywords hoặc gọi VLM để tự sinh keywords
     3. Chạy SAM3 → lấy masks + tạo RGBA layers
     4. Merge masks → LaMa inpaint → ảnh nền sạch
     5. Trả về JSON với background + danh sách layers
@@ -118,7 +181,10 @@ async def api_process_image(
     if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
         raise HTTPException(
             status_code=400,
-            detail=f"Định dạng file không hỗ trợ: {file.content_type}. Chỉ chấp nhận JPEG/PNG/WEBP.",
+            detail=(
+                f"Định dạng file không hỗ trợ: {file.content_type}. "
+                "Chỉ chấp nhận JPEG/PNG/WEBP."
+            ),
         )
 
     # ── Đọc ảnh ──
@@ -137,12 +203,26 @@ async def api_process_image(
         image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
         logger.info(f"Image resized from {w}x{h} to {image.size}")
 
-    # ── Parse keywords ──
-    kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
-    if not kw_list:
-        raise HTTPException(status_code=400, detail="Cần ít nhất một từ khóa.")
-    if len(kw_list) > 10:
-        raise HTTPException(status_code=400, detail="Tối đa 10 từ khóa mỗi lần.")
+    # ── Resolve keywords ──
+    try:
+        kw_list = await resolve_keywords(image, keywords)
+    except KeywordExtractorUnavailable:
+        logger.exception("VLM keyword extractor unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Dịch vụ phân tích ảnh tạm thời không khả dụng.",
+        )
+    except InvalidKeywordExtraction:
+        if keywords is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Danh sách từ khóa thủ công không hợp lệ.",
+            )
+        logger.exception("VLM returned unusable keyword output")
+        raise HTTPException(
+            status_code=502,
+            detail="Dịch vụ phân tích ảnh không trả về từ khóa hợp lệ.",
+        )
 
     logger.info(f"Processing image {image.size} with keywords: {kw_list}")
 
