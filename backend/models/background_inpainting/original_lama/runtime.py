@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 import torch
 import yaml
@@ -213,84 +212,6 @@ class OriginalLamaRuntime:
             mask_tensor,
             original_size=original_size,
         )
-
-    def inpaint_coarse_to_fine(
-        self,
-        image: Image.Image,
-        mask: Image.Image,
-        *,
-        coarse_max_side: int,
-        refinement_band_pixels: int,
-        coarse_callback: Callable[[Image.Image], None] | None = None,
-    ) -> Image.Image:
-        """Fill a large hole at low resolution, then refine its inner edge."""
-        if coarse_max_side < 64:
-            raise ValueError("coarse_max_side must be at least 64")
-        if refinement_band_pixels < 1:
-            raise ValueError(
-                "refinement_band_pixels must be at least 1"
-            )
-
-        source = image.convert("RGB")
-        binary_mask = mask.convert("L")
-        if binary_mask.size != source.size:
-            binary_mask = binary_mask.resize(
-                source.size, Image.Resampling.NEAREST
-            )
-
-        width, height = source.size
-        longest_side = max(width, height)
-        if longest_side <= coarse_max_side:
-            return self.inpaint(source, binary_mask)
-
-        scale = coarse_max_side / longest_side
-        coarse_size = (
-            max(1, round(width * scale)),
-            max(1, round(height * scale)),
-        )
-        coarse_source = source.resize(
-            coarse_size, Image.Resampling.LANCZOS
-        )
-        coarse_mask = binary_mask.resize(
-            coarse_size, Image.Resampling.NEAREST
-        )
-        coarse_result = self.inpaint(coarse_source, coarse_mask)
-        coarse_upscaled = coarse_result.resize(
-            source.size, Image.Resampling.LANCZOS
-        )
-
-        # Keep the original image outside the generation mask. Inside it, the
-        # low-resolution result provides globally coherent context for pass 2.
-        coarse_seed = Image.composite(
-            coarse_upscaled,
-            source,
-            binary_mask,
-        )
-        if coarse_callback is not None:
-            coarse_callback(coarse_seed)
-
-        mask_array = np.asarray(binary_mask, dtype=np.uint8) > 127
-        radius = int(refinement_band_pixels)
-        kernel_size = 2 * radius + 1
-        eroded = cv2.erode(
-            mask_array.astype(np.uint8),
-            np.ones((kernel_size, kernel_size), dtype=np.uint8),
-            borderType=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        ).astype(bool)
-        inner_boundary = mask_array & ~eroded
-
-        # A thin mask may disappear under erosion. Re-running the complete
-        # native-resolution hole would defeat coarse-to-fine, so retain the
-        # coarse result in that case.
-        if not np.any(eroded) or not np.any(inner_boundary):
-            return coarse_seed
-
-        refinement_mask = Image.fromarray(
-            inner_boundary.astype(np.uint8) * 255,
-            mode="L",
-        )
-        return self.inpaint(coarse_seed, refinement_mask)
 
     def close(self) -> None:
         model = getattr(self, "model", None)
