@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from scipy.ndimage import binary_fill_holes
 
 from ..core.layerd_refine import expand_mask, refine_background
 from ..core.logging import get_logger, log_event
@@ -60,6 +61,7 @@ def generate_background_from_masks(
     union_mask = np.logical_or.reduce([mask > 0 for mask in raw_masks])
     for alpha in soft_alphas:
         union_mask |= alpha > THRESHOLD_ALPHA
+    union_mask = binary_fill_holes(union_mask)
     union_mask = expand_mask(union_mask, kernel_size).astype(bool)
     log_event(
         logger,
