@@ -16,7 +16,7 @@ from .types import GroupedObject, ObjectLayer
 
 logger = get_logger(__name__)
 
-BG_REFINE_NUM_COLORS = 10
+BG_REFINE_NUM_COLORS = 5
 BG_REFINE_OUTER_RATIO = 2
 
 
