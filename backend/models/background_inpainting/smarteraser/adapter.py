@@ -57,6 +57,15 @@ class SmartEraserBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
         self.runtime = _create_runtime(
             checkpoint_dir=self.config["checkpoint_dir"],
             clip_dir=self.config["clip_dir"],
+            clip_model_id=str(
+                self.config.get(
+                    "clip_model_id",
+                    "openai/clip-vit-large-patch14",
+                )
+            ),
+            clip_auto_download=bool(
+                self.config.get("clip_auto_download", True)
+            ),
             device=self.device,
             dtype=str(self.config.get("dtype", "float16")),
             num_inference_steps=int(
@@ -119,7 +128,7 @@ class SmartEraserBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
             prepared.metadata,
         )
         if artifact_callback is not None:
-            artifact_callback("after_lama", generated)
+            artifact_callback("after_smarteraser", generated)
         composed = preserve_unmasked_pixels(source, generated, blend_mask)
         if artifact_callback is not None:
             artifact_callback("after_composition_blend", composed)

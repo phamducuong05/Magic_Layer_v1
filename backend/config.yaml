@@ -139,6 +139,8 @@ models:
     smarteraser:
       checkpoint_dir: "SmartEraser/Model_framework/ckpts/smarteraser-weights"
       clip_dir: "SmartEraser/Model_framework/ckpts/clip-vit-large-patch14"
+      clip_model_id: "openai/clip-vit-large-patch14"
+      clip_auto_download: true
       resolution: 512
       num_inference_steps: 50
       guidance_scale: 1.5

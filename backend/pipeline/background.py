@@ -26,6 +26,7 @@ def _background_artifact_callback(
     directory.mkdir(parents=True, exist_ok=True)
     filenames = {
         "after_lama": "01_after_lama.png",
+        "after_smarteraser": "01_after_smarteraser.png",
         "after_model": "01_after_model.png",
         "after_composition_blend": "02_after_composition_blend.png",
     }

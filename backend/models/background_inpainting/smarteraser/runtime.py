@@ -1,8 +1,9 @@
-"""Local-only SmartEraser model loading and inference."""
+"""SmartEraser model loading and inference."""
 
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub import snapshot_download
 from PIL import Image
 import torch
 from transformers import CLIPImageProcessor, CLIPTokenizer
@@ -23,18 +24,73 @@ _DTYPES: dict[str, torch.dtype] = {
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
 }
+_CLIP_WEIGHT_FILES = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+)
+_IGNORED_CLIP_PATTERNS = ("*.msgpack", "*.h5", "*.ot")
 
 
-def _resolve_local_directory(path: str | Path, label: str) -> Path:
+def _resolve_repository_path(path: str | Path) -> Path:
     resolved = Path(path)
     if not resolved.is_absolute():
         resolved = _REPOSITORY_ROOT / resolved
-    resolved = resolved.resolve()
+    return resolved.resolve()
+
+
+def _resolve_local_directory(path: str | Path, label: str) -> Path:
+    resolved = _resolve_repository_path(path)
     if not resolved.is_dir():
         raise FileNotFoundError(
             f"SmartEraser {label} directory was not found: {resolved}"
         )
     return resolved
+
+
+def _has_clip_weights(directory: Path) -> bool:
+    return directory.is_dir() and any(
+        (directory / filename).is_file()
+        for filename in _CLIP_WEIGHT_FILES
+    )
+
+
+def ensure_clip_snapshot(
+    clip_dir: str | Path,
+    model_id: str,
+    auto_download: bool,
+) -> Path:
+    """Return a complete local CLIP snapshot, downloading it when allowed."""
+
+    destination = _resolve_repository_path(clip_dir)
+    if _has_clip_weights(destination):
+        return destination
+
+    if not auto_download:
+        raise FileNotFoundError(
+            "SmartEraser CLIP weights were not found in "
+            f"{destination}; automatic download is disabled"
+        )
+
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        snapshot_download(
+            repo_id=model_id,
+            local_dir=str(destination),
+            ignore_patterns=list(_IGNORED_CLIP_PATTERNS),
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not download CLIP model {model_id!r} to {destination}"
+        ) from error
+
+    if not _has_clip_weights(destination):
+        raise FileNotFoundError(
+            f"CLIP model {model_id!r} downloaded to {destination}, "
+            "but no supported model weights were found"
+        )
+    return destination
 
 
 class SmartEraserRuntime:
@@ -51,12 +107,13 @@ class SmartEraserRuntime:
         seed: int,
         prompt: str,
         negative_prompt: str,
+        clip_model_id: str = "openai/clip-vit-large-patch14",
+        clip_auto_download: bool = True,
     ) -> None:
         self.checkpoint_dir = _resolve_local_directory(
             checkpoint_dir,
             "checkpoint",
         )
-        self.clip_dir = _resolve_local_directory(clip_dir, "CLIP")
         self.mlp_weight_path = (
             self.checkpoint_dir / "clip_mlp_weight.pth"
         )
@@ -76,6 +133,11 @@ class SmartEraserRuntime:
         if guidance_scale <= 0:
             raise ValueError("SmartEraser guidance_scale must be positive")
 
+        self.clip_dir = ensure_clip_snapshot(
+            clip_dir=clip_dir,
+            model_id=clip_model_id,
+            auto_download=clip_auto_download,
+        )
         self.device = device
         self.weight_dtype = (
             torch.float32 if device == "cpu" else _DTYPES[dtype]
