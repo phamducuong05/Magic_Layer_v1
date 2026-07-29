@@ -71,6 +71,10 @@ def generate_background_from_masks(
         kernel_size=kernel_size,
     )
     final_mask = Image.fromarray(union_mask.astype(np.uint8) * 255, mode="L")
+    if diagnostics_directory is not None:
+        directory = Path(diagnostics_directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        final_mask.save(directory / "00_input_mask.png")
 
     artifact_callback = (
         _background_artifact_callback(diagnostics_directory)

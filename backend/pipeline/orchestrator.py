@@ -104,6 +104,18 @@ def _get_background_inpainting_config() -> dict[str, Any]:
     return defaults
 
 
+def _get_segmentation_config() -> dict[str, Any]:
+    """Return defaults for segmentation diagnostics."""
+    defaults: dict[str, Any] = {
+        "diagnostics_directory": None,
+    }
+    try:
+        defaults.update(config.get_pipeline_config("segmentation"))
+    except (KeyError, ValueError):
+        pass
+    return defaults
+
+
 def _mark_missing_reconstruction_model(objects: Sequence) -> None:
     """Record why eligible raw objects retained their modal RGB fallback."""
     for detected in objects:
@@ -126,10 +138,15 @@ def _resolve_manager(manager: Any):
 
 
 def _segment(
-    image: Image.Image, keywords: Sequence[str], manager: Any
+    image: Image.Image,
+    keywords: Sequence[str],
+    manager: Any,
+    diagnostics_directory: str | None = None,
 ):
     processor = manager.get_segmentation_model().get_processor()
-    return extract_raw_objects(image, keywords, processor)
+    return extract_raw_objects(
+        image, keywords, processor, diagnostics_directory=diagnostics_directory
+    )
 
 
 def _complete_candidates(
@@ -168,9 +185,18 @@ def process_masks(
     """Run segmentation and conditional completion, returning masks only."""
     manager = _resolve_manager(manager)
     image = image.convert("RGB")
+    segmentation_config = _get_segmentation_config()
+    segmentation_diagnostics_directory = segmentation_config.get(
+        "diagnostics_directory"
+    )
     try:
         with trace_stage(logger, "segmentation"):
-            objects = _segment(image, keywords, manager)
+            objects = _segment(
+                image,
+                keywords,
+                manager,
+                diagnostics_directory=segmentation_diagnostics_directory,
+            )
             log_event(
                 logger,
                 "segmentation",
@@ -234,10 +260,19 @@ def process_image(
         diagnostics_enabled
         and bool(diagnostics_config["track_peak_gpu_memory"])
     )
+    segmentation_config = _get_segmentation_config()
+    segmentation_diagnostics_directory = segmentation_config.get(
+        "diagnostics_directory"
+    )
 
     try:
         with trace_stage(logger, "segmentation"):
-            objects = _segment(image, keywords, manager)
+            objects = _segment(
+                image,
+                keywords,
+                manager,
+                diagnostics_directory=segmentation_diagnostics_directory,
+            )
             log_event(
                 logger,
                 "segmentation",

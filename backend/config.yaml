@@ -16,6 +16,8 @@ vlm:
     max_image_edge: 1568
     jpeg_quality: 85
 pipeline:
+  segmentation:
+    diagnostics_directory: outputs/object_masks
   completion:
     max_area_growth_ratio: 4.0
     max_bbox_growth_ratio: 9.0

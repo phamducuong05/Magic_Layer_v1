@@ -1,7 +1,7 @@
-"""Text-guided extraction of individual raw SAM3 masks."""
-
+from pathlib import Path
 from typing import Any, Sequence
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -16,8 +16,27 @@ from .types import DetectedObject
 logger = get_logger(__name__)
 
 
+def save_object_masks(
+    objects: Sequence[DetectedObject],
+    diagnostics_directory: str | Path,
+) -> None:
+    """Save raw SAM3 binary masks immediately after segmentation."""
+    directory = Path(diagnostics_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    for detected in objects:
+        mask_image = Image.fromarray(
+            (detected.modal_mask > 0).astype(np.uint8) * 255, mode="L"
+        )
+        safe_label = detected.display_label.replace(" ", "_")
+        filename = f"{detected.object_id}_{safe_label}.png"
+        mask_image.save(directory / filename)
+
+
 def extract_raw_objects(
-    image: Image.Image, keywords: Sequence[str], processor: Any
+    image: Image.Image,
+    keywords: Sequence[str],
+    processor: Any,
+    diagnostics_directory: str | Path | None = None,
 ) -> list[DetectedObject]:
     """Return one stable object record per non-empty raw SAM3 mask."""
     objects: list[DetectedObject] = []
@@ -104,6 +123,9 @@ def extract_raw_objects(
                     modal_area=int((detected.modal_mask > 0).sum()),
                 )
                 logger.debug("[SAM3] raw instance '%s'", display_label)
+
+    if diagnostics_directory is not None and objects:
+        save_object_masks(objects, diagnostics_directory)
 
     return objects
 
