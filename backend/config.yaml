@@ -136,6 +136,19 @@ models:
       generation_mask_expansion: 11
       composition_mask_expansion: 7
       feather_radius: 2.0
+    smarteraser:
+      checkpoint_dir: "SmartEraser/Model_framework/ckpts/smarteraser-weights"
+      clip_dir: "SmartEraser/Model_framework/ckpts/clip-vit-large-patch14"
+      resolution: 512
+      num_inference_steps: 50
+      guidance_scale: 1.5
+      seed: 42
+      dtype: "float16"
+      prompt: "Remove the instance of object"
+      negative_prompt: ""
+      generation_mask_expansion: 1
+      composition_mask_expansion: 1
+      feather_radius: 5.0
     sdxl:
       model_id: "runwayml/stable-diffusion-inpainting"
       use_xformers: false
