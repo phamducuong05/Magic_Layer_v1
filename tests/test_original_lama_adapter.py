@@ -144,3 +144,36 @@ def test_original_lama_adapter_closes_runtime_before_base_cleanup(monkeypatch):
 
     assert closed == [True]
     assert model.__dict__ == {}
+
+
+def test_original_lama_processes_disconnected_union_mask_once(monkeypatch):
+    from backend.models.background_inpainting.original_lama import adapter
+
+    runtime_masks = []
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def inpaint(self, image, mask):
+            runtime_masks.append(np.asarray(mask).copy())
+            return image
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(adapter, "OriginalLamaRuntime", FakeRuntime)
+    model = adapter.OriginalLamaBackgroundInpaintingModel(
+        config=_config(),
+        device="cpu",
+    )
+    source = Image.new("RGB", (11, 11), "white")
+    mask = Image.new("L", source.size, 0)
+    mask.putpixel((1, 1), 255)
+    mask.putpixel((9, 9), 255)
+
+    model.process(source, mask)
+
+    assert len(runtime_masks) == 1
+    assert runtime_masks[0][1, 1] > 0
+    assert runtime_masks[0][-2, -2] > 0

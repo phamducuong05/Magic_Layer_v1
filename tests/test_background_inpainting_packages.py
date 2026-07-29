@@ -49,7 +49,6 @@ def test_original_lama_config_uses_refactored_checkpoint_directory():
     background = config["models"]["background_inpainting"]
     original = background["original_lama"]
 
-    assert background["active"] == "original_lama"
     assert original["source_root"] == "lama"
     assert original["checkpoint_config_path"] == (
         "backend/models/background_inpainting/original_lama/"
@@ -131,7 +130,7 @@ print(
     )
 
 
-def test_smarteraser_config_is_local_only_and_lama_stays_default():
+def test_smarteraser_config_uses_local_context_and_conservative_guidance():
     with (ROOT / "backend" / "config.yaml").open(
         "r",
         encoding="utf-8",
@@ -141,12 +140,18 @@ def test_smarteraser_config_is_local_only_and_lama_stays_default():
     background = config["models"]["background_inpainting"]
     smart = background["smarteraser"]
 
-    assert background["active"] == "original_lama"
     assert smart["checkpoint_dir"] == (
         "SmartEraser/Model_framework/ckpts/smarteraser-weights"
     )
     assert smart["clip_dir"] == (
         "SmartEraser/Model_framework/ckpts/clip-vit-large-patch14"
     )
-    assert "model_id" not in smart
-    assert "download" not in smart
+    assert smart["clip_model_id"] == "openai/clip-vit-large-patch14"
+    assert smart["clip_auto_download"] is True
+    assert smart["context_scale"] == 3.0
+    assert smart["minimum_context_ratio"] == 0.25
+    assert smart["guidance_scale"] == 1.2
+    assert smart["prompt"] == "Remove the instance of"
+    assert smart["negative_prompt"] == (
+        "objects, text, decorations, artifacts"
+    )

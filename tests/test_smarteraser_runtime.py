@@ -11,9 +11,12 @@ def _runtime_config(tmp_path):
     checkpoint_dir.mkdir()
     clip_dir.mkdir()
     (checkpoint_dir / "clip_mlp_weight.pth").write_bytes(b"local")
+    (clip_dir / "pytorch_model.bin").write_bytes(b"local")
     return {
         "checkpoint_dir": checkpoint_dir,
         "clip_dir": clip_dir,
+        "clip_model_id": "openai/clip-vit-large-patch14",
+        "clip_auto_download": True,
         "device": "cpu",
         "dtype": "float16",
         "num_inference_steps": 2,

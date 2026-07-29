@@ -5,6 +5,8 @@ from typing import Literal
 
 from PIL import Image
 
+from .regions import BoundingBox
+
 
 TransformMode = Literal["crop", "padding"]
 
@@ -15,9 +17,9 @@ class TransformMetadata:
 
     mode: TransformMode
     original_size: tuple[int, int]
-    scaled_size: tuple[int, int]
     resolution: int
-    crop_box: tuple[int, int, int, int] | None = None
+    scaled_size: tuple[int, int] | None = None
+    crop_box: BoundingBox | None = None
     padding: tuple[int, int, int, int] | None = None
 
 
@@ -41,43 +43,43 @@ def _prepare_crop(
     image: Image.Image,
     mask: Image.Image,
     resolution: int,
+    crop_box: BoundingBox,
 ) -> PreparedInputs:
     width, height = image.size
-    scale = resolution / min(width, height)
-    scaled_size = (
-        max(resolution, round(width * scale)),
-        max(resolution, round(height * scale)),
-    )
-    scaled_image = image.resize(scaled_size, Image.Resampling.BILINEAR)
-    scaled_mask = mask.resize(scaled_size, Image.Resampling.NEAREST)
-    mask_box = scaled_mask.getbbox()
+    left, top, right, bottom = crop_box
+    if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+        raise ValueError("SmartEraser crop_box must be inside the image")
+    if right - left != bottom - top:
+        raise ValueError("SmartEraser crop_box must be square")
+
+    mask_box = mask.getbbox()
     if mask_box is None:
         raise ValueError("SmartEraser mask is empty")
+    if not (
+        left <= mask_box[0]
+        and top <= mask_box[1]
+        and right >= mask_box[2]
+        and bottom >= mask_box[3]
+    ):
+        raise ValueError(
+            "SmartEraser crop_box must contain the complete mask"
+        )
 
-    mask_width = mask_box[2] - mask_box[0]
-    mask_height = mask_box[3] - mask_box[1]
-    left = max(
-        0,
-        min(
-            mask_box[0] - (resolution - mask_width) // 2,
-            scaled_size[0] - resolution,
-        ),
+    output_size = (resolution, resolution)
+    prepared_image = image.crop(crop_box).resize(
+        output_size,
+        Image.Resampling.BILINEAR,
     )
-    top = max(
-        0,
-        min(
-            mask_box[1] - (resolution - mask_height) // 2,
-            scaled_size[1] - resolution,
-        ),
+    prepared_mask = mask.crop(crop_box).resize(
+        output_size,
+        Image.Resampling.NEAREST,
     )
-    crop_box = (left, top, left + resolution, top + resolution)
     return PreparedInputs(
-        image=scaled_image.crop(crop_box),
-        mask=scaled_mask.crop(crop_box),
+        image=prepared_image,
+        mask=prepared_mask,
         metadata=TransformMetadata(
             mode="crop",
             original_size=image.size,
-            scaled_size=scaled_size,
             resolution=resolution,
             crop_box=crop_box,
         ),
@@ -123,6 +125,7 @@ def prepare_inputs(
     image: Image.Image,
     mask: Image.Image,
     resolution: int,
+    crop_box: BoundingBox | None,
 ) -> PreparedInputs:
     """Normalize and transform one source/mask pair to a square canvas."""
 
@@ -135,11 +138,14 @@ def prepare_inputs(
     if mask_box is None:
         raise ValueError("SmartEraser mask is empty")
 
-    mask_width = mask_box[2] - mask_box[0]
-    mask_height = mask_box[3] - mask_box[1]
-    if max(mask_width, mask_height) > min(source.size):
+    if crop_box is None:
         return _prepare_padding(source, binary_mask, resolution)
-    return _prepare_crop(source, binary_mask, resolution)
+    return _prepare_crop(
+        source,
+        binary_mask,
+        resolution,
+        crop_box,
+    )
 
 
 def build_guidance_crop(
@@ -196,12 +202,13 @@ def restore_output(
 
     if metadata.crop_box is None:
         raise ValueError("Crop metadata is missing")
-    scaled_original = original.convert("RGB").resize(
-        metadata.scaled_size,
-        Image.Resampling.BILINEAR,
+    left, top, right, bottom = metadata.crop_box
+    restored = original.convert("RGB").copy()
+    restored.paste(
+        generated_rgb.resize(
+            (right - left, bottom - top),
+            Image.Resampling.BILINEAR,
+        ),
+        (left, top),
     )
-    scaled_original.paste(generated_rgb, metadata.crop_box[:2])
-    return scaled_original.resize(
-        metadata.original_size,
-        Image.Resampling.BILINEAR,
-    )
+    return restored

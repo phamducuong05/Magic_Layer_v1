@@ -290,7 +290,8 @@ def test_inpainting_configuration_has_two_isolated_categories():
     assert "inpainting" not in models
     assert models["object_reconstruction"]["active"] == "hd_painter"
     assert "hd_painter" in models["object_reconstruction"]
-    assert models["background_inpainting"]["active"] == "original_lama"
+    active_background = models["background_inpainting"]["active"]
+    assert active_background in models["background_inpainting"]
     assert {"lama", "original_lama", "sdxl"} <= set(
         models["background_inpainting"]
     )

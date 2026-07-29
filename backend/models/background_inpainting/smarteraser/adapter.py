@@ -11,6 +11,11 @@ from ...base import BaseBackgroundInpaintingModel
 from ...registry import ModelRegistry
 from ..common import prepare_inpaint_masks, preserve_unmasked_pixels
 from .geometry import prepare_inputs, restore_output
+from .regions import (
+    adaptive_context_box,
+    group_mask_components,
+    validate_context_settings,
+)
 
 
 logger = get_logger(__name__)
@@ -42,6 +47,14 @@ class SmartEraserBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
         self.resolution = int(self.config.get("resolution", 512))
         if self.resolution <= 0:
             raise ValueError("SmartEraser resolution must be positive")
+        self.context_scale = float(self.config.get("context_scale", 3.0))
+        self.minimum_context_ratio = float(
+            self.config.get("minimum_context_ratio", 0.25)
+        )
+        validate_context_settings(
+            self.context_scale,
+            self.minimum_context_ratio,
+        )
         self.generation_mask_expansion = int(
             self.config.get("generation_mask_expansion", 1)
         )
@@ -71,15 +84,20 @@ class SmartEraserBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
             num_inference_steps=int(
                 self.config.get("num_inference_steps", 50)
             ),
-            guidance_scale=float(self.config.get("guidance_scale", 1.5)),
+            guidance_scale=float(self.config.get("guidance_scale", 1.2)),
             seed=int(self.config.get("seed", 42)),
             prompt=str(
                 self.config.get(
                     "prompt",
-                    "Remove the instance of object",
+                    "Remove the instance of",
                 )
             ),
-            negative_prompt=str(self.config.get("negative_prompt", "")),
+            negative_prompt=str(
+                self.config.get(
+                    "negative_prompt",
+                    "objects, text, decorations, artifacts",
+                )
+            ),
         )
         logger.info("[SmartEraser] Background model loaded successfully.")
 
@@ -107,30 +125,58 @@ class SmartEraserBackgroundInpaintingModel(BaseBackgroundInpaintingModel):
         if not np.any(np.asarray(binary_mask, dtype=np.uint8)):
             return source.copy()
 
-        generation_mask, blend_mask = prepare_inpaint_masks(
+        groups = group_mask_components(
             binary_mask,
-            generation_expansion=self.generation_mask_expansion,
-            composition_expansion=self.composition_mask_expansion,
-            feather_radius=self.feather_radius,
+            context_scale=self.context_scale,
+            minimum_context_ratio=self.minimum_context_ratio,
         )
-        prepared = prepare_inputs(
-            source,
-            generation_mask,
-            self.resolution,
-        )
-        generated_square = self.runtime.inpaint(
-            prepared.image,
-            prepared.mask,
-        )
-        generated = restore_output(
-            generated_square,
-            source,
-            prepared.metadata,
-        )
+        raw_result = source.copy()
+        composed = source.copy()
+        for group in groups:
+            group_mask = group.to_image(source.size)
+            generation_mask, blend_mask = prepare_inpaint_masks(
+                group_mask,
+                generation_expansion=self.generation_mask_expansion,
+                composition_expansion=self.composition_mask_expansion,
+                feather_radius=self.feather_radius,
+            )
+            generation_box = generation_mask.getbbox()
+            if generation_box is None:
+                continue
+            crop_box = adaptive_context_box(
+                generation_box,
+                source.size,
+                self.context_scale,
+                self.minimum_context_ratio,
+            )
+            prepared = prepare_inputs(
+                source,
+                generation_mask,
+                self.resolution,
+                crop_box=crop_box,
+            )
+            generated_square = self.runtime.inpaint(
+                prepared.image,
+                prepared.mask,
+            )
+            generated = restore_output(
+                generated_square,
+                source,
+                prepared.metadata,
+            )
+            raw_result = preserve_unmasked_pixels(
+                raw_result,
+                generated,
+                generation_mask,
+            )
+            composed = preserve_unmasked_pixels(
+                composed,
+                generated,
+                blend_mask,
+            )
+
         if artifact_callback is not None:
-            artifact_callback("after_smarteraser", generated)
-        composed = preserve_unmasked_pixels(source, generated, blend_mask)
-        if artifact_callback is not None:
+            artifact_callback("after_smarteraser", raw_result)
             artifact_callback("after_composition_blend", composed)
         return composed
 
