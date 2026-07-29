@@ -284,3 +284,23 @@ def test_missing_reconstruction_model_records_only_eligible_fallbacks():
         eligible.reconstruction_failure_reason
     )
     assert untouched.reconstruction_failure_stage is None
+
+
+def test_save_object_masks_saves_files(tmp_path):
+    from backend.pipeline.segmentation import save_object_masks
+
+    obj1 = _object("object-0", "person", 1)
+    obj2 = _object("object-1", "chair", 3)
+
+    output_dir = tmp_path / "object_masks"
+    save_object_masks([obj1, obj2], output_dir)
+
+    file1 = output_dir / "object-0_person.png"
+    file2 = output_dir / "object-1_chair.png"
+    assert file1.exists()
+    assert file2.exists()
+
+    img1 = Image.open(file1)
+    assert img1.size == (8, 8)
+    assert img1.mode == "L"
+
