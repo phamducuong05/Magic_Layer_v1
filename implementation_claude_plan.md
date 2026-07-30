@@ -143,8 +143,12 @@ sao riêng để tránh rule giữa hai nhánh bị lệch nhau. Block này bắ
 - extremely simple, common English nouns phù hợp SAM3;
 - foreground only;
 - loại chi tiết nhỏ, background, part/component, quần áo và phụ kiện;
+- không trả building, công trình kiến trúc, landmark, venue hoặc place; mọi
+  tòa nhà và địa điểm như temple, pagoda, church, monument, tower và house
+  luôn được coi là background, kể cả khi lớn, nổi bật, ở gần camera hoặc được
+  người dùng nhập làm target;
 - áp dụng chung object hierarchy cho vehicle, container/collection, furniture,
-  electronics, building, person/animal, plant và food.
+  electronics, person/animal, plant và food.
 
 `FOREGROUND_OBJECT_PROMPT` dùng khi không có input:
 
@@ -153,6 +157,7 @@ sao riêng để tránh rule giữa hai nhánh bị lệch nhau. Block này bắ
 - Dùng danh từ tiếng Anh cực kỳ đơn giản, phổ biến.
 - Loại background, chi tiết nhỏ, part/component, quần áo, phụ kiện và nội
   dung bên trong container/collection.
+- Không lấy tòa nhà, công trình kiến trúc, landmark, venue hoặc địa điểm.
 
 `OCCLUDER_PROMPT` dùng khi có input:
 
@@ -163,6 +168,7 @@ sao riêng để tránh rule giữa hai nhánh bị lệch nhau. Block này bắ
   target; nearby object không overlap không được tính là occluder.
 - Không trả target như chính occluder của nó.
 - Chỉ xét foreground và áp dụng cùng object hierarchy/exclusion rules.
+- Không lấy tòa nhà hoặc địa điểm làm target đã chuẩn hóa hay occluder.
 - Cho phép `occluders: []` khi target không bị che.
 
 Không yêu cầu Claude giải thích reasoning. Structured output chỉ chứa các

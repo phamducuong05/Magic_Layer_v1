@@ -34,6 +34,11 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
    reflections, printed images, and uncertain objects.
 5. Exclude clothing, footwear, wearable items, and accessories. Treat them as
    part of their person, animal, or parent object.
+6. Never return buildings, landmarks, venues, or places. Treat all
+   architecture and locations as background, even when they are large,
+   visually prominent, close to the camera, supplied as a user target, or
+   appear to occlude another object. This includes temples, pagodas, churches,
+   monuments, towers, and houses.
 
 Object hierarchy and grouping rules:
 - Vehicles: return only the whole vehicle, not wheels, mirrors, doors,
@@ -41,8 +46,8 @@ Object hierarchy and grouping rules:
 - Containers and collections: return the bag, basket, cart, suitcase, box,
   shelf, tray, pile, rack, or display when important; do not enumerate its
   many contents.
-- Furniture, electronics, appliances, and buildings: return the whole parent,
-  not legs, cushions, handles, screens, keys, cables, doors, roofs, or signs.
+- Furniture, electronics, and appliances: return the whole parent, not legs,
+  cushions, handles, screens, keys, cables, doors, or controls.
 - People and animals: return the whole subject, not body parts, clothes,
   footwear, collars, leashes, bags, glasses, jewelry, or other accessories.
 - Plants and food: return the whole plant, tree, pot, dish, or meal, not

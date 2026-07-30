@@ -120,7 +120,7 @@ models:
         use_sam_mask: false
         prompt_suffix: "high resolution, crisp edges, consistent colors"
   background_inpainting:
-    active: smarteraser
+    active: original_lama
     lama:
       # SimpleLama tự động quản lý trọng số
       dummy: true
