@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import re
 
 from .keyword_extractor import InvalidKeywordExtraction
 
@@ -34,24 +35,108 @@ SIMPLE_VOCAB_ALIASES = {
 
 PERSON_CHILD_LABELS = frozenset(
     {
+        "arm",
+        "arms",
+        "backpack",
+        "backpacks",
+        "bag",
+        "bags",
+        "belt",
+        "belts",
+        "bracelet",
+        "bracelets",
+        "cap",
+        "caps",
         "clothes",
         "clothing",
         "coat",
         "coats",
         "dress",
         "dresses",
+        "earring",
+        "earrings",
+        "face",
+        "feet",
+        "foot",
+        "glove",
+        "gloves",
         "glasses",
+        "hair",
         "hand",
+        "handbag",
+        "handbags",
         "hands",
         "hat",
         "hats",
+        "head",
         "jacket",
         "jackets",
+        "jewelry",
+        "leg",
+        "legs",
+        "necklace",
+        "necklaces",
         "pants",
+        "purse",
+        "purses",
+        "scarf",
+        "scarves",
         "shirt",
         "shirts",
         "shoe",
         "shoes",
+        "skirt",
+        "skirts",
+        "sock",
+        "socks",
+        "sunglasses",
+        "tie",
+        "ties",
+        "trousers",
+        "watch",
+        "watches",
+    }
+)
+
+SAFE_TARGET_MODIFIERS = frozenset(
+    {
+        "a",
+        "an",
+        "beige",
+        "big",
+        "black",
+        "blue",
+        "brown",
+        "four-door",
+        "gray",
+        "green",
+        "grey",
+        "in",
+        "large",
+        "little",
+        "made",
+        "metal",
+        "metallic",
+        "of",
+        "old",
+        "one",
+        "orange",
+        "passenger",
+        "pink",
+        "plastic",
+        "purple",
+        "red",
+        "short",
+        "small",
+        "tall",
+        "the",
+        "three",
+        "two",
+        "wearing",
+        "white",
+        "wooden",
+        "yellow",
+        "young",
     }
 )
 
@@ -74,6 +159,7 @@ def validate_refined_target(source: str, candidate: str) -> str:
     source_concepts = {
         word for word in source_words if word in SIMPLE_OBJECT_VOCAB
     }
+    recognized_source_tokens = set(source_concepts)
     source_text = " ".join(source_words)
     for alias_source, canonical in SIMPLE_VOCAB_ALIASES.items():
         alias_words = tuple(alias_source.casefold().split())
@@ -85,11 +171,19 @@ def validate_refined_target(source: str, candidate: str) -> str:
             )
         if alias_present:
             source_concepts.add(canonical.casefold())
+            recognized_source_tokens.update(alias_words)
+
+    has_unknown_tokens = any(
+        word not in recognized_source_tokens
+        and word not in SAFE_TARGET_MODIFIERS
+        for word in source_words
+    )
 
     if (
         len(candidate_words) == 1
         and len(source_concepts) == 1
         and candidate_key in source_concepts
+        and not has_unknown_tokens
     ):
         return normalized_candidate
 
@@ -102,7 +196,13 @@ def validate_root_person_labels(keywords: Sequence[str]) -> None:
         (
             keyword
             for keyword in keywords
-            if keyword.strip().casefold() in PERSON_CHILD_LABELS
+            if any(
+                token in PERSON_CHILD_LABELS
+                for token in re.findall(
+                    r"[a-z]+",
+                    keyword.casefold(),
+                )
+            )
         ),
         None,
     )

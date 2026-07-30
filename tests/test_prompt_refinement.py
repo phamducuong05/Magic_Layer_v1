@@ -44,6 +44,8 @@ def test_unknown_replacement_falls_back_to_source():
         ("man beside car", "car"),
         ("man beside car", "man"),
         ("man beside automobile", "car"),
+        ("wooden cabinet beside car", "car"),
+        ("dog beside automobile", "car"),
     ],
 )
 def test_multi_object_description_cannot_switch_or_guess_the_target(

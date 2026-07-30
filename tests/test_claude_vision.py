@@ -407,7 +407,20 @@ def test_automatic_mode_allows_people_above_three_visible_people():
     assert result.keywords == ["people"]
 
 
-@pytest.mark.parametrize("child_label", ["hand", "glasses", "hat", "shirt"])
+@pytest.mark.parametrize(
+    "child_label",
+    [
+        "hand",
+        "arm",
+        "foot",
+        "glasses",
+        "sunglasses",
+        "red hat",
+        "shirt",
+        "watch",
+        "bag",
+    ],
+)
 def test_automatic_mode_rejects_non_root_person_labels(child_label):
     client = FakeClient(
         response=make_response(
