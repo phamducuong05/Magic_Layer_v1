@@ -18,6 +18,13 @@ vlm:
 pipeline:
   segmentation:
     diagnostics_directory: outputs/object_masks
+  cross_class_grouping:
+    enabled: true
+    containment_threshold: 0.70
+    max_bbox_size_ratio: 0.50
+    large_mask_ratio: 0.45
+    large_bbox_ratio: 0.75
+    dimension_tolerance_ratio: 0.05
   completion:
     max_area_growth_ratio: 4.0
     max_bbox_growth_ratio: 9.0

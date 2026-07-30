@@ -33,6 +33,22 @@ class ProcessResult:
     diagnostics: Optional[PipelineDiagnostics] = None
 
 
+@dataclass(frozen=True)
+class MergeEdge:
+    """Immutable provenance for one validated grouping relationship."""
+
+    first_id: str
+    second_id: str
+    reason: str
+    containment_ratio: Optional[float] = None
+    bbox_size_ratio: Optional[float] = None
+
+    @property
+    def member_ids(self) -> tuple[str, str]:
+        """Return a canonical identity without changing edge direction."""
+        return tuple(sorted((self.first_id, self.second_id)))
+
+
 @dataclass
 class DetectedObject:
     """One raw segmentation object in full-image coordinates."""
