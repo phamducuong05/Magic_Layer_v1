@@ -29,13 +29,15 @@ from .prompt_refinement import (
 logger = get_logger(__name__)
 
 COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
-1. Whole objects only. Return the complete root-level parent object, never a
-   component, body part, attachment, surface detail, or item contained inside
-   a larger container or collection.
-2. Use only extremely simple, common English nouns that SAM3 can recognize.
-   Prefer "car" over "four-door passenger automobile" and "person" over
-   "human individual". Avoid colors, materials, styles, states, and academic
-   or highly specific vocabulary unless required to distinguish object types.
+1. Whole objects with structural supports. Return the complete parent object
+   together with all its structural supports, stands, tripods, mounts, or
+   essential attached parts. For example, a camera must include its tripod or
+   stand, a lamp includes its pole and base, and a monitor includes its stand.
+   Never return isolated sub-components or body parts separately unless they
+   are independent foreground objects.
+2. Concise natural vocabulary. Use clear, concise standard English object names
+   (1-3 words). Avoid unnecessary adjectives, colors, materials, or verbose
+   descriptions unless required to distinguish object types.
 3. Foreground only. Ignore distant and background objects completely.
 4. Exclude tiny incidental objects, decorations, textures, shadows,
    reflections, printed images, and uncertain objects.
@@ -50,13 +52,12 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
    monuments, towers, and houses.
 
 Object hierarchy and grouping rules:
-- Vehicles: return only the whole vehicle, not wheels, mirrors, doors,
-  windows, lights, seats, plates, or controls.
+- Vehicles: return the whole vehicle, including wheels, mirrors, and mounts.
 - Containers and collections: return the bag, basket, cart, suitcase, box,
   shelf, tray, pile, rack, or display when important; do not enumerate its
   many contents.
-- Furniture, electronics, and appliances: return the whole parent, not legs,
-  cushions, handles, screens, keys, cables, doors, or controls.
+- Electronics, cameras, tools, and furniture: return the complete object
+  assembly including its legs, stand, tripod, base, or direct mount as a single unit.
 - People and animals: return the whole subject, not body parts, clothes,
   footwear, collars, leashes, bags, glasses, jewelry, or other accessories.
 - Plants and food: return the whole plant, tree, pot, dish, or meal, not

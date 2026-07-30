@@ -205,8 +205,8 @@ def test_both_modes_send_the_same_common_strict_rules():
         system_prompt = client.messages.last_request["system"]
         normalized_prompt = " ".join(system_prompt.split())
         assert "Common strict rules for every returned keyword:" in system_prompt
-        assert "Whole objects only." in system_prompt
-        assert "extremely simple, common English nouns" in system_prompt
+        assert "Whole objects with structural supports." in system_prompt
+        assert "Concise natural vocabulary." in system_prompt
         assert "Foreground only." in system_prompt
         assert "Exclude clothing, footwear" in system_prompt
         assert "regardless of how tiny" in normalized_prompt

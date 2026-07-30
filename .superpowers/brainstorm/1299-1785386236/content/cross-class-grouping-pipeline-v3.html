@@ -1,0 +1,272 @@
+<div id="cross-class-pipeline-v2">
+  <h2>Pipeline đề xuất: grouping intent sớm, materialize group ở cuối</h2>
+  <p class="subtitle">Chỉ bổ sung phân loại pair và cross-class merge intent; toàn bộ same-class grouping, mask, completion và reconstruction hiện có được giữ nguyên.</p>
+
+  <div class="pipeline-tabs" role="tablist" aria-label="Chọn góc nhìn">
+    <button type="button" role="tab" aria-selected="true" data-view="pipeline">Pipeline</button>
+    <button type="button" role="tab" aria-selected="false" data-view="scenario">Ví dụ A–B–C</button>
+    <button type="button" role="tab" aria-selected="false" data-view="review">Điểm cần verify</button>
+  </div>
+
+  <section data-panel="pipeline">
+    <div class="flow">
+      <div class="flow-node">
+        <strong>1. Segmentation</strong>
+        <span>Raw objects + modal masks + original bboxes</span>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node">
+        <strong>2. Đo feature từng raw object</strong>
+        <span>bbox area · mask area · bbox/image ratio · mask/image ratio</span>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node node-warning">
+        <strong>3. Large-object veto</strong>
+        <span>Chỉ veto cross-class containment merge; same-class grouping không đổi</span>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node node-decision">
+        <strong>4. Classify mọi raw-object pair</strong>
+        <span>containment ≥ Tc + size_ratio ≤ Ts + axis dominance + không bị veto</span>
+      </div>
+      <div class="branch-grid">
+        <div class="branch">
+          <div class="branch-label merge-label">Containment hợp lệ</div>
+          <div class="flow-node node-merge">
+            <strong>5A. Lưu merge intent edges</strong>
+            <span>Union-find xác định final groups; suppress internal pairs</span>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="branch-label overlap-label">Regular overlap</div>
+          <div class="flow-node node-heavy">
+            <strong>5B. Heavy logic trên raw objects</strong>
+            <span>Completion external pair; reconstruct riêng object bị occluded</span>
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node node-final">
+        <strong>6. Final materialized grouping</strong>
+        <span>Union modal/amodal/effective RGB support → một draggable component</span>
+      </div>
+    </div>
+  </section>
+
+  <section data-panel="scenario" hidden>
+    <div class="scenario-stage" role="img" aria-label="A chứa B, trong khi C chỉ che B">
+      <div class="object-a">
+        <span>A</span>
+        <div class="object-b"><span>B</span></div>
+      </div>
+      <div class="object-c"><span>C</span></div>
+    </div>
+    <div class="scenario-relations">
+      <div><span class="line merge-line"></span><strong>A—B:</strong> merge intent, không occlude nhau</div>
+      <div><span class="line overlap-line"></span><strong>B—C:</strong> C occludes riêng B</div>
+    </div>
+    <div class="flow-arrow">↓</div>
+    <div class="branch-grid">
+      <div class="flow-node node-heavy">
+        <strong>Heavy processing</strong>
+        <span>Workflow cũ giữ nguyên: reconstruction target = B; occluder = C; A không bị kéo vào</span>
+      </div>
+      <div class="flow-node node-final">
+        <strong>Final components</strong>
+        <span>AB là một layer kéo thả; B giữ RGB đã reconstruct; C đứng riêng</span>
+      </div>
+    </div>
+  </section>
+
+  <section data-panel="review" hidden>
+    <div class="review-list">
+      <div><strong>Containment</strong><span>intersection / smaller_bbox_area ≥ Tc</span><em>Bbox lỏng vẫn có thể false merge</em></div>
+      <div><strong>Size dominance</strong><span>smaller_area / larger_area ≤ Ts + kiểm tra từng trục</span><em>Cần tune Ts bằng dữ liệu thật</em></div>
+      <div><strong>Large-object veto</strong><span>Dùng cả mask_image_ratio và bbox_image_ratio; chỉ chặn cross-class containment</span><em>Same-class grouping giữ nguyên</em></div>
+      <div><strong>Transitive grouping</strong><span>Union raw-pair merge edges; regular edge nội bộ không chặn union</span><em>Bridge object có thể tạo group lớn</em></div>
+      <div><strong>External occlusion</strong><span>Heavy logic theo raw member; chỉ target bị che được reconstruct</span><em>Completion có thể cần cả hai endpoint</em></div>
+      <div><strong>Final composition</strong><span>Materialize group ở cuối, union support theo member</span><em>Cần conflict priority ổn định</em></div>
+      <div><strong>Non-regression</strong><span>Không thay thuật toán mask, amodal, depth ordering hoặc reconstruction</span><em>Chỉ thay nguồn pair đầu vào và final merge edges</em></div>
+    </div>
+  </section>
+</div>
+
+<style>
+  #cross-class-pipeline-v2 {
+    color: var(--text-primary);
+  }
+  #cross-class-pipeline-v2 .pipeline-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1rem 0 1.5rem;
+  }
+  #cross-class-pipeline-v2 .pipeline-tabs button {
+    appearance: none;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.5rem 0.8rem;
+    cursor: pointer;
+  }
+  #cross-class-pipeline-v2 .pipeline-tabs button[aria-selected="true"] {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  #cross-class-pipeline-v2 .flow {
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  #cross-class-pipeline-v2 .flow-node {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--text-tertiary);
+    border-radius: 10px;
+    padding: 0.85rem 1rem;
+    text-align: center;
+  }
+  #cross-class-pipeline-v2 .flow-node span {
+    color: var(--text-secondary);
+  }
+  #cross-class-pipeline-v2 .node-warning { border-left-color: var(--warning); }
+  #cross-class-pipeline-v2 .node-decision { border-left-color: var(--accent); }
+  #cross-class-pipeline-v2 .node-merge { border-left-color: var(--success); }
+  #cross-class-pipeline-v2 .node-heavy { border-left-color: var(--accent); }
+  #cross-class-pipeline-v2 .node-final { border-left-color: var(--success); }
+  #cross-class-pipeline-v2 .flow-arrow {
+    color: var(--text-secondary);
+    font-size: 1.5rem;
+    line-height: 1;
+    text-align: center;
+    padding: 0.4rem 0;
+  }
+  #cross-class-pipeline-v2 .branch-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  #cross-class-pipeline-v2 .branch-label {
+    text-align: center;
+    margin-bottom: 0.5rem;
+    font-size: 0.8rem;
+  }
+  #cross-class-pipeline-v2 .merge-label { color: var(--success); }
+  #cross-class-pipeline-v2 .overlap-label { color: var(--accent); }
+  #cross-class-pipeline-v2 .scenario-stage {
+    position: relative;
+    height: 260px;
+    max-width: 620px;
+    margin: 0 auto 1rem;
+  }
+  #cross-class-pipeline-v2 .object-a,
+  #cross-class-pipeline-v2 .object-b,
+  #cross-class-pipeline-v2 .object-c {
+    position: absolute;
+    display: flex;
+    align-items: flex-start;
+    padding: 0.7rem;
+    border-radius: 12px;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  #cross-class-pipeline-v2 .object-a {
+    left: 12%;
+    top: 12%;
+    width: 50%;
+    height: 68%;
+    background: var(--bg-secondary);
+    border: 3px solid var(--success);
+  }
+  #cross-class-pipeline-v2 .object-b {
+    left: 35%;
+    top: 36%;
+    width: 40%;
+    height: 38%;
+    background: var(--bg-tertiary);
+    border: 3px solid var(--warning);
+  }
+  #cross-class-pipeline-v2 .object-c {
+    left: 52%;
+    top: 42%;
+    width: 33%;
+    height: 39%;
+    justify-content: flex-end;
+    align-items: flex-end;
+    background: var(--bg-secondary);
+    border: 3px dashed var(--accent);
+  }
+  #cross-class-pipeline-v2 .scenario-relations {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+  }
+  #cross-class-pipeline-v2 .line {
+    display: inline-block;
+    width: 28px;
+    border-top: 3px solid;
+    margin-right: 0.45rem;
+    vertical-align: middle;
+  }
+  #cross-class-pipeline-v2 .merge-line { border-color: var(--success); }
+  #cross-class-pipeline-v2 .overlap-line {
+    border-color: var(--accent);
+    border-top-style: dashed;
+  }
+  #cross-class-pipeline-v2 .review-list {
+    display: grid;
+    gap: 0.75rem;
+  }
+  #cross-class-pipeline-v2 .review-list > div {
+    display: grid;
+    grid-template-columns: 150px minmax(220px, 1fr) minmax(180px, 0.8fr);
+    gap: 0.8rem;
+    align-items: start;
+    border-bottom: 1px solid var(--border);
+    padding: 0.7rem 0;
+  }
+  #cross-class-pipeline-v2 .review-list span,
+  #cross-class-pipeline-v2 .review-list em {
+    color: var(--text-secondary);
+    font-style: normal;
+  }
+  #cross-class-pipeline-v2 .review-list em {
+    color: var(--warning);
+  }
+  @media (max-width: 620px) {
+    #cross-class-pipeline-v2 .branch-grid {
+      grid-template-columns: 1fr;
+    }
+    #cross-class-pipeline-v2 .review-list > div {
+      grid-template-columns: 1fr;
+      gap: 0.3rem;
+    }
+  }
+</style>
+
+<script>
+  (() => {
+    const root = document.getElementById("cross-class-pipeline-v2");
+    const buttons = Array.from(root.querySelectorAll("[data-view]"));
+    const panels = Array.from(root.querySelectorAll("[data-panel]"));
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const selected = button.dataset.view;
+        buttons.forEach((candidate) => {
+          candidate.setAttribute("aria-selected", String(candidate === button));
+        });
+        panels.forEach((panel) => {
+          panel.hidden = panel.dataset.panel !== selected;
+        });
+      });
+    });
+  })();
+</script>

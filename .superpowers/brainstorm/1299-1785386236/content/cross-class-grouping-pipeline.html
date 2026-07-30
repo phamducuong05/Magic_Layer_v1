@@ -1,0 +1,284 @@
+<div id="cross-class-pipeline">
+  <h2>Pipeline đề xuất: grouping intent sớm, materialize group ở cuối</h2>
+  <p class="subtitle">Merge edge chỉ loại quan hệ nội bộ; completion và reconstruction vẫn chạy trên từng raw object với occluder bên ngoài.</p>
+
+  <div class="viz-controls" role="tablist" aria-label="Chọn góc nhìn">
+    <button class="btn btn-primary" type="button" role="tab" aria-selected="true" data-view="pipeline">Pipeline</button>
+    <button class="btn" type="button" role="tab" aria-selected="false" data-view="scenario">Ví dụ A–B–C</button>
+    <button class="btn" type="button" role="tab" aria-selected="false" data-view="review">Điểm cần verify</button>
+  </div>
+
+  <section data-panel="pipeline">
+    <svg class="flow-diagram" viewBox="0 0 960 740" role="img" aria-labelledby="pipeline-title pipeline-desc">
+      <title id="pipeline-title">Pipeline cross-class grouping</title>
+      <desc id="pipeline-desc">Raw objects được đo geometry, áp dụng large-object veto, phân loại pair thành merge edge hoặc regular overlap; heavy processing chạy theo raw object rồi mới grouping cuối.</desc>
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+        </marker>
+      </defs>
+
+      <g class="node neutral" transform="translate(330 18)">
+        <rect width="300" height="58" rx="10"></rect>
+        <text x="150" y="25" text-anchor="middle">1. Segmentation</text>
+        <text class="minor" x="150" y="45" text-anchor="middle">Raw objects + modal masks + original bboxes</text>
+      </g>
+      <path class="edge" d="M480 76 V108"></path>
+
+      <g class="node neutral" transform="translate(300 108)">
+        <rect width="360" height="76" rx="10"></rect>
+        <text x="180" y="25" text-anchor="middle">2. Đo feature từng raw object</text>
+        <text class="minor" x="180" y="47" text-anchor="middle">bbox area, mask area, bbox/image ratio</text>
+        <text class="minor" x="180" y="65" text-anchor="middle">mask/image ratio</text>
+      </g>
+      <path class="edge" d="M480 184 V216"></path>
+
+      <g class="node veto" transform="translate(290 216)">
+        <rect width="380" height="84" rx="10"></rect>
+        <text x="190" y="25" text-anchor="middle">3. Large-object veto</text>
+        <text class="minor" x="190" y="48" text-anchor="middle">mask_image_ratio ≥ Tmask</text>
+        <text class="minor" x="190" y="67" text-anchor="middle">HOẶC bbox_image_ratio ≥ Tbbox</text>
+      </g>
+      <path class="edge" d="M480 300 V332"></path>
+
+      <g class="node decision" transform="translate(265 332)">
+        <rect width="430" height="105" rx="10"></rect>
+        <text x="215" y="24" text-anchor="middle">4. Classify mọi raw-object pair</text>
+        <text class="minor" x="215" y="48" text-anchor="middle">containment ≥ Tc + size_ratio ≤ Ts</text>
+        <text class="minor" x="215" y="68" text-anchor="middle">+ axis dominance + không bị veto</text>
+        <text class="minor" x="215" y="89" text-anchor="middle">Không tạo edge từ union bbox</text>
+      </g>
+
+      <path class="edge merge-edge" d="M350 437 C350 470 225 466 225 500"></path>
+      <path class="edge occ-edge" d="M610 437 C610 470 735 466 735 500"></path>
+      <text class="edge-label" x="220" y="469">containment hợp lệ</text>
+      <text class="edge-label" x="651" y="469">regular overlap</text>
+
+      <g class="node merge" transform="translate(65 500)">
+        <rect width="320" height="82" rx="10"></rect>
+        <text x="160" y="24" text-anchor="middle">5A. Lưu merge intent edges</text>
+        <text class="minor" x="160" y="48" text-anchor="middle">Union-find chỉ để xác định final groups</text>
+        <text class="minor" x="160" y="67" text-anchor="middle">Suppress internal pair khỏi occlusion</text>
+      </g>
+
+      <g class="node heavy" transform="translate(575 500)">
+        <rect width="320" height="82" rx="10"></rect>
+        <text x="160" y="24" text-anchor="middle">5B. Heavy logic trên raw objects</text>
+        <text class="minor" x="160" y="48" text-anchor="middle">Amodal completion cho external pair</text>
+        <text class="minor" x="160" y="67" text-anchor="middle">Reconstruct riêng object bị occluded</text>
+      </g>
+
+      <path class="edge merge-edge" d="M225 582 C225 630 386 618 410 647"></path>
+      <path class="edge occ-edge" d="M735 582 C735 630 574 618 550 647"></path>
+
+      <g class="node final" transform="translate(290 647)">
+        <rect width="380" height="76" rx="10"></rect>
+        <text x="190" y="25" text-anchor="middle">6. Final materialized grouping</text>
+        <text class="minor" x="190" y="48" text-anchor="middle">Union modal/amodal/effective RGB support</text>
+        <text class="minor" x="190" y="66" text-anchor="middle">Một draggable component mỗi connected group</text>
+      </g>
+    </svg>
+  </section>
+
+  <section data-panel="scenario" hidden>
+    <svg class="scenario-diagram" viewBox="0 0 960 560" role="img" aria-labelledby="scenario-title scenario-desc">
+      <title id="scenario-title">Ví dụ A, B và C</title>
+      <desc id="scenario-desc">A chứa B nên A và B có merge intent. C che B nên riêng B được reconstruction; cuối pipeline A và B mới thành một component.</desc>
+      <defs>
+        <marker id="scenario-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+        </marker>
+      </defs>
+
+      <g class="object-box" transform="translate(70 75)">
+        <rect class="outer-a" width="235" height="190" rx="14"></rect>
+        <text x="22" y="30">A</text>
+        <rect class="inner-b" x="80" y="65" width="105" height="82" rx="10"></rect>
+        <text x="96" y="95">B</text>
+      </g>
+      <g class="object-box" transform="translate(248 142)">
+        <rect class="occluder-c" width="145" height="112" rx="14"></rect>
+        <text x="105" y="92">C</text>
+      </g>
+
+      <path class="scenario-edge merge-edge" d="M180 290 C180 330 300 330 300 365"></path>
+      <text class="edge-label" x="110" y="320">A—B: merge intent</text>
+      <path class="scenario-edge occ-edge" d="M335 275 C430 305 500 315 560 365"></path>
+      <text class="edge-label" x="410" y="306">C occludes B</text>
+
+      <g class="node heavy" transform="translate(520 350)">
+        <rect width="360" height="90" rx="10"></rect>
+        <text x="180" y="25" text-anchor="middle">Heavy processing</text>
+        <text class="minor" x="180" y="49" text-anchor="middle">A không bị kéo vào chỉ vì đã merge intent với B</text>
+        <text class="minor" x="180" y="69" text-anchor="middle">Reconstruction target = B; occluder = C</text>
+      </g>
+
+      <path class="scenario-edge" d="M700 440 V475 H390"></path>
+      <g class="node final" transform="translate(80 462)">
+        <rect width="310" height="76" rx="10"></rect>
+        <text x="155" y="25" text-anchor="middle">Final components</text>
+        <text class="minor" x="155" y="48" text-anchor="middle">AB = một layer kéo thả</text>
+        <text class="minor" x="155" y="66" text-anchor="middle">B giữ phần RGB đã reconstruct; C đứng riêng</text>
+      </g>
+    </svg>
+  </section>
+
+  <section data-panel="review" hidden>
+    <div class="table-responsive">
+      <table class="table table-sm">
+        <thead>
+          <tr>
+            <th>Điểm review</th>
+            <th>Đề xuất chốt</th>
+            <th>Rủi ro còn lại</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Containment</td>
+            <td><code>intersection / smaller_bbox_area ≥ Tc</code></td>
+            <td>Bbox lỏng vẫn có thể tạo false merge</td>
+          </tr>
+          <tr>
+            <td>Size dominance</td>
+            <td><code>smaller_area / larger_area ≤ Ts</code> và large bbox không nhỏ hơn theo từng trục</td>
+            <td>Cần tune <code>Ts</code> bằng dữ liệu thật</td>
+          </tr>
+          <tr>
+            <td>Large-object veto</td>
+            <td>Dùng cả <code>mask_image_ratio</code> và <code>bbox_image_ratio</code></td>
+            <td>Bàn/kệ lớn có thể bị veto dù merge là mong muốn</td>
+          </tr>
+          <tr>
+            <td>Transitive grouping</td>
+            <td>Union mọi merge edge raw-pair hợp lệ; regular edge nội bộ không chặn union</td>
+            <td>Bridge object có thể tạo group lớn nhưng đây là policy đã chọn</td>
+          </tr>
+          <tr>
+            <td>External occlusion</td>
+            <td>Heavy logic theo raw pair/member; chỉ target bị occluded được reconstruct</td>
+            <td>Amodal completion có thể vẫn cần cả hai endpoint để xác định depth</td>
+          </tr>
+          <tr>
+            <td>Final composition</td>
+            <td>Materialize group ở cuối và union support theo từng member</td>
+            <td>Cần policy xử lý reconstruction-write conflict ổn định</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<style>
+  #cross-class-pipeline {
+    color: var(--foreground);
+  }
+  #cross-class-pipeline .viz-controls {
+    margin: 18px 0;
+  }
+  #cross-class-pipeline svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    color: var(--muted-foreground);
+  }
+  #cross-class-pipeline .node rect {
+    stroke: var(--border);
+    stroke-width: 1.5;
+  }
+  #cross-class-pipeline .node text,
+  #cross-class-pipeline .object-box text {
+    fill: var(--foreground);
+    font-weight: 500;
+  }
+  #cross-class-pipeline .node .minor {
+    fill: var(--muted-foreground);
+    font-weight: 400;
+  }
+  #cross-class-pipeline .neutral rect {
+    fill: color-mix(in srgb, var(--muted) 72%, transparent);
+  }
+  #cross-class-pipeline .veto rect {
+    fill: color-mix(in srgb, var(--viz-series-4) 15%, transparent);
+  }
+  #cross-class-pipeline .decision rect {
+    fill: color-mix(in srgb, var(--viz-series-3) 15%, transparent);
+  }
+  #cross-class-pipeline .merge rect {
+    fill: color-mix(in srgb, var(--viz-series-2) 15%, transparent);
+  }
+  #cross-class-pipeline .heavy rect {
+    fill: color-mix(in srgb, var(--viz-series-1) 15%, transparent);
+  }
+  #cross-class-pipeline .final rect {
+    fill: color-mix(in srgb, var(--viz-series-5) 17%, transparent);
+  }
+  #cross-class-pipeline .edge,
+  #cross-class-pipeline .scenario-edge {
+    fill: none;
+    stroke: var(--muted-foreground);
+    stroke-width: 2;
+    marker-end: url(#arrow);
+  }
+  #cross-class-pipeline .scenario-edge {
+    marker-end: url(#scenario-arrow);
+  }
+  #cross-class-pipeline .merge-edge {
+    stroke: var(--viz-series-2);
+  }
+  #cross-class-pipeline .occ-edge {
+    stroke: var(--viz-series-1);
+    stroke-dasharray: 7 5;
+  }
+  #cross-class-pipeline .edge-label {
+    fill: var(--muted-foreground);
+    font-weight: 400;
+  }
+  #cross-class-pipeline .outer-a {
+    fill: color-mix(in srgb, var(--viz-series-2) 12%, transparent);
+    stroke: var(--viz-series-2);
+    stroke-width: 2;
+  }
+  #cross-class-pipeline .inner-b {
+    fill: color-mix(in srgb, var(--viz-series-3) 22%, transparent);
+    stroke: var(--viz-series-3);
+    stroke-width: 2;
+  }
+  #cross-class-pipeline .occluder-c {
+    fill: color-mix(in srgb, var(--viz-series-1) 25%, transparent);
+    stroke: var(--viz-series-1);
+    stroke-width: 2;
+  }
+  @media (max-width: 520px) {
+    #cross-class-pipeline .flow-diagram,
+    #cross-class-pipeline .scenario-diagram {
+      min-width: 700px;
+    }
+    #cross-class-pipeline section {
+      overflow-x: auto;
+    }
+  }
+</style>
+
+<script>
+  (() => {
+    const root = document.getElementById("cross-class-pipeline");
+    const buttons = Array.from(root.querySelectorAll("[data-view]"));
+    const panels = Array.from(root.querySelectorAll("[data-panel]"));
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const selected = button.dataset.view;
+        buttons.forEach((candidate) => {
+          const active = candidate === button;
+          candidate.classList.toggle("btn-primary", active);
+          candidate.setAttribute("aria-selected", String(active));
+        });
+        panels.forEach((panel) => {
+          panel.hidden = panel.dataset.panel !== selected;
+        });
+      });
+    });
+  })();
+</script>
