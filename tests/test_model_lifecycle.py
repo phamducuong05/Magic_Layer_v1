@@ -153,10 +153,11 @@ def test_hd_painter_load_failure_releases_object_reconstruction_stage(
     first = DetectedObject("first", "person", "person", mask, (0, 0, 4, 4))
     second = DetectedObject("second", "chair", "chair", mask, (0, 0, 4, 4))
 
-    def link_partners(objects):
+    def link_partners(objects, pairs):
+        assert tuple(pairs) == (("first", "second"),)
         objects[0].overlap_partner_ids.add(objects[1].object_id)
         objects[1].overlap_partner_ids.add(objects[0].object_id)
-        return [(objects[0].object_id, objects[1].object_id)]
+        return list(pairs)
 
     def prepare(objects, *_args, **_kwargs):
         objects[0].reconstruction_mask = np.ones((4, 4), dtype=bool)

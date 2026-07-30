@@ -1436,7 +1436,7 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
     assert prepared_image.size == rgb_image.size
     assert prepared_keywords == ["component"]
     assert supplied_processor is processor
-    link_overlaps.assert_called_once_with([detected])
+    link_overlaps.assert_called_once_with([detected], ())
     manager.get_completion_model.assert_not_called()
     manager.get_object_reconstruction_model.assert_not_called()
     prepare_reconstruction.assert_not_called()
@@ -1541,6 +1541,10 @@ def test_process_masks_completes_candidates_without_reconstruction_model(
 ):
     person = _detected_object("person-1", "person", (0, 0, 4, 4))
     chair = _detected_object("chair-1", "chair", (2, 2, 4, 4))
+    person.modal_mask = np.zeros((6, 8), dtype=np.uint8)
+    chair.modal_mask = np.zeros((6, 8), dtype=np.uint8)
+    person.modal_mask[0:4, 0:4] = 255
+    chair.modal_mask[2:6, 2:6] = 255
     person_amodal = person.modal_mask.copy()
     person_amodal[4, 3] = 255
     chair_amodal = chair.modal_mask.copy()
