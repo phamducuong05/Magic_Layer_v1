@@ -31,6 +31,7 @@ from .reconstruction import (
     prepare_raw_reconstruction_masks,
     reconstruct_objects,
 )
+from .relationships import plan_object_relationships
 from .segmentation import extract_raw_objects
 from .types import ProcessResult
 
@@ -114,6 +115,43 @@ def _get_segmentation_config() -> dict[str, Any]:
     except (KeyError, ValueError):
         pass
     return defaults
+
+
+def _get_cross_class_grouping_config() -> dict[str, Any]:
+    """Return tunable relationship defaults for older configurations."""
+    defaults: dict[str, Any] = {
+        "enabled": True,
+        "containment_threshold": 0.70,
+        "max_bbox_size_ratio": 0.50,
+        "large_mask_ratio": 0.45,
+        "large_bbox_ratio": 0.75,
+        "dimension_tolerance_ratio": 0.05,
+    }
+    try:
+        defaults.update(config.get_pipeline_config("cross_class_grouping"))
+    except (KeyError, ValueError):
+        pass
+    return defaults
+
+
+def _plan_relationships(
+    objects: Sequence,
+    image_size: tuple[int, int],
+):
+    """Classify raw pairs without invoking any model-dependent stage."""
+    settings = _get_cross_class_grouping_config()
+    return plan_object_relationships(
+        objects,
+        image_size,
+        enabled=bool(settings["enabled"]),
+        containment_threshold=float(settings["containment_threshold"]),
+        max_bbox_size_ratio=float(settings["max_bbox_size_ratio"]),
+        large_mask_ratio=float(settings["large_mask_ratio"]),
+        large_bbox_ratio=float(settings["large_bbox_ratio"]),
+        dimension_tolerance_ratio=float(
+            settings["dimension_tolerance_ratio"]
+        ),
+    )
 
 
 def _mark_missing_reconstruction_model(objects: Sequence) -> None:
@@ -208,8 +246,12 @@ def process_masks(
     if not objects:
         return []
 
+    relationship_plan = _plan_relationships(objects, image.size)
     with trace_stage(logger, "overlap_detection"):
-        pairs = link_overlap_partners(objects)
+        pairs = link_overlap_partners(
+            objects,
+            relationship_plan.external_overlap_pairs,
+        )
         log_event(
             logger,
             "overlap_detection",
@@ -322,8 +364,12 @@ def process_image(
     background_diagnostics_directory = background_config.get(
         "diagnostics_directory"
     )
+    relationship_plan = _plan_relationships(objects, image.size)
     with trace_stage(logger, "overlap_detection"):
-        potential_overlap_pairs = link_overlap_partners(objects)
+        potential_overlap_pairs = link_overlap_partners(
+            objects,
+            relationship_plan.external_overlap_pairs,
+        )
         log_event(
             logger,
             "overlap_detection",
@@ -663,7 +709,9 @@ def process_image(
         with trace_stage(logger, "grouping", object_count=len(objects)):
             with timings.measure("group_composition"):
                 final_groups = group_reconstructed_objects(
-                    objects, pair_decisions or []
+                    objects,
+                    pair_decisions or [],
+                    merge_edges=relationship_plan.merge_edges,
                 )
                 compose_group_sources(image, final_groups)
             log_event(

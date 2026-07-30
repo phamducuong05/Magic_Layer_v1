@@ -216,6 +216,99 @@ def test_process_masks_does_not_resolve_completion_without_candidates(
     manager.get_completion_model.assert_not_called()
 
 
+def test_process_masks_skips_internal_containment_completion(monkeypatch):
+    from backend.pipeline import orchestrator
+    from backend.pipeline.types import DetectedObject
+
+    large_mask = np.zeros((20, 20), dtype=np.uint8)
+    large_mask[0:12, 0:12] = 255
+    small_mask = np.zeros((20, 20), dtype=np.uint8)
+    small_mask[3:7, 3:7] = 255
+    large = DetectedObject(
+        "large", "table", "table", large_mask, (0, 0, 12, 12)
+    )
+    small = DetectedObject(
+        "small", "product", "product", small_mask, (3, 3, 4, 4)
+    )
+    manager = Mock()
+    manager.get_segmentation_model.return_value.get_processor.return_value = (
+        Mock()
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "extract_raw_objects",
+        Mock(return_value=[large, small]),
+    )
+    complete = Mock()
+    monkeypatch.setattr(orchestrator, "_complete_candidates", complete)
+
+    masks = orchestrator.process_masks(
+        Image.new("RGB", (20, 20)),
+        ["table", "product"],
+        manager,
+    )
+
+    assert len(masks) == 2
+    complete.assert_not_called()
+
+
+def test_merge_intent_does_not_expand_external_completion_target(monkeypatch):
+    from backend.pipeline import orchestrator
+    from backend.pipeline.types import DetectedObject
+
+    def detected(
+        object_id: str,
+        semantic_class: str,
+        bbox: tuple[int, int, int, int],
+    ) -> DetectedObject:
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        x, y, width, height = bbox
+        mask[y : y + height, x : x + width] = 255
+        return DetectedObject(
+            object_id,
+            semantic_class,
+            semantic_class,
+            mask,
+            bbox,
+        )
+
+    # A contains exactly 70% of B. C overlaps only B's exposed strip.
+    a = detected("a", "table", (0, 0, 20, 20))
+    b = detected("b", "product", (13, 5, 10, 10))
+    c = detected("c", "hand", (21, 5, 6, 10))
+    manager = Mock()
+    manager.get_segmentation_model.return_value.get_processor.return_value = (
+        Mock()
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "extract_raw_objects",
+        Mock(return_value=[a, b, c]),
+    )
+    captured_completion_ids: list[str] = []
+
+    def capture_completion(_image, _objects, _manager, candidates):
+        captured_completion_ids.extend(
+            item.object_id for item in candidates
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_complete_candidates",
+        Mock(side_effect=capture_completion),
+    )
+
+    masks = orchestrator.process_masks(
+        Image.new("RGB", (40, 40)),
+        ["table", "product", "hand"],
+        manager=manager,
+    )
+
+    assert len(masks) == 3
+    assert captured_completion_ids == ["b", "c"]
+    assert "a" not in captured_completion_ids
+
+
 def test_process_image_completes_overlap_without_reconstruction_model(
     monkeypatch,
 ):

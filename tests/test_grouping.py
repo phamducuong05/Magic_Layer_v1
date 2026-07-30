@@ -370,12 +370,24 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
     monkeypatch,
 ):
     from backend.pipeline import orchestrator
+    from backend.pipeline.types import MergeEdge
 
     first = _detected("first", "person", (0, 0, 3, 3), segmentation_index=0)
     second = _detected("second", "chair", (1, 1, 3, 3), segmentation_index=1)
     objects = [first, second]
     final_groups = [Mock(name="final-group")]
     events: list[str] = []
+    expected_edge = MergeEdge(
+        "first",
+        "second",
+        "cross_class_bbox_containment",
+        containment_ratio=0.8,
+        bbox_size_ratio=0.4,
+    )
+    relationship_plan = Mock(
+        external_overlap_pairs=(("first", "second"),),
+        merge_edges=(expected_edge,),
+    )
 
     manager = Mock()
     manager.has_object_reconstruction_model.return_value = True
@@ -388,8 +400,21 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
     monkeypatch.setattr(orchestrator, "_segment", Mock(return_value=objects))
     monkeypatch.setattr(
         orchestrator,
+        "_plan_relationships",
+        Mock(return_value=relationship_plan),
+    )
+
+    def link(supplied, pairs):
+        assert supplied == objects
+        assert tuple(pairs) == (("first", "second"),)
+        first.overlap_partner_ids.add("second")
+        second.overlap_partner_ids.add("first")
+        return list(pairs)
+
+    monkeypatch.setattr(
+        orchestrator,
         "link_overlap_partners",
-        Mock(return_value=[("first", "second")]),
+        Mock(side_effect=link),
     )
     monkeypatch.setattr(orchestrator, "_complete_candidates", Mock())
     monkeypatch.setattr(
@@ -440,9 +465,10 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         raising=False,
     )
 
-    def group(supplied, decisions):
+    def group(supplied, decisions, *, merge_edges):
         assert supplied == objects
         assert decisions == []
+        assert tuple(merge_edges) == (expected_edge,)
         events.append("group")
         return final_groups
 
@@ -516,6 +542,133 @@ def test_orchestrator_groups_after_reconstruction_before_downstream(
         is reconstruction_model.reconstruct_many
     )
     manager.offload_model.assert_called_once_with("object_reconstruction")
+
+
+def test_external_occlusion_reconstructs_only_the_affected_group_member(
+    monkeypatch,
+):
+    from backend.core.occlusion import PairDecision
+    from backend.pipeline import orchestrator
+
+    def detected(
+        object_id: str,
+        semantic_class: str,
+        bbox: tuple[int, int, int, int],
+    ) -> DetectedObject:
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        x, y, width, height = bbox
+        mask[y : y + height, x : x + width] = 255
+        return DetectedObject(
+            object_id,
+            semantic_class,
+            semantic_class,
+            mask,
+            bbox,
+        )
+
+    a = detected("a", "table", (0, 0, 20, 20))
+    b = detected("b", "product", (13, 5, 10, 10))
+    c = detected("c", "hand", (21, 5, 6, 10))
+    objects = [a, b, c]
+    decision = PairDecision(
+        first_id="b",
+        second_id="c",
+        occluded_id="b",
+        occluder_id="c",
+        reconstruction_directions=(("b", "c"),),
+    )
+
+    manager = Mock()
+    manager.has_object_reconstruction_model.return_value = True
+    manager.get_matting_model.return_value.process = Mock()
+    manager.get_background_inpainting_model.return_value.process = Mock()
+    monkeypatch.setattr(orchestrator, "_segment", Mock(return_value=objects))
+    monkeypatch.setattr(orchestrator, "_complete_candidates", Mock())
+
+    def retain_external_pair(supplied, pairs):
+        assert supplied == objects
+        assert list(pairs) == [("b", "c")]
+        return list(pairs)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "filter_pairs_by_amodal_overlap",
+        Mock(side_effect=retain_external_pair),
+    )
+
+    def prepare(supplied, pairs, *_args, **_kwargs):
+        assert supplied == objects
+        assert list(pairs) == [("b", "c")]
+        b.reconstruction_mask = np.zeros_like(b.modal_mask, dtype=bool)
+        b.reconstruction_mask[5, 21] = True
+        b.occluder_ids.add("c")
+        b.occluder_classes.add(c.semantic_class)
+        return [decision]
+
+    monkeypatch.setattr(
+        orchestrator,
+        "prepare_raw_reconstruction_masks",
+        Mock(side_effect=prepare),
+    )
+    reconstructed_ids: list[str] = []
+
+    def reconstruct(_image, supplied, *_args, **_kwargs):
+        reconstructed_ids.extend(
+            item.object_id
+            for item in supplied
+            if item.reconstruction_mask is not None
+            and np.any(item.reconstruction_mask)
+        )
+        b.reconstruction_canvas = Image.new("RGB", (2, 2), "red")
+        b.reconstruction_roi = SquareROI(20, 4, 2, 40, 40)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "reconstruct_objects",
+        Mock(side_effect=reconstruct),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "refine_reconstruction_supports",
+        Mock(),
+    )
+    final_groups = []
+    real_group = orchestrator.group_reconstructed_objects
+
+    def capture_groups(*args, **kwargs):
+        groups = real_group(*args, **kwargs)
+        final_groups.extend(groups)
+        return groups
+
+    monkeypatch.setattr(
+        orchestrator,
+        "group_reconstructed_objects",
+        Mock(side_effect=capture_groups),
+    )
+    monkeypatch.setattr(orchestrator, "compose_group_sources", Mock())
+    monkeypatch.setattr(orchestrator, "refine_objects", Mock())
+    monkeypatch.setattr(
+        orchestrator,
+        "extract_object_layers",
+        Mock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "generate_final_background",
+        Mock(return_value=Image.new("RGB", (40, 40))),
+    )
+
+    orchestrator.process_image(
+        Image.new("RGB", (40, 40)),
+        ["table", "product", "hand"],
+        manager=manager,
+    )
+
+    assert reconstructed_ids == ["b"]
+    assert a.reconstruction_mask is None
+    assert a.occluder_ids == set()
+    assert b.occluder_ids == {"c"}
+    assert any(group.member_ids == ("a", "b") for group in final_groups)
 
 
 def test_final_groups_are_ordered_back_to_front_from_pair_decisions():
