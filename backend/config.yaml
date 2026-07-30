@@ -78,6 +78,8 @@ pipeline:
   matting:
     context_ratio: 0.025
     support_dilation_pixels: 2
+    alpha_presence_threshold: 0.05
+    min_member_alpha_coverage_ratio: 0.95
     final_alpha_threshold: 0.05
     final_min_component_area_pixels: 4
   diagnostics:

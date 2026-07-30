@@ -504,6 +504,82 @@ def refine_masks(
     return soft_alphas
 
 
+def _member_alpha_fallback_domain(member: DetectedObject) -> np.ndarray:
+    """Return pixels that must remain visible for one grouped member."""
+    modal = member.modal_mask > 0
+    replacement = member.reconstruction_replacement_domain_mask
+    accepted_rgb = member.reconstruction_accepted_rgb_mask
+    if (
+        member.reconstruction_canvas is None
+        or replacement is None
+        or accepted_rgb is None
+        or replacement.shape != modal.shape
+        or accepted_rgb.shape != modal.shape
+    ):
+        return modal
+    return modal | (
+        replacement.astype(bool) & accepted_rgb.astype(bool)
+    )
+
+
+def recover_missing_member_alpha(
+    alpha: np.ndarray,
+    group: GroupedObject,
+    roi: SquareROI,
+    *,
+    presence_threshold: float,
+    min_coverage_ratio: float,
+    stage: str,
+) -> np.ndarray:
+    """Restore hard alpha only for members omitted by matting."""
+    if not math.isfinite(presence_threshold) or not (
+        0.0 <= presence_threshold <= 1.0
+    ):
+        raise ValueError("alpha presence threshold must be in [0, 1]")
+    if not math.isfinite(min_coverage_ratio) or not (
+        0.0 <= min_coverage_ratio <= 1.0
+    ):
+        raise ValueError(
+            "minimum member alpha coverage ratio must be in [0, 1]"
+        )
+    if alpha.shape != (roi.size, roi.size):
+        raise ValueError("alpha shape must match the matting ROI")
+
+    finite_alpha = np.where(np.isfinite(alpha), alpha, 0.0)
+    validated = np.clip(finite_alpha.astype(np.float64), 0.0, 1.0)
+    for member in group.members:
+        fallback_domain = crop_array(
+            _member_alpha_fallback_domain(member),
+            roi,
+        ).astype(bool)
+        domain_pixels = int(np.count_nonzero(fallback_domain))
+        if domain_pixels == 0:
+            continue
+        covered_pixels = int(
+            np.count_nonzero(
+                fallback_domain & (validated > presence_threshold)
+            )
+        )
+        coverage_ratio = covered_pixels / domain_pixels
+        if coverage_ratio >= min_coverage_ratio:
+            continue
+
+        validated[fallback_domain] = 1.0
+        log_event(
+            logger,
+            "matting",
+            "member_alpha_fallback",
+            level="WARNING",
+            group_id=group.group_id,
+            member_id=member.object_id,
+            fallback_stage=stage,
+            coverage_ratio=coverage_ratio,
+            fallback_domain_pixels=domain_pixels,
+            reason="insufficient_member_alpha_coverage",
+        )
+    return validated
+
+
 def refine_objects(
     image: Image.Image,
     objects: Sequence[GroupedObject],
@@ -511,6 +587,8 @@ def refine_objects(
     *,
     context_ratio: float,
     support_dilation_pixels: int,
+    alpha_presence_threshold: float = 0.05,
+    min_member_alpha_coverage_ratio: float = 0.95,
 ) -> None:
     """Matte final groups from aligned original or reconstructed RGB crops."""
     if support_dilation_pixels < 0:
@@ -599,6 +677,14 @@ def refine_objects(
             alpha_crop[
                 (alpha_crop <= THRESHOLD_ALPHA) | ~valid_support
             ] = 0.0
+            alpha_crop = recover_missing_member_alpha(
+                alpha_crop,
+                group,
+                roi,
+                presence_threshold=alpha_presence_threshold,
+                min_coverage_ratio=min_member_alpha_coverage_ratio,
+                stage="birefnet_output",
+            )
 
             group.matting_source = source_crop
             group.matting_roi = roi

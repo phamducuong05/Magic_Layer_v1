@@ -6,7 +6,7 @@ from PIL import Image
 
 from backend.pipeline.grouping import group_reconstructed_objects
 from backend.pipeline.roi import SquareROI
-from backend.pipeline.types import DetectedObject
+from backend.pipeline.types import DetectedObject, MergeEdge
 
 
 def _group(
@@ -132,3 +132,92 @@ def test_mixed_group_matting_excludes_failed_members_amodal_hole():
 
     assert group.soft_alpha[7, 7] > 0
     assert group.soft_alpha[8, 8] == 0
+
+
+def test_group_matting_falls_back_to_modal_mask_when_birefnet_is_empty():
+    from backend.pipeline.matting import refine_objects
+
+    group = _group()
+
+    refine_objects(
+        Image.new("RGB", (12, 12), "white"),
+        [group],
+        Mock(return_value=torch.zeros((2, 2), dtype=torch.float32)),
+        context_ratio=0.0,
+        support_dilation_pixels=0,
+    )
+
+    modal = group.members[0].modal_mask > 0
+    assert np.all(group.soft_alpha[modal] == 1.0)
+    assert np.count_nonzero(group.soft_alpha) == np.count_nonzero(modal)
+
+
+def test_group_matting_uses_only_safe_reconstructed_replacement_fallback():
+    from backend.pipeline.matting import refine_objects
+
+    group = _group(reconstructed=True)
+    member = group.members[0]
+    member.amodal_mask = member.modal_mask > 0
+    member.amodal_mask[7, 7] = True
+    member.amodal_mask[8, 8] = True
+    replacement = member.amodal_mask.copy()
+    accepted = np.zeros_like(replacement)
+    accepted[7, 7] = True
+    member.reconstruction_replacement_domain_mask = replacement
+    member.reconstruction_accepted_rgb_mask = accepted
+    group.amodal_mask = member.amodal_mask.copy()
+    group.composed_roi = SquareROI(4, 4, 5, 12, 12)
+    group.composed_source = Image.new("RGB", (5, 5), "red")
+
+    refine_objects(
+        Image.new("RGB", (12, 12), "white"),
+        [group],
+        Mock(return_value=torch.zeros((5, 5), dtype=torch.float32)),
+        context_ratio=0.0,
+        support_dilation_pixels=0,
+    )
+
+    assert np.all(group.soft_alpha[member.modal_mask > 0] == 1.0)
+    assert group.soft_alpha[7, 7] == 1.0
+    assert group.soft_alpha[8, 8] == 0.0
+
+
+def test_group_matting_falls_back_only_for_member_missing_from_alpha():
+    from backend.pipeline.matting import refine_objects
+
+    shape = (12, 12)
+    first_modal = np.zeros(shape, dtype=np.uint8)
+    first_modal[2:4, 2:4] = 255
+    second_modal = np.zeros(shape, dtype=np.uint8)
+    second_modal[8:10, 8:10] = 255
+    first = DetectedObject(
+        object_id="first",
+        semantic_class="person",
+        display_label="person",
+        modal_mask=first_modal,
+        bbox=(2, 2, 2, 2),
+    )
+    second = DetectedObject(
+        object_id="second",
+        semantic_class="person",
+        display_label="person",
+        modal_mask=second_modal,
+        bbox=(8, 8, 2, 2),
+    )
+    group = group_reconstructed_objects(
+        [first, second],
+        merge_edges=(MergeEdge("first", "second", "test_group"),),
+    )[0]
+    model_alpha = torch.zeros((8, 8), dtype=torch.float32)
+    model_alpha[0:2, 0:2] = 0.6
+
+    refine_objects(
+        Image.new("RGB", (12, 12), "white"),
+        [group],
+        Mock(return_value=model_alpha),
+        context_ratio=0.0,
+        support_dilation_pixels=0,
+    )
+
+    assert np.allclose(group.soft_alpha[first_modal > 0], 0.6)
+    assert np.all(group.soft_alpha[second_modal > 0] == 1.0)

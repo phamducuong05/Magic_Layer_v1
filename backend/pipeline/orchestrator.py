@@ -732,6 +732,16 @@ def process_image(
                     support_dilation_pixels=int(
                         matting_config["support_dilation_pixels"]
                     ),
+                    alpha_presence_threshold=float(
+                        matting_config.get(
+                            "alpha_presence_threshold", 0.05
+                        )
+                    ),
+                    min_member_alpha_coverage_ratio=float(
+                        matting_config.get(
+                            "min_member_alpha_coverage_ratio", 0.95
+                        )
+                    ),
                 )
     finally:
         matte = None
@@ -758,6 +768,16 @@ def process_image(
                 final_min_component_area_pixels=int(
                     matting_config.get(
                         "final_min_component_area_pixels", 4
+                    )
+                ),
+                alpha_presence_threshold=float(
+                    matting_config.get(
+                        "alpha_presence_threshold", 0.05
+                    )
+                ),
+                min_member_alpha_coverage_ratio=float(
+                    matting_config.get(
+                        "min_member_alpha_coverage_ratio", 0.95
                     )
                 ),
             )

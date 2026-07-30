@@ -10,7 +10,7 @@ from ..core.helpers import _bbox_from_mask, _image_to_base64
 from ..core.layerd_refine import refine_background
 from ..core.logging import get_logger, log_event
 from ..core.refine import build_inpaint_mask, refine_alpha_with_colors
-from .matting import THRESHOLD_ALPHA
+from .matting import THRESHOLD_ALPHA, recover_missing_member_alpha
 from .roi import crop_array
 from .types import GroupedObject, ObjectLayer
 
@@ -54,6 +54,8 @@ def extract_object_layers(
     *,
     final_alpha_threshold: float = THRESHOLD_ALPHA,
     final_min_component_area_pixels: int = 0,
+    alpha_presence_threshold: float = 0.05,
+    min_member_alpha_coverage_ratio: float = 0.95,
 ) -> list[ObjectLayer]:
     """Render final groups from their exact matting RGB source and ROI."""
     if not np.isfinite(final_alpha_threshold) or not (
@@ -162,6 +164,14 @@ def extract_object_layers(
             min_component_area_pixels=(
                 final_min_component_area_pixels
             ),
+        )
+        refined_alpha = recover_missing_member_alpha(
+            refined_alpha,
+            group,
+            roi,
+            presence_threshold=alpha_presence_threshold,
+            min_coverage_ratio=min_member_alpha_coverage_ratio,
+            stage="final_alpha",
         )
 
         real_pixels = np.zeros((roi.size, roi.size), dtype=bool)

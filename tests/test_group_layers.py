@@ -188,3 +188,47 @@ def test_layer_cleanup_removes_weak_fringe_and_tiny_unanchored_component(
     )
     assert encoded[0].size == (2, 2)
     assert np.all(np.asarray(encoded[0])[..., 3] == 204)
+
+
+def test_final_alpha_guard_preserves_object_removed_by_color_refinement(
+    monkeypatch,
+):
+    from backend.pipeline import layers as layer_stage
+
+    group = _group(reconstructed=False)
+    encoded = []
+    monkeypatch.setattr(
+        layer_stage,
+        "build_inpaint_mask",
+        Mock(side_effect=lambda _source, hard_mask, _kernel: hard_mask),
+    )
+    monkeypatch.setattr(
+        layer_stage,
+        "refine_background",
+        Mock(side_effect=lambda background, *_args, **_kwargs: background),
+    )
+    monkeypatch.setattr(
+        layer_stage,
+        "refine_alpha_with_colors",
+        Mock(
+            side_effect=lambda source, _background, alpha, *_args: (
+                np.zeros_like(alpha),
+                source,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        layer_stage,
+        "_image_to_base64",
+        Mock(side_effect=lambda image: encoded.append(image.copy()) or "rgba"),
+    )
+
+    result = layer_stage.extract_object_layers(
+        [group],
+        (1, 1),
+        Mock(return_value=Image.new("RGB", (6, 6), "black")),
+    )
+
+    assert len(result) == 1
+    assert encoded[0].size == (2, 2)
+    assert np.all(np.asarray(encoded[0])[..., 3] == 255)
