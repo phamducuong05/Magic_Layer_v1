@@ -19,12 +19,6 @@ from .keyword_extractor import (
     TargetKeywordExtraction,
     normalize_keywords,
 )
-from .prompt_refinement import (
-    union_ranked_occluders,
-    validate_people_keyword_usage,
-    validate_refined_target,
-    validate_root_person_labels,
-)
 
 logger = get_logger(__name__)
 
@@ -153,6 +147,47 @@ OCCLUDER_OUTPUT_SCHEMA = {
 
 # Preserve the previous public constant for automatic-extraction callers.
 KEYWORD_OUTPUT_SCHEMA = FOREGROUND_OUTPUT_SCHEMA
+
+
+def union_ranked_occluders(
+    per_target: Sequence[Sequence[str]],
+    *,
+    target_keywords: Sequence[str],
+    max_occluders: int,
+) -> list[str]:
+    """Union ranked lists fairly so every target can contribute an occluder."""
+    if max_occluders < 0:
+        raise ValueError("max_occluders must be non-negative")
+
+    excluded = {
+        target.strip().casefold()
+        for target in target_keywords
+        if target.strip()
+    }
+    seen = set(excluded)
+    cursors = [0] * len(per_target)
+    result: list[str] = []
+
+    while len(result) < max_occluders:
+        made_progress = False
+        for target_index, occluders in enumerate(per_target):
+            while cursors[target_index] < len(occluders):
+                value = occluders[cursors[target_index]]
+                cursors[target_index] += 1
+                normalized = " ".join(value.split())
+                key = normalized.casefold()
+                if not normalized or key in seen:
+                    continue
+                seen.add(key)
+                result.append(normalized)
+                made_progress = True
+                break
+            if len(result) == max_occluders:
+                break
+        if not made_progress:
+            break
+
+    return result
 
 
 class ClaudeVisionKeywordExtractor:
@@ -300,7 +335,14 @@ class ClaudeVisionKeywordExtractor:
         )
         max_length = int(self._settings.get("max_keyword_length", 80))
         visible_person_count = payload.get("visible_person_count")
-        validate_people_keyword_usage([], visible_person_count)
+        if (
+            isinstance(visible_person_count, bool)
+            or not isinstance(visible_person_count, int)
+            or visible_person_count < 0
+        ):
+            raise InvalidKeywordExtraction(
+                "Claude returned an invalid visible person count."
+            )
 
         if not is_occluder_mode:
             raw_keywords = payload.get("keywords")
@@ -312,11 +354,6 @@ class ClaudeVisionKeywordExtractor:
                 raw_keywords,
                 max_keywords=max(max_keywords, len(raw_keywords)),
                 max_length=max_length,
-            )
-            validate_root_person_labels(all_keywords)
-            validate_people_keyword_usage(
-                all_keywords,
-                visible_person_count,
             )
             keywords = all_keywords[:max_keywords]
             return KeywordExtractionResult(
@@ -366,12 +403,7 @@ class ClaudeVisionKeywordExtractor:
                     "Claude returned invalid target results."
                 )
 
-            keyword = validate_refined_target(source_keyword, candidate)
-            if keyword.casefold() != candidate.strip().casefold():
-                logger.info(
-                    "Rejected target refinement at index %d; using input",
-                    input_index,
-                )
+            keyword = candidate.strip() or source_keyword
             normalized_occluders = (
                 normalize_keywords(
                     raw_occluders,
@@ -383,11 +415,6 @@ class ClaudeVisionKeywordExtractor:
                 )
                 if raw_occluders
                 else []
-            )
-            validate_root_person_labels(normalized_occluders)
-            validate_people_keyword_usage(
-                normalized_occluders,
-                visible_person_count,
             )
             per_target_occluders.append(normalized_occluders)
             target_results.append(

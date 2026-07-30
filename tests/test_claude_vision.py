@@ -361,37 +361,6 @@ def test_manual_mode_rejects_incomplete_or_invalid_target_indexes(
         )
 
 
-def test_automatic_mode_rejects_people_for_three_visible_people():
-    client = FakeClient(
-        response=make_response(
-            '{"visible_person_count": 3, "keywords": ["people"]}'
-        )
-    )
-    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
-
-    with pytest.raises(InvalidKeywordExtraction, match="people"):
-        asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
-
-
-def test_automatic_mode_validates_people_beyond_the_output_quota():
-    raw_keywords = [f"object-{index}" for index in range(10)]
-    raw_keywords.append("people")
-    client = FakeClient(
-        response=make_response(
-            json.dumps(
-                {
-                    "visible_person_count": 2,
-                    "keywords": raw_keywords,
-                }
-            )
-        )
-    )
-    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
-
-    with pytest.raises(InvalidKeywordExtraction, match="people"):
-        asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
-
-
 def test_automatic_mode_allows_people_above_three_visible_people():
     client = FakeClient(
         response=make_response(
@@ -405,56 +374,6 @@ def test_automatic_mode_allows_people_above_three_visible_people():
     )
 
     assert result.keywords == ["people"]
-
-
-@pytest.mark.parametrize(
-    "child_label",
-    [
-        "hand",
-        "arm",
-        "foot",
-        "glasses",
-        "sunglasses",
-        "jacket",
-        "shirt",
-        "watch",
-        "bag",
-    ],
-)
-def test_automatic_mode_rejects_non_root_person_labels(child_label):
-    client = FakeClient(
-        response=make_response(
-            json.dumps(
-                {
-                    "visible_person_count": 1,
-                    "keywords": [child_label],
-                }
-            )
-        )
-    )
-    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
-
-    with pytest.raises(InvalidKeywordExtraction, match="root person"):
-        asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
-
-
-def test_manual_mode_rejects_non_root_person_occluder():
-    client = FakeClient(
-        response=make_response(
-            '{"visible_person_count": 1, "target_results": ['
-            '{"input_index": 0, "refined_keyword": "product", '
-            '"occluders": ["hand"]}]}'
-        )
-    )
-    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
-
-    with pytest.raises(InvalidKeywordExtraction, match="root person"):
-        asyncio.run(
-            extractor.extract_keywords(
-                Image.new("RGB", (8, 8)),
-                target_keywords=["product"],
-            )
-        )
 
 
 def test_manual_prompt_requires_exhaustive_parent_level_occluders():
