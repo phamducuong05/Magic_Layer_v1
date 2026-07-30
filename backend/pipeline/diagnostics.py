@@ -14,6 +14,7 @@ import torch
 
 from ..core.logging import get_logger
 from ..core.occlusion import OverlapPair, PairDecision
+from .relationships import PairRelation, RelationshipPlan
 from .types import DetectedObject, GroupedObject
 
 
@@ -36,6 +37,10 @@ class ObjectDiagnostics:
     amodal_area: int
     raw_completion_hole_area: int | None
     effective_completion_hole_area: int | None
+    mask_image_ratio: float | None = None
+    bbox_image_ratio: float | None = None
+    large_mask_veto: bool = False
+    large_bbox_veto: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,17 @@ class GroupDiagnostics:
     group_id: str
     member_ids: tuple[str, ...]
     reconstruction_conflicts: tuple[tuple[str, str], ...]
+    semantic_classes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RelationshipDecisionDiagnostics:
+    first_id: str
+    second_id: str
+    relation: str
+    reason: str
+    containment_ratio: float | None
+    bbox_size_ratio: float | None
 
 
 @dataclass(frozen=True)
@@ -78,6 +94,15 @@ class PipelineDiagnostics:
     fallbacks: tuple[FallbackDiagnostics, ...]
     stage_timings_ms: dict[str, float]
     peak_gpu_memory_bytes: int | None
+    same_class_merge_count: int = 0
+    cross_class_containment_merge_count: int = 0
+    regular_overlap_count: int = 0
+    external_overlap_count: int = 0
+    large_mask_veto_count: int = 0
+    large_bbox_veto_count: int = 0
+    relationship_decisions: tuple[
+        RelationshipDecisionDiagnostics, ...
+    ] = ()
 
     def to_log_dict(self) -> dict[str, Any]:
         """Return JSON-safe metadata without image arrays or model features."""
@@ -150,8 +175,12 @@ def build_pipeline_diagnostics(
     pair_decisions: Sequence[PairDecision],
     stage_timings_ms: Mapping[str, float],
     peak_gpu_memory_bytes: int | None,
+    relationship_plan: RelationshipPlan | None = None,
 ) -> PipelineDiagnostics:
     """Build immutable diagnostic metadata from final pipeline state."""
+    relationship_metrics = (
+        relationship_plan.object_metrics if relationship_plan is not None else {}
+    )
     object_records = tuple(
         ObjectDiagnostics(
             object_id=detected.object_id,
@@ -167,6 +196,26 @@ def build_pipeline_diagnostics(
             raw_completion_hole_area=detected.completion_hole_area,
             effective_completion_hole_area=(
                 detected.effective_completion_hole_area
+            ),
+            mask_image_ratio=(
+                relationship_metrics[detected.object_id].mask_image_ratio
+                if detected.object_id in relationship_metrics
+                else None
+            ),
+            bbox_image_ratio=(
+                relationship_metrics[detected.object_id].bbox_image_ratio
+                if detected.object_id in relationship_metrics
+                else None
+            ),
+            large_mask_veto=(
+                relationship_metrics[detected.object_id].large_mask_veto
+                if detected.object_id in relationship_metrics
+                else False
+            ),
+            large_bbox_veto=(
+                relationship_metrics[detected.object_id].large_bbox_veto
+                if detected.object_id in relationship_metrics
+                else False
             ),
         )
         for detected in raw_objects
@@ -198,8 +247,24 @@ def build_pipeline_diagnostics(
             group_id=group.group_id,
             member_ids=group.member_ids,
             reconstruction_conflicts=group.reconstruction_conflicts,
+            semantic_classes=group.semantic_classes,
         )
         for group in final_groups
+    )
+    relationship_records = tuple(
+        RelationshipDecisionDiagnostics(
+            first_id=decision.first_id,
+            second_id=decision.second_id,
+            relation=decision.relation.value,
+            reason=decision.reason,
+            containment_ratio=decision.containment_ratio,
+            bbox_size_ratio=decision.bbox_size_ratio,
+        )
+        for decision in (
+            relationship_plan.pair_decisions
+            if relationship_plan is not None
+            else ()
+        )
     )
     fallbacks: list[FallbackDiagnostics] = []
     for detected in raw_objects:
@@ -227,6 +292,11 @@ def build_pipeline_diagnostics(
         stage: float(stage_timings_ms.get(stage, 0.0))
         for stage in REQUIRED_TIMING_STAGES
     }
+    relationship_decisions = (
+        relationship_plan.pair_decisions
+        if relationship_plan is not None
+        else ()
+    )
     return PipelineDiagnostics(
         raw_object_count=len(raw_objects),
         final_group_count=len(final_groups),
@@ -239,6 +309,34 @@ def build_pipeline_diagnostics(
         fallbacks=tuple(fallbacks),
         stage_timings_ms=timings,
         peak_gpu_memory_bytes=peak_gpu_memory_bytes,
+        same_class_merge_count=sum(
+            decision.relation is PairRelation.SAME_CLASS_MERGE
+            for decision in relationship_decisions
+        ),
+        cross_class_containment_merge_count=sum(
+            decision.relation
+            is PairRelation.CROSS_CLASS_CONTAINMENT_MERGE
+            for decision in relationship_decisions
+        ),
+        regular_overlap_count=(
+            len(relationship_plan.regular_overlap_pairs)
+            if relationship_plan is not None
+            else 0
+        ),
+        external_overlap_count=(
+            len(relationship_plan.external_overlap_pairs)
+            if relationship_plan is not None
+            else 0
+        ),
+        large_mask_veto_count=sum(
+            metrics.large_mask_veto
+            for metrics in relationship_metrics.values()
+        ),
+        large_bbox_veto_count=sum(
+            metrics.large_bbox_veto
+            for metrics in relationship_metrics.values()
+        ),
+        relationship_decisions=relationship_records,
     )
 
 

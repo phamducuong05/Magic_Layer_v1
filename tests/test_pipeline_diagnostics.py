@@ -85,6 +85,84 @@ def test_build_pipeline_diagnostics_records_metadata_without_pixel_data():
     assert "soft_alpha" not in repr(diagnostics)
 
 
+def test_diagnostics_record_relationship_plan_without_pixel_data():
+    from backend.pipeline.diagnostics import build_pipeline_diagnostics
+    from backend.pipeline.relationships import plan_object_relationships
+
+    large_mask = np.zeros((20, 20), dtype=np.uint8)
+    large_mask[0:10, 0:10] = 255
+    small_mask = np.zeros((20, 20), dtype=np.uint8)
+    small_mask[2:5, 2:5] = 255
+    large = DetectedObject(
+        "large", "table", "table", large_mask, (0, 0, 10, 10)
+    )
+    small = DetectedObject(
+        "small", "product", "product", small_mask, (2, 2, 3, 3)
+    )
+    plan = plan_object_relationships(
+        [large, small],
+        image_size=(20, 20),
+        enabled=True,
+        containment_threshold=0.70,
+        max_bbox_size_ratio=0.50,
+        large_mask_ratio=0.45,
+        large_bbox_ratio=0.75,
+        dimension_tolerance_ratio=0.05,
+    )
+
+    diagnostics = build_pipeline_diagnostics(
+        raw_objects=[large, small],
+        final_groups=[],
+        potential_pairs=[],
+        retained_pairs=[],
+        completion_candidate_count=0,
+        pair_decisions=[],
+        stage_timings_ms={},
+        peak_gpu_memory_bytes=None,
+        relationship_plan=plan,
+    )
+
+    assert diagnostics.cross_class_containment_merge_count == 1
+    assert diagnostics.external_overlap_count == 0
+    assert diagnostics.relationship_decisions[0].containment_ratio == 1.0
+    assert not hasattr(diagnostics.objects[0], "modal_mask")
+
+
+def test_group_diagnostics_record_multiclass_provenance():
+    from backend.pipeline.diagnostics import build_pipeline_diagnostics
+    from backend.pipeline.types import MergeEdge
+
+    table = _object("table", "table", 1)
+    product = _object("product", "product", 2)
+    edge = MergeEdge(
+        "table",
+        "product",
+        "cross_class_bbox_containment",
+        containment_ratio=1.0,
+        bbox_size_ratio=0.25,
+    )
+    group = group_reconstructed_objects(
+        [table, product],
+        merge_edges=[edge],
+    )[0]
+
+    diagnostics = build_pipeline_diagnostics(
+        raw_objects=[table, product],
+        final_groups=[group],
+        potential_pairs=[],
+        retained_pairs=[],
+        completion_candidate_count=0,
+        pair_decisions=[],
+        stage_timings_ms={},
+        peak_gpu_memory_bytes=None,
+    )
+
+    assert diagnostics.groups[0].semantic_classes == (
+        "table",
+        "product",
+    )
+
+
 def test_ambiguous_pair_diagnostic_records_reason():
     from backend.pipeline.diagnostics import build_pipeline_diagnostics
 

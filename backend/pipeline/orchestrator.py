@@ -345,6 +345,7 @@ def process_image(
             peak_gpu_memory_bytes=read_peak_gpu_memory(
                 gpu_tracking_active
             ),
+            relationship_plan=None,
         )
         if diagnostics_enabled and diagnostics_config["log_summary"]:
             log_pipeline_diagnostics(diagnostics)
@@ -798,6 +799,7 @@ def process_image(
         pair_decisions=pair_decisions or [],
         stage_timings_ms=timings.as_milliseconds(),
         peak_gpu_memory_bytes=read_peak_gpu_memory(gpu_tracking_active),
+        relationship_plan=relationship_plan,
     )
     if diagnostics_enabled and diagnostics_config["log_summary"]:
         log_pipeline_diagnostics(diagnostics)
