@@ -23,6 +23,7 @@ from .prompt_refinement import (
     union_ranked_occluders,
     validate_people_keyword_usage,
     validate_refined_target,
+    validate_root_person_labels,
 )
 
 logger = get_logger(__name__)
@@ -74,8 +75,8 @@ SAM3 object segmentation.
 Goal:
 - Return only large, visually important foreground objects that define the
   scene or occupy a meaningful image area.
-- Include an independent foreground object that significantly occludes one of
-  those important objects, even if that occluder is relatively small.
+- Include every independent foreground object that visibly occludes any part
+  of one of those important objects, regardless of occluder size.
 """ + COMMON_STRICT_RULES + """
 Return at most 10 keywords, ordered by visual importance. Return JSON only.
 """
@@ -301,15 +302,17 @@ class ClaudeVisionKeywordExtractor:
                 raise InvalidKeywordExtraction(
                     "Claude returned an invalid keyword structure."
                 )
-            keywords = normalize_keywords(
-                raw_keywords[:max_keywords],
-                max_keywords=max_keywords,
+            all_keywords = normalize_keywords(
+                raw_keywords,
+                max_keywords=max(max_keywords, len(raw_keywords)),
                 max_length=max_length,
             )
+            validate_root_person_labels(all_keywords)
             validate_people_keyword_usage(
-                keywords,
+                all_keywords,
                 visible_person_count,
             )
+            keywords = all_keywords[:max_keywords]
             return KeywordExtractionResult(
                 keywords=keywords,
                 visible_person_count=visible_person_count,
@@ -375,6 +378,7 @@ class ClaudeVisionKeywordExtractor:
                 if raw_occluders
                 else []
             )
+            validate_root_person_labels(normalized_occluders)
             validate_people_keyword_usage(
                 normalized_occluders,
                 visible_person_count,

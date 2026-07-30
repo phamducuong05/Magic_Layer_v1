@@ -137,6 +137,11 @@ independent keywords:
 - When age or gender cannot be determined confidently, use `person`.
 - Do not infer demographic attributes from weak or ambiguous evidence.
 
+If the model still returns a known body-part, clothing, wearable, or
+accessory label, local validation rejects the structured response. The
+backend must not send that child label to SAM3 or guess a more specific
+`man`/`woman`/`boy`/`girl` parent without visual evidence.
+
 Existing exclusions for background scenery, architecture, reflections,
 printed images, and uncertain non-occluding objects remain in force.
 

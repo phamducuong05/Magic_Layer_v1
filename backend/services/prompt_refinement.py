@@ -32,6 +32,29 @@ SIMPLE_VOCAB_ALIASES = {
     "automobiles": "cars",
 }
 
+PERSON_CHILD_LABELS = frozenset(
+    {
+        "clothes",
+        "clothing",
+        "coat",
+        "coats",
+        "dress",
+        "dresses",
+        "glasses",
+        "hand",
+        "hands",
+        "hat",
+        "hats",
+        "jacket",
+        "jackets",
+        "pants",
+        "shirt",
+        "shirts",
+        "shoe",
+        "shoes",
+    }
+)
+
 
 def _normalized_words(value: str) -> tuple[str, tuple[str, ...]]:
     normalized = " ".join(value.split())
@@ -44,23 +67,49 @@ def validate_refined_target(source: str, candidate: str) -> str:
     normalized_candidate, candidate_words = _normalized_words(candidate)
     if len(source_words) <= 1:
         return normalized_source
+    if normalized_candidate.casefold() == normalized_source.casefold():
+        return normalized_source
 
     candidate_key = normalized_candidate.casefold()
+    source_concepts = {
+        word for word in source_words if word in SIMPLE_OBJECT_VOCAB
+    }
+    source_text = " ".join(source_words)
+    for alias_source, canonical in SIMPLE_VOCAB_ALIASES.items():
+        alias_words = tuple(alias_source.casefold().split())
+        if len(alias_words) == 1:
+            alias_present = alias_words[0] in source_words
+        else:
+            alias_present = (
+                f" {' '.join(alias_words)} " in f" {source_text} "
+            )
+        if alias_present:
+            source_concepts.add(canonical.casefold())
+
     if (
         len(candidate_words) == 1
-        and candidate_key in SIMPLE_OBJECT_VOCAB
-        and candidate_key in source_words
+        and len(source_concepts) == 1
+        and candidate_key in source_concepts
     ):
         return normalized_candidate
 
-    for alias_source, canonical in SIMPLE_VOCAB_ALIASES.items():
-        if (
-            alias_source in source_words
-            and candidate_key == canonical.casefold()
-        ):
-            return normalized_candidate
-
     return normalized_source
+
+
+def validate_root_person_labels(keywords: Sequence[str]) -> None:
+    """Reject person parts and wearables that should use a parent label."""
+    invalid = next(
+        (
+            keyword
+            for keyword in keywords
+            if keyword.strip().casefold() in PERSON_CHILD_LABELS
+        ),
+        None,
+    )
+    if invalid is not None:
+        raise InvalidKeywordExtraction(
+            f"Claude returned {invalid!r} instead of a root person label."
+        )
 
 
 def validate_people_keyword_usage(

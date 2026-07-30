@@ -38,6 +38,21 @@ def test_unknown_replacement_falls_back_to_source():
     )
 
 
+@pytest.mark.parametrize(
+    ("source", "candidate"),
+    [
+        ("man beside car", "car"),
+        ("man beside car", "man"),
+        ("man beside automobile", "car"),
+    ],
+)
+def test_multi_object_description_cannot_switch_or_guess_the_target(
+    source,
+    candidate,
+):
+    assert validate_refined_target(source, candidate) == source
+
+
 def test_small_visible_group_cannot_be_generalized_to_people():
     with pytest.raises(InvalidKeywordExtraction, match="people"):
         validate_people_keyword_usage(["people"], 3)

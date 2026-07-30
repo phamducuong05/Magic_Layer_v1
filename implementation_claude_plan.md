@@ -185,6 +185,8 @@ sao riêng để tránh rule giữa hai nhánh bị lệch nhau. Block này bắ
   object; nearby object không overlap không được tính là occluder.
 - `hand`, `glasses`, `hat` và clothing được trả bằng person parent, không phải
   keyword con riêng.
+- Nếu model vẫn trả các child/accessory label đã biết, local validation từ
+  chối response thay vì đưa label sai vào SAM3 hoặc tự đoán parent cụ thể.
 - Không trả target như chính occluder của nó.
 - Chỉ xét foreground và áp dụng cùng object hierarchy/exclusion rules.
 - Không lấy tòa nhà hoặc địa điểm làm target đã chuẩn hóa hay occluder.

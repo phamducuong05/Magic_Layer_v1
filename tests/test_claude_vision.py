@@ -62,7 +62,7 @@ def test_extract_keywords_sends_image_first_and_parses_structured_output():
     client = FakeClient(
         response=make_response(
             '{"visible_person_count": 1, '
-            '"keywords": ["person", "hand", "Person"]}'
+            '"keywords": ["person", "chair", "Person"]}'
         )
     )
     extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
@@ -71,7 +71,7 @@ def test_extract_keywords_sends_image_first_and_parses_structured_output():
         extractor.extract_keywords(Image.new("RGB", (100, 50), "white"))
     )
 
-    assert result.keywords == ["person", "hand"]
+    assert result.keywords == ["person", "chair"]
     assert result.occluders == []
     request = client.messages.last_request
     assert request["model"] == "claude-sonnet-5"
@@ -93,6 +93,21 @@ def test_extract_keywords_sends_image_first_and_parses_structured_output():
         io.BytesIO(base64.b64decode(image_source["data"]))
     )
     assert encoded_image.size == (32, 16)
+
+
+def test_automatic_prompt_requires_every_visible_occluder():
+    client = FakeClient(
+        response=make_response(
+            '{"visible_person_count": 0, "keywords": ["car"]}'
+        )
+    )
+    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
+
+    asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
+
+    prompt = " ".join(client.messages.last_request["system"].split())
+    assert "visibly occludes any part" in prompt
+    assert "significantly occludes" not in prompt
 
 
 def test_extract_keywords_uses_indexed_occluder_mode_for_each_target():
@@ -358,6 +373,25 @@ def test_automatic_mode_rejects_people_for_three_visible_people():
         asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
 
 
+def test_automatic_mode_validates_people_beyond_the_output_quota():
+    raw_keywords = [f"object-{index}" for index in range(10)]
+    raw_keywords.append("people")
+    client = FakeClient(
+        response=make_response(
+            json.dumps(
+                {
+                    "visible_person_count": 2,
+                    "keywords": raw_keywords,
+                }
+            )
+        )
+    )
+    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
+
+    with pytest.raises(InvalidKeywordExtraction, match="people"):
+        asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
+
+
 def test_automatic_mode_allows_people_above_three_visible_people():
     client = FakeClient(
         response=make_response(
@@ -371,6 +405,43 @@ def test_automatic_mode_allows_people_above_three_visible_people():
     )
 
     assert result.keywords == ["people"]
+
+
+@pytest.mark.parametrize("child_label", ["hand", "glasses", "hat", "shirt"])
+def test_automatic_mode_rejects_non_root_person_labels(child_label):
+    client = FakeClient(
+        response=make_response(
+            json.dumps(
+                {
+                    "visible_person_count": 1,
+                    "keywords": [child_label],
+                }
+            )
+        )
+    )
+    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
+
+    with pytest.raises(InvalidKeywordExtraction, match="root person"):
+        asyncio.run(extractor.extract_keywords(Image.new("RGB", (8, 8))))
+
+
+def test_manual_mode_rejects_non_root_person_occluder():
+    client = FakeClient(
+        response=make_response(
+            '{"visible_person_count": 1, "target_results": ['
+            '{"input_index": 0, "refined_keyword": "product", '
+            '"occluders": ["hand"]}]}'
+        )
+    )
+    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
+
+    with pytest.raises(InvalidKeywordExtraction, match="root person"):
+        asyncio.run(
+            extractor.extract_keywords(
+                Image.new("RGB", (8, 8)),
+                target_keywords=["product"],
+            )
+        )
 
 
 def test_manual_prompt_requires_exhaustive_parent_level_occluders():
