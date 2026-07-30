@@ -415,7 +415,7 @@ def test_automatic_mode_allows_people_above_three_visible_people():
         "foot",
         "glasses",
         "sunglasses",
-        "red hat",
+        "jacket",
         "shirt",
         "watch",
         "bag",

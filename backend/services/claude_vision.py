@@ -43,8 +43,12 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
    reflections, printed images, and uncertain objects.
    Exception: never exclude a genuine occluder regardless of how tiny or
    incidental it is.
-5. Exclude clothing, footwear, wearable items, and accessories. Treat them as
-   part of their person, animal, or parent object.
+5. Exclude clothing, footwear, wearable items, and general accessories. Treat
+   them as part of their person, animal, or parent object.
+   Special rule for hats/headwear: If a person is wearing a hat, return the
+   person keyword with the hat explicitly specified (e.g., "man with hat",
+   "woman with hat", "person with hat", "boy with hat", "girl with hat"). If a hat
+   is an independent standalone foreground object (not worn by a person or an object), return "hat".
 6. Never return buildings, landmarks, venues, or places. Treat all
    architecture and locations as background, even when they are large,
    visually prominent, close to the camera, supplied as a user target, or
@@ -60,6 +64,7 @@ Object hierarchy and grouping rules:
   assembly including its legs, stand, tripod, base, or direct mount as a single unit.
 - People and animals: return the whole subject, not body parts, clothes,
   footwear, collars, leashes, bags, glasses, jewelry, or other accessories.
+  Exception for hats: specify hats when worn (e.g., "man with hat", "woman with hat").
 - Plants and food: return the whole plant, tree, pot, dish, or meal, not
   leaves, branches, fruit, ingredients, toppings, or pieces.
 
