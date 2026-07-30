@@ -46,6 +46,7 @@ def test_get_vlm_config_merges_shared_and_provider_settings():
         "vlm": {
             "active": "claude",
             "max_keywords": 10,
+            "max_occluders": 10,
             "max_keyword_length": 80,
             "claude": {
                 "api_key_env": "ANTHROPIC_API_KEY",
@@ -57,6 +58,7 @@ def test_get_vlm_config_merges_shared_and_provider_settings():
     assert manager.get_vlm_config() == {
         "name": "claude",
         "max_keywords": 10,
+        "max_occluders": 10,
         "max_keyword_length": 80,
         "api_key_env": "ANTHROPIC_API_KEY",
         "model": "claude-sonnet-5",

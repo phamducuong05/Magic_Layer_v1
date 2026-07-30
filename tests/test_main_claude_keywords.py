@@ -104,36 +104,53 @@ def test_resolve_keywords_uses_vlm_when_manual_override_is_omitted(
     assert extractor.target_keywords is None
 
 
-def test_resolve_keywords_prioritizes_simplified_targets_before_occluders(
+def test_resolve_keywords_keeps_independent_target_and_occluder_quotas(
     monkeypatch,
 ):
     main = load_main(monkeypatch)
+    targets = [f"target-{index}" for index in range(10)]
+    occluders = [f"occluder-{index}" for index in range(10)]
     extractor = FakeExtractor(
         result=SimpleNamespace(
-            keywords=["car", "person"],
-            occluders=[f"object-{index}" for index in range(10)],
+            keywords=targets,
+            occluders=occluders,
         )
     )
 
     result = asyncio.run(
         main.resolve_keywords(
             Image.new("RGB", (8, 6)),
-            "automobile, human being",
+            ",".join(targets),
+            extractor=extractor,
+        )
+    )
+
+    assert result == [*targets, *occluders]
+
+
+def test_target_duplicate_does_not_consume_an_occluder_slot(monkeypatch):
+    main = load_main(monkeypatch)
+    extractor = FakeExtractor(
+        result=SimpleNamespace(
+            keywords=["car"],
+            occluders=[
+                "CAR",
+                *[f"occluder-{index}" for index in range(10)],
+            ],
+        )
+    )
+
+    result = asyncio.run(
+        main.resolve_keywords(
+            Image.new("RGB", (8, 6)),
+            "car",
             extractor=extractor,
         )
     )
 
     assert result == [
         "car",
-        "person",
-        "object-0",
-        "object-1",
-        "object-2",
-        "object-3",
-        "object-4",
-        "object-5",
-        "object-6",
-        "object-7",
+        *[f"occluder-{index}" for index in range(10)],
     ]
 
 

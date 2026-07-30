@@ -142,6 +142,7 @@ async def resolve_keywords(
     """Generate simple SAM3 targets and their foreground occluders."""
     settings = config.get_vlm_config()
     max_keywords = int(settings.get("max_keywords", 10))
+    max_occluders = int(settings.get("max_occluders", 10))
     max_length = int(settings.get("max_keyword_length", 80))
 
     target_keywords = None
@@ -160,13 +161,37 @@ async def resolve_keywords(
         image,
         target_keywords=target_keywords,
     )
-    combined = [*extracted.keywords, *extracted.occluders]
-    normalized = normalize_keywords(
-        combined,
-        max_keywords=max(max_keywords, len(combined)),
+    resolved_targets = normalize_keywords(
+        extracted.keywords,
+        max_keywords=max(max_keywords, len(extracted.keywords)),
         max_length=max_length,
+    )[:max_keywords]
+    target_keys = {
+        keyword.casefold() for keyword in resolved_targets
+    }
+    normalized_occluders = (
+        normalize_keywords(
+            extracted.occluders,
+            max_keywords=max(
+                max_occluders,
+                len(extracted.occluders),
+            ),
+            max_length=max_length,
+        )
+        if extracted.occluders
+        else []
     )
-    return normalized[:max_keywords]
+    resolved_occluders = [
+        keyword
+        for keyword in normalized_occluders
+        if keyword.casefold() not in target_keys
+    ][:max_occluders]
+    logger.info(
+        "Resolved %d target keywords and %d occluder keywords",
+        len(resolved_targets),
+        len(resolved_occluders),
+    )
+    return [*resolved_targets, *resolved_occluders]
 
 
 @app.post("/api/process-image", response_model=ProcessResponse)

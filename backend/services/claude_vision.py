@@ -390,11 +390,17 @@ class ClaudeVisionKeywordExtractor:
             )
 
         keywords = [result.keyword for result in target_results]
-        occluders = union_ranked_occluders(
+        ranked_occluders = union_ranked_occluders(
             per_target_occluders,
             target_keywords=keywords,
-            max_occluders=max_occluders,
+            max_occluders=max_occluders + 1,
         )
+        if len(ranked_occluders) > max_occluders:
+            logger.info(
+                "Truncated occluder keywords to configured limit %d",
+                max_occluders,
+            )
+        occluders = ranked_occluders[:max_occluders]
         return KeywordExtractionResult(
             keywords=keywords,
             occluders=occluders,

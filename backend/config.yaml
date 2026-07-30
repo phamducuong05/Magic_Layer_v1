@@ -6,6 +6,7 @@ logging:
 vlm:
   active: claude
   max_keywords: 10
+  max_occluders: 10
   max_keyword_length: 80
   claude:
     api_key_env: ANTHROPIC_API_KEY
