@@ -1,8 +1,13 @@
 """Tests for cross-class overlap detection and pairwise role assignment."""
 
+import pytest
+
 from backend.core import occlusion
 from backend.core.occlusion import (
     ObjectBounds,
+    bbox_area,
+    bbox_containment_metrics,
+    bbox_intersection_area,
     effective_hole_area,
     find_cross_class_overlaps,
 )
@@ -14,6 +19,51 @@ def _object(object_id, semantic_class, bbox):
         semantic_class=semantic_class,
         bbox=bbox,
     )
+
+
+def test_bbox_containment_metrics_use_smaller_box_denominator():
+    metrics = bbox_containment_metrics(
+        (0, 0, 100, 100),
+        (20, 20, 20, 30),
+    )
+
+    assert metrics is not None
+    assert metrics.smaller_index == 1
+    assert metrics.larger_index == 0
+    assert metrics.intersection_area == 600
+    assert metrics.smaller_area == 600
+    assert metrics.larger_area == 10_000
+    assert metrics.containment_ratio == pytest.approx(1.0)
+    assert metrics.bbox_size_ratio == pytest.approx(0.06)
+
+
+def test_bbox_intersection_requires_positive_area():
+    assert bbox_intersection_area((0, 0, 10, 10), (10, 0, 5, 5)) == 0
+    assert bbox_intersection_area((0, 0, 10, 10), (10, 10, 5, 5)) == 0
+
+
+@pytest.mark.parametrize(
+    "bbox",
+    [
+        (0, 0, 0, 10),
+        (0, 0, 10, 0),
+        (0, 0, -1, 10),
+        (0, 0, 10, -1),
+    ],
+)
+def test_invalid_bbox_has_zero_area_and_no_containment_metrics(bbox):
+    assert bbox_area(bbox) == 0
+    assert bbox_containment_metrics(bbox, (0, 0, 20, 20)) is None
+
+
+def test_equal_area_boxes_have_stable_input_order():
+    metrics = bbox_containment_metrics((0, 0, 10, 10), (1, 1, 10, 10))
+
+    assert metrics is not None
+    assert metrics.smaller_index == 0
+    assert metrics.larger_index == 1
+    assert metrics.containment_ratio == pytest.approx(0.81)
+    assert metrics.bbox_size_ratio == pytest.approx(1.0)
 
 
 def test_returns_overlapping_pair_from_different_classes():

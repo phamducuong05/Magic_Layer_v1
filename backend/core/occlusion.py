@@ -19,6 +19,19 @@ class ObjectBounds:
 
 
 @dataclass(frozen=True)
+class BBoxContainmentMetrics:
+    """Symmetric containment metrics with stable smaller/larger identities."""
+
+    intersection_area: int
+    smaller_area: int
+    larger_area: int
+    smaller_index: int
+    larger_index: int
+    containment_ratio: float
+    bbox_size_ratio: float
+
+
+@dataclass(frozen=True)
 class PairDecision:
     """Kết quả phân tích vai trò che khuất (occluded/occluder) và hướng tái tạo cho một cặp đối tượng giao nhau.
 
@@ -53,6 +66,63 @@ class PairDecision:
         return len(self.reconstruction_directions) == 2
 
 
+def bbox_area(bbox: BoundingBox) -> int:
+    """Return positive bbox area, or zero for invalid dimensions."""
+    _, _, width, height = bbox
+    if width <= 0 or height <= 0:
+        return 0
+    return int(width) * int(height)
+
+
+def bbox_intersection_area(
+    first: BoundingBox,
+    second: BoundingBox,
+) -> int:
+    """Return positive intersection area for two ``(x, y, w, h)`` boxes."""
+    first_x, first_y, first_width, first_height = first
+    second_x, second_y, second_width, second_height = second
+    if bbox_area(first) == 0 or bbox_area(second) == 0:
+        return 0
+
+    width = min(
+        first_x + first_width,
+        second_x + second_width,
+    ) - max(first_x, second_x)
+    height = min(
+        first_y + first_height,
+        second_y + second_height,
+    ) - max(first_y, second_y)
+    if width <= 0 or height <= 0:
+        return 0
+    return int(width) * int(height)
+
+
+def bbox_containment_metrics(
+    first: BoundingBox,
+    second: BoundingBox,
+) -> Optional[BBoxContainmentMetrics]:
+    """Return containment metrics, or ``None`` when either box is invalid."""
+    areas = (bbox_area(first), bbox_area(second))
+    if min(areas) <= 0:
+        return None
+
+    smaller_index, larger_index = (
+        (0, 1) if areas[0] <= areas[1] else (1, 0)
+    )
+    smaller_area = areas[smaller_index]
+    larger_area = areas[larger_index]
+    intersection_area = bbox_intersection_area(first, second)
+    return BBoxContainmentMetrics(
+        intersection_area=intersection_area,
+        smaller_area=smaller_area,
+        larger_area=larger_area,
+        smaller_index=smaller_index,
+        larger_index=larger_index,
+        containment_ratio=intersection_area / smaller_area,
+        bbox_size_ratio=smaller_area / larger_area,
+    )
+
+
 def find_cross_class_overlaps(
     objects: Sequence[ObjectBounds],
 ) -> list[OverlapPair]:
@@ -72,19 +142,7 @@ def find_cross_class_overlaps(
         if first.semantic_class == second.semantic_class:
             continue
 
-        first_x, first_y, first_width, first_height = first.bbox
-        second_x, second_y, second_width, second_height = second.bbox
-
-        # Tính chiều rộng và chiều cao phần giao nhau của 2 BoundingBox
-        intersection_width = min(
-            first_x + first_width, second_x + second_width
-        ) - max(first_x, second_x)
-        intersection_height = min(
-            first_y + first_height, second_y + second_height
-        ) - max(first_y, second_y)
-
-        # Nếu cả width và height phần giao nhau đều > 0 thì có diện tích giao nhau dương
-        if intersection_width > 0 and intersection_height > 0:
+        if bbox_intersection_area(first.bbox, second.bbox) > 0:
             overlaps.append((first.object_id, second.object_id))
 
     return overlaps
