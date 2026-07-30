@@ -9,7 +9,7 @@ from ..core.helpers import _bbox_from_mask
 from ..core.logging import get_logger, log_event
 from ..core.occlusion import PairDecision
 from .roi import crop_image, square_roi_from_support
-from .types import DetectedObject, GroupedObject
+from .types import DetectedObject, GroupedObject, MergeEdge
 
 
 logger = get_logger(__name__)
@@ -30,11 +30,51 @@ def _boxes_overlap(
     )
 
 
+def _legacy_same_class_merge_edges(
+    objects: Sequence[DetectedObject],
+) -> tuple[MergeEdge, ...]:
+    """Translate the existing same-class bbox rule into explicit edges."""
+    edges: list[MergeEdge] = []
+    for first_index, first in enumerate(objects):
+        for second in objects[first_index + 1 :]:
+            if (
+                first.semantic_class == second.semantic_class
+                and _boxes_overlap(
+                    first.original_modal_bbox,
+                    second.original_modal_bbox,
+                )
+            ):
+                edges.append(
+                    MergeEdge(
+                        first.object_id,
+                        second.object_id,
+                        "same_class_bbox_overlap",
+                    )
+                )
+    return tuple(edges)
+
+
+def _deduplicate_merge_edges(
+    edges: Sequence[MergeEdge],
+) -> tuple[MergeEdge, ...]:
+    """Keep the first edge for each canonical raw-member pair."""
+    deduplicated: list[MergeEdge] = []
+    seen: set[tuple[str, str]] = set()
+    for edge in edges:
+        if edge.member_ids in seen:
+            continue
+        seen.add(edge.member_ids)
+        deduplicated.append(edge)
+    return tuple(deduplicated)
+
+
 def group_reconstructed_objects(
     objects: Sequence[DetectedObject],
     pair_decisions: Sequence[PairDecision] = (),
+    *,
+    merge_edges: Sequence[MergeEdge] | None = None,
 ) -> list[GroupedObject]:
-    """Group same-class raw objects using original modal bboxes only."""
+    """Materialize validated groups after member-level reconstruction."""
     if not objects:
         return []
 
@@ -64,24 +104,44 @@ def group_reconstructed_objects(
         if first_root != second_root:
             parents[second_root] = first_root
 
-    for first_index, first in enumerate(ordered):
-        for second_index in range(first_index + 1, len(ordered)):
-            second = ordered[second_index]
-            same_class = first.semantic_class == second.semantic_class
-            bbox_overlap = _boxes_overlap(
-                first.original_modal_bbox,
-                second.original_modal_bbox,
+    using_legacy_grouping = merge_edges is None
+    effective_edges = _deduplicate_merge_edges(
+        _legacy_same_class_merge_edges(ordered)
+        if using_legacy_grouping
+        else tuple(merge_edges)
+    )
+    index_by_id = {
+        detected.object_id: index
+        for index, detected in enumerate(ordered)
+    }
+    edge_by_pair: dict[tuple[str, str], MergeEdge] = {}
+    for edge in effective_edges:
+        if edge.first_id not in index_by_id or edge.second_id not in index_by_id:
+            raise ValueError(
+                "merge edge references unknown objects: "
+                f"{edge.first_id!r}, {edge.second_id!r}"
             )
-            if same_class and bbox_overlap:
-                union(first_index, second_index)
+        union(index_by_id[edge.first_id], index_by_id[edge.second_id])
+        edge_by_pair[edge.member_ids] = edge
+
+    for first_index, first in enumerate(ordered):
+        for second in ordered[first_index + 1 :]:
+            pair_key = tuple(sorted((first.object_id, second.object_id)))
+            edge = edge_by_pair.get(pair_key)
+            if edge is not None:
                 decision = "merge"
-                reason = "same_class_bbox_overlap"
-            elif not same_class:
+                reason = edge.reason
+            elif using_legacy_grouping and (
+                first.semantic_class != second.semantic_class
+            ):
                 decision = "keep_separate"
                 reason = "different_semantic_class"
-            else:
+            elif using_legacy_grouping:
                 decision = "keep_separate"
                 reason = "original_modal_bboxes_do_not_overlap"
+            else:
+                decision = "keep_separate"
+                reason = "no_validated_merge_edge"
             log_event(
                 logger,
                 "grouping",
@@ -113,17 +173,39 @@ def group_reconstructed_objects(
         bbox = _bbox_from_mask(grouped_modal)
         if bbox is None:
             raise ValueError("a final group cannot contain only empty masks")
-        first = members[0]
+        member_ids = tuple(member.object_id for member in members)
+        member_classes = tuple(
+            dict.fromkeys(member.semantic_class for member in members)
+        )
+        is_multiclass = len(member_classes) > 1
+        primary = (
+            max(
+                members,
+                key=lambda member: (
+                    int(np.count_nonzero(member.modal_mask)),
+                    -member.segmentation_index,
+                ),
+            )
+            if is_multiclass
+            else members[0]
+        )
+        group_edges = tuple(
+            edge
+            for edge in effective_edges
+            if edge.first_id in member_ids and edge.second_id in member_ids
+        )
         group = GroupedObject(
-            group_id=f"group-{first.object_id}",
-            semantic_class=first.semantic_class,
-            display_label=first.display_label,
-            member_ids=tuple(member.object_id for member in members),
+            group_id=f"group-{primary.object_id}",
+            semantic_class=primary.semantic_class,
+            display_label=primary.display_label,
+            member_ids=member_ids,
             members=members,
             modal_mask=grouped_modal.astype(np.uint8) * 255,
             amodal_mask=grouped_amodal,
             bbox=bbox,
-            segmentation_index=first.segmentation_index,
+            segmentation_index=primary.segmentation_index,
+            semantic_classes=member_classes,
+            merge_edges=group_edges,
         )
         groups.append(group)
         log_event(

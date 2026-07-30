@@ -106,6 +106,76 @@ def test_grouping_is_transitive_and_uses_stable_segmentation_order():
     assert groups[0].segmentation_index == 0
 
 
+def test_explicit_cross_class_merge_edge_materializes_one_group():
+    from backend.pipeline.grouping import group_reconstructed_objects
+    from backend.pipeline.types import MergeEdge
+
+    container = _detected(
+        "table", "table", (0, 0, 8, 8), segmentation_index=0
+    )
+    product = _detected(
+        "product", "product", (2, 2, 3, 3), segmentation_index=1
+    )
+    edge = MergeEdge(
+        first_id="table",
+        second_id="product",
+        reason="cross_class_bbox_containment",
+        containment_ratio=1.0,
+        bbox_size_ratio=9 / 64,
+    )
+
+    groups = group_reconstructed_objects(
+        [container, product],
+        merge_edges=[edge],
+    )
+
+    assert len(groups) == 1
+    assert groups[0].member_ids == ("table", "product")
+    assert groups[0].semantic_classes == ("table", "product")
+    assert groups[0].merge_edges == (edge,)
+
+
+def test_cross_class_group_primary_uses_largest_modal_area():
+    from backend.pipeline.grouping import group_reconstructed_objects
+    from backend.pipeline.types import MergeEdge
+
+    small_first = _detected(
+        "small", "hat", (2, 2, 2, 2), segmentation_index=0
+    )
+    large_second = _detected(
+        "large", "person", (0, 0, 8, 8), segmentation_index=1
+    )
+    large_second.modal_mask[:, :] = 255
+    edge = MergeEdge("small", "large", "cross_class_bbox_containment")
+
+    group = group_reconstructed_objects(
+        [small_first, large_second],
+        merge_edges=[edge],
+    )[0]
+
+    assert group.group_id == "group-large"
+    assert group.semantic_class == "person"
+    assert group.display_label == large_second.display_label
+    assert group.segmentation_index == 1
+
+
+def test_large_same_class_group_keeps_existing_primary_order():
+    from backend.pipeline.grouping import group_reconstructed_objects
+
+    small_first = _detected(
+        "first", "person", (1, 1, 3, 3), segmentation_index=0
+    )
+    large_second = _detected(
+        "second", "person", (0, 0, 8, 8), segmentation_index=1
+    )
+    large_second.modal_mask[:, :] = 255
+
+    group = group_reconstructed_objects([small_first, large_second])[0]
+
+    assert group.group_id == "group-first"
+    assert group.segmentation_index == 0
+
+
 def test_grouped_amodal_union_uses_modal_fallback_per_member():
     from backend.pipeline.grouping import group_reconstructed_objects
 
