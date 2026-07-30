@@ -119,7 +119,10 @@ Sau khi parse vẫn phải chuẩn hóa cục bộ:
 
 Model là cấu hình, không hard-code trong service.
 
-Khuyến nghị bắt đầu với `claude-sonnet-5` vì chất lượng nhận biết quan hệ thị giác và occlusion là ưu tiên. Có thể đổi sang `claude-haiku-4-5-20251001` sau khi chủ dự án tự xác nhận rằng chất lượng thực tế vẫn đáp ứng yêu cầu.
+Model mặc định là `claude-haiku-4-5-20251001`: bản pinned này hỗ trợ vision
+và structured outputs, đồng thời phù hợp hơn về latency và chi phí cho tác vụ
+trích xuất keyword/occluder có output ngắn. Chỉ nâng lên Sonnet nếu kết quả thực
+tế cho thấy Haiku bỏ sót các quan hệ occlusion quan trọng.
 
 Structured Outputs hiện dùng API chính thức:
 
@@ -252,7 +255,7 @@ vlm:
   max_keyword_length: 80
   claude:
     api_key_env: ANTHROPIC_API_KEY
-    model: claude-sonnet-5
+    model: claude-haiku-4-5-20251001
     max_tokens: 256
     timeout_seconds: 30
     max_retries: 2
