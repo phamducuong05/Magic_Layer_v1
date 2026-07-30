@@ -7,7 +7,7 @@ bởi dấu phẩy (`keywords`). API kiểm tra đầu vào, giảm kích thư�
 gọi `backend.image_processor.process_image` (điều phối bởi
 `backend.pipeline.orchestrator.process_image`).
 
-Pipeline chạy 8 bước tuần tự dưới một khoá reentrant toàn process
+Pipeline chạy 9 bước tuần tự dưới một khoá reentrant toàn process
 (`_PIPELINE_LOCK`) nhằm ngăn các request đồng thời giải phóng model GPU của
 nhau. Mỗi model được tải lười (lazy-load) bởi `ModelManager` và giải phóng ngay
 sau khi bước của nó hoàn tất.
@@ -16,13 +16,14 @@ sau khi bước của nó hoàn tất.
 Ảnh đầu vào + Prompts
    │
    ├─► Bước 1  Phân đoạn (Segmentation)          — SAM3
-   ├─► Bước 2  Hoàn thiện Amodal (Completion)     — SDAmodal
-   ├─► Bước 3  Xếp thứ tự & Tạo mask             — Phân tích che khuất
-   ├─► Bước 4  Khôi phục đối tượng                — HD-Painter
-   ├─► Bước 5  Tinh chỉnh support                 — BiRefNet lần 1
-   ├─► Bước 6  Gom nhóm & Hợp thành               — Union-find + Alpha blend
-   ├─► Bước 7  Matting nhóm cuối                   — BiRefNet lần 2
-   └─► Bước 8  Tách lớp & Inpaint nền             — LaMa / SDXL
+   ├─► Bước 2  Lập kế hoạch quan hệ               — BBox + Mask geometry
+   ├─► Bước 3  Hoàn thiện Amodal (Completion)     — SDAmodal
+   ├─► Bước 4  Xếp thứ tự & Tạo mask             — Phân tích che khuất
+   ├─► Bước 5  Khôi phục đối tượng                — HD-Painter
+   ├─► Bước 6  Tinh chỉnh support                 — BiRefNet lần 1
+   ├─► Bước 7  Gom nhóm & Hợp thành               — Union-find + Alpha blend
+   ├─► Bước 8  Matting nhóm cuối                  — BiRefNet lần 2
+   └─► Bước 9  Tách lớp & Inpaint nền             — LaMa / SDXL
 ```
 
 ---
@@ -75,12 +76,57 @@ cùng mảng layers rỗng, ghi nhận `decision=return_original_background`.
 
 Sau segmentation, kernel size cho morphology được tính từ kích thước ảnh:
 `kernel_size = _calc_kernel_size(image_np, 0.0075)`. Kernel này được tái sử dụng
-trong tách lớp (Stage 8a) và inpaint nền (Stage 8b).
+trong tách lớp (Stage 9a) và inpaint nền (Stage 9b).
 → [orchestrator.py#L268](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L268)
 
 ---
 
-## Bước 2 — Phát hiện chồng lấn & Hoàn thiện Amodal (Amodal Completion)
+## Bước 2 — Lập kế hoạch quan hệ (Relationship Planning)
+
+| Thông tin | Chi tiết |
+|-----------|----------|
+| **Module** | `backend/pipeline/relationships.py` |
+| **Hàm chính** | `plan_object_relationships` |
+| **Model** | Không — chỉ dùng hình học bounding box và modal mask |
+
+Mỗi `DetectedObject` vẫn giữ mask và trạng thái reconstruction riêng. Planner
+phân loại mọi cặp raw object và tạo ba loại đầu ra:
+
+- merge edge same-class theo đúng quy tắc bbox overlap hiện hữu;
+- merge edge cross-class khi đạt containment, bbox-area dominance,
+  per-axis dominance và không bị large-object veto;
+- external regular-overlap pair cho workflow completion/reconstruction hiện hữu.
+
+Containment và area dominance được tính bằng:
+
+```text
+containment_ratio = area(A ∩ B) / min(area(A), area(B))
+bbox_size_ratio   = min(area(A), area(B)) / max(area(A), area(B))
+```
+
+Large-object veto là:
+
+```text
+mask_image_ratio >= 0.45 OR bbox_image_ratio >= 0.75
+```
+
+Veto này **chỉ chặn cross-class containment merge**; same-class grouping vẫn
+giữ nguyên. Một cross-class pair bị veto hoặc không đạt điều kiện containment
+vẫn là regular overlap và tiếp tục đi qua completion, depth ordering và
+reconstruction như trước.
+
+Merge intent chưa tạo `GroupedObject` tại đây. Nếu A và B sẽ được gộp nhưng C
+chỉ che B, planner chỉ chuyển external pair B–C vào heavy workflow; riêng B
+nhận reconstruction state. A và B chỉ được materialize thành một draggable
+group sau khi member-level reconstruction và support refinement hoàn tất.
+
+Grouping bắc cầu chỉ dùng các raw pair edge đã validate (A–B, B–C), không dùng
+union bbox của AB để suy ra edge mới. Regular overlap nằm hoàn toàn bên trong
+một transitive merge component sẽ bị loại khỏi danh sách external pairs.
+
+---
+
+## Bước 3 — Phát hiện chồng lấn & Hoàn thiện Amodal (Amodal Completion)
 
 | Thông tin | Chi tiết |
 |-----------|----------|
@@ -90,23 +136,22 @@ trong tách lớp (Stage 8a) và inpaint nền (Stage 8b).
 | **GPU giải phóng** | Có — [orchestrator.py#L290-L291](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L290-L291) |
 | **Điều phối tại** | [orchestrator.py#L269-L320](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L269-L320) |
 
-### Bước 2a — Phát hiện chồng lấn (Overlap Detection)
+### Bước 3a — Phát hiện chồng lấn (Overlap Detection)
 
-`link_overlap_partners(objects)` sử dụng `find_cross_class_overlaps` để tìm tất cả
-các cặp đối tượng mà **bounding box gốc (original modal bbox) chồng lên nhau theo
-diện tích** và **semantic class khác nhau**. Các đối tượng cùng class không bao giờ
-được ghép cặp ở đây (chúng sẽ được gom nhóm ở Bước 6). Mỗi đối tượng trong cặp ghi
-nhận partner vào tập `overlap_partner_ids`.
+`link_overlap_partners(objects, external_overlap_pairs)` nhận danh sách external
+regular-overlap pair đã được planner lọc. Mỗi raw object trong các cặp này ghi
+partner vào `overlap_partner_ids`. Các merge edge nội bộ không được link nên
+không tự trở thành completion candidate.
 → [completion.py#L26-L57](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/completion/completion.py#L26-L57)
 
-### Bước 2b — Xác định ứng viên Completion
+### Bước 3b — Xác định ứng viên Completion
 
 `get_completion_candidates(objects)` trả về mọi `DetectedObject` có ít nhất một
 overlap partner (giữ thứ tự ban đầu). Đối tượng không có chồng lấn khác class bị
 bỏ qua hoàn toàn.
 → [completion.py#L60-L83](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/completion/completion.py#L60-L83)
 
-### Bước 2c — Dự đoán Amodal Mask
+### Bước 3c — Dự đoán Amodal Mask
 
 `complete_objects(image, candidates, completion_model, …)` gửi tất cả modal mask
 và bounding box của ứng viên tới SDAmodal trong một lần gọi batch:
@@ -137,7 +182,7 @@ loại), `_store_modal_fallback` ghi `amodal_mask = modal_mask` và
 `completion_hole_mask = zeros`, đảm bảo các bước sau luôn có amodal mask hợp lệ.
 → [validate_completion.py#L16-L29](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/completion/validate_completion.py#L16-L29)
 
-### Bước 2d — Xác nhận Amodal Overlap
+### Bước 3d — Xác nhận Amodal Overlap
 
 `filter_pairs_by_amodal_overlap(objects, pairs)` kiểm tra lại từng cặp tiềm năng:
 chỉ giữ lại những cặp mà cả hai amodal mask đã được validation **thực sự chồng lấn
@@ -148,7 +193,7 @@ modal) bị ghi log và loại bỏ.
 
 ---
 
-## Bước 3 — Xếp thứ tự sâu & Chuẩn bị mask khôi phục (Depth Ordering & Reconstruction Mask Preparation)
+## Bước 4 — Xếp thứ tự sâu & Chuẩn bị mask khôi phục (Depth Ordering & Reconstruction Mask Preparation)
 
 | Thông tin | Chi tiết |
 |-----------|----------|
@@ -159,7 +204,7 @@ modal) bị ghi log và loại bỏ.
 
 Bước này chỉ chạy khi `overlap_pairs` không rỗng.
 
-### Bước 3a — Diện tích lỗ hiệu quả (Effective Hole Area)
+### Bước 4a — Diện tích lỗ hiệu quả (Effective Hole Area)
 
 Với mọi đối tượng có `completion_hole_area`, hàm `effective_hole_area` áp dụng
 hai bộ lọc nhiễu:
@@ -168,7 +213,7 @@ hai bộ lọc nhiễu:
 
 → [mask_preparation.py#L494-L516](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/mask_preparation.py#L494-L516)
 
-### Bước 3b — Mask khôi phục có hướng (Directional Reconstruction Masks)
+### Bước 4b — Mask khôi phục có hướng (Directional Reconstruction Masks)
 
 Với mỗi cặp `(A, B)` đã giữ lại, `_directional_reconstruction_mask` được gọi theo
 cả hai hướng `(A←B)` và `(B←A)`:
@@ -182,7 +227,7 @@ cả hai hướng `(A←B)` và `(B←A)`:
 Tạo ra hai mảng mỗi hướng: `exact_seed` (giao thuần) và `filtered` (tức `composition_mask` cho cặp occluder này).
 → [mask_preparation.py#L113-L170](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/mask_preparation.py#L113-L170)
 
-### Bước 3c — Gán vai trò & Hướng tái tạo (Role & Direction Assignment)
+### Bước 4c — Gán vai trò & Hướng tái tạo (Role & Direction Assignment)
 
 `assign_directional_pair_roles` xử lý hai nhiệm vụ riêng biệt cho mỗi cặp:
 
@@ -192,14 +237,14 @@ Tạo ra hai mảng mỗi hướng: `exact_seed` (giao thuần) và `filtered` (
 
 2. **Vai trò độ sâu hiển thị (`occluded_id` / `occluder_id`):**
    - So sánh diện tích 2 hướng: vật thể có diện tích lỗ hướng lớn hơn sẽ là `occluded_id` (nằm ở dưới/đằng sau).
-   - Nếu chênh lệch diện tích nằm trong `tie_tolerance_ratio` (mặc định `0.1`), cặp đó được đánh dấu là hòa/không rõ ràng (`ambiguous = True`). Kết quả này phục vụ việc sắp xếp thứ tự lớp (Depth Ordering Back-to-Front) ở Bước 6b.
+   - Nếu chênh lệch diện tích nằm trong `tie_tolerance_ratio` (mặc định `0.1`), cặp đó được đánh dấu là hòa/không rõ ràng (`ambiguous = True`). Kết quả này phục vụ việc sắp xếp thứ tự lớp (Depth Ordering Back-to-Front) ở Bước 7b.
 
 `apply_pair_decisions` duyệt qua `reconstruction_directions` và đăng ký tất cả occluder hợp lệ vào `detected.occluder_ids` của từng target.
 → [mask_preparation.py#L173-L211](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/mask_preparation.py#L173-L211)
 → [occlusion.py#L173-L231](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/core/occlusion.py#L173-L231)
 → [mask_preparation.py#L545-L566](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/mask_preparation.py#L545-L566)
 
-### Bước 3d — Xây dựng toàn bộ mask khôi phục
+### Bước 4d — Xây dựng toàn bộ mask khôi phục
 
 `build_reconstruction_masks(objects, kernel_size, …)` duyệt các đối tượng có
 occluder đã gán và tạo tất cả mask không gian cho từng target:
@@ -243,7 +288,7 @@ generation_mask |= composition_mask  # đảm bảo luôn chứa lỗ cốt lõi
 
 ---
 
-## Bước 4 — Khôi phục đối tượng (Object Reconstruction)
+## Bước 5 — Khôi phục đối tượng (Object Reconstruction)
 
 | Thông tin | Chi tiết |
 |-----------|----------|
@@ -256,12 +301,12 @@ generation_mask |= composition_mask  # đảm bảo luôn chứa lỗ cốt lõi
 Bước này chỉ chạy khi ít nhất một đối tượng có `reconstruction_mask` không rỗng.
 → [orchestrator.py#L409-L413](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L409-L413)
 
-### Bước 4a — Chuẩn bị đầu vào
+### Bước 5a — Chuẩn bị đầu vào
 
 Với mỗi đối tượng có `reconstruction_mask` không rỗng:
 → [reconstruction.py#L110-L200](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/reconstruction.py#L110-L200)
 
-1. `SquareROI` được đọc từ `reconstruction_input_roi` (đã tính ở Bước 3).
+1. `SquareROI` được đọc từ `reconstruction_input_roi` (đã tính ở Bước 4).
 2. `source_crop = crop_image(image, roi)` — RGB gốc trong khung vuông crop.
 3. `mask_crop = crop_array(generation_mask, roi)` — mask inpainting cho HD-Painter.
 4. `mask_image = Image.fromarray(mask_crop * 255, mode="L")` — mask PIL grayscale.
@@ -272,14 +317,14 @@ Với mỗi đối tượng có `reconstruction_mask` không rỗng:
    với `style_hint` được nối thêm nếu đã cấu hình (ví dụ: `"Match the source's flat vector illustration style…"`).
    → [reconstruction.py#L180-L188](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/reconstruction.py#L180-L188)
 
-### Bước 4b — Suy luận model
+### Bước 5b — Suy luận model
 
 Nếu `reconstruct_many` khả dụng, tất cả item đã chuẩn bị được gọi batch trong một
 lần. Nếu không, mỗi item gọi `reconstruct(source_crop, mask_image, prompt)` riêng
 lẻ. Exception được bắt riêng từng item và lưu dưới dạng failure.
 → [reconstruction.py#L402-L433](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/reconstruction.py#L402-L433)
 
-### Bước 4c — Validation đầu ra & Phân tách Canvas
+### Bước 5c — Validation đầu ra & Phân tách Canvas
 
 Mỗi kết quả `reconstructed` trực tiếp từ HD-Painter đi qua `validate_reconstruction_result`:
 → [validate_reconstruction.py#L181-L268](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/validate_reconstruction.py#L181-L268)
@@ -293,7 +338,7 @@ Mỗi kết quả `reconstructed` trực tiếp từ HD-Painter đi qua `validat
    - Pixel nằm ngoài vùng `permitted` (`accepted_rgb_mask` hoặc `hard_mask` đã mở rộng) được **ghi đè bằng pixel source gốc**.
    - Việc này sửa lỗi Poisson blending / super-resolution của HD-Painter rò rỉ màu ra ngoài mask.
 
-### Bước 4d — Phân tách 2 luồng Canvas (Raw vs Validated)
+### Bước 5d — Phân tách 2 luồng Canvas (Raw vs Validated)
 
 Sau khi kiểm tra an toàn thành công, đối tượng được lưu 2 phiên bản canvas riêng biệt:
 → [reconstruction.py#L479-L521](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/reconstruction.py#L479-L521)
@@ -311,7 +356,7 @@ detected.reconstruction_roi = item.roi
 > 
 > Việc đưa **Raw Canvas trực tiếp vào BiRefNet** giúp BiRefNet có góc nhìn đầy đủ và tự nhiên nhất về toàn bộ phần nét vẽ foreground mà HD-Painter đã sinh ra, từ đó tự bóc tách alpha mềm một cách mượt mà nhất mà không bị viền vỡ do cắt xén cứng từ trước.
 
-### Bước 4e — Chỉ số màu sắc (Color Metrics)
+### Bước 5e — Chỉ số màu sắc (Color Metrics)
 
 `reconstruction_color_metrics` tính các chỉ số tư vấn (không loại cứng):
 → [validate_reconstruction.py#L61-L116](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/reconstruction/validate_reconstruction.py#L61-L116)
@@ -324,13 +369,13 @@ detected.reconstruction_roi = item.roi
 
 ---
 
-## Bước 5 — Tinh chỉnh Support khôi phục (BiRefNet lần 1)
+## Bước 6 — Tinh chỉnh Support khôi phục (BiRefNet lần 1)
 
 | Thông tin | Chi tiết |
 |-----------|----------|
 | **Module** | [matting.py](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py) |
 | **Hàm chính** | [refine_reconstruction_supports](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L75-L409) |
-| **Model** | BiRefNet (`ZhengPeng7/BiRefNet`) — dùng chung với Bước 7 (tải một lần) |
+| **Model** | BiRefNet (`ZhengPeng7/BiRefNet`) — dùng chung với Bước 8 (tải một lần) |
 | **Điều phối tại** | [orchestrator.py#L530-L600](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L530-L600) |
 
 Bước này chạy khi `has_accepted_reconstruction` là true và
@@ -350,7 +395,7 @@ Mục tiêu:
 
 Với mỗi đối tượng có `reconstruction_mask` không rỗng và `raw_reconstruction_canvas` hợp lệ:
 
-#### 5a — Suy luận BiRefNet trên đầu ra thô HD-Painter
+#### 6a — Suy luận BiRefNet trên đầu ra thô HD-Painter
 
 ```python
 raw_canvas = target.raw_reconstruction_canvas  # KHÔNG phải reconstruction_canvas
@@ -362,7 +407,7 @@ foreground mà HD-Painter đã sinh, kể cả phần mà pixel restoration đã
 → [matting.py#L127-L131](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L127-L131)
 → [matting.py#L178-L181](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L178-L181)
 
-#### 5b — Chuẩn bị mask không gian trong toạ độ crop
+#### 6b — Chuẩn bị mask không gian trong toạ độ crop
 
 → [matting.py#L205-L235](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L205-L235)
 
@@ -371,7 +416,7 @@ foreground mà HD-Painter đã sinh, kể cả phần mà pixel restoration đã
 - `generation_evidence`: `reconstruction_generation_mask` nở bởi `generation_evidence_margin_pixels`
 - `connection_anchor`: target modal nở bởi `connection_margin_pixels` (mặc định `4px`) — "neo" kiểm tra kết nối
 
-#### 5c — Xây dựng candidate foreground
+#### 6c — Xây dựng candidate foreground
 
 → [matting.py#L241-L254](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L241-L254)
 
@@ -386,7 +431,7 @@ Tính thêm:
 - `change_distance = mean(|raw_rgb - source_rgb|, axis=2)` — thay đổi RGB per-pixel
 - `changed_by_model = change_distance >= change_threshold` (mặc định `8.0`)
 
-#### 5d — Lọc connected component
+#### 6d — Lọc connected component
 
 → [matting.py#L256-L288](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L256-L288)
 
@@ -405,7 +450,7 @@ các thành phần cô lập. Mỗi thành phần **chỉ được chấp nhận
 
 `extension_part = component & ~modal_crop` — chỉ phần nằm ngoài target nhìn thấy.
 
-#### 5e — Tạo soft extension alpha
+#### 6e — Tạo soft extension alpha
 
 → [matting.py#L290-L313](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L290-L313)
 
@@ -423,7 +468,7 @@ extension_alpha[foreign_protection_crop] = 0.0
 extension_alpha[~valid_roi_crop] = 0.0
 ```
 
-#### 5f — Khôi phục về mảng full-image
+#### 6f — Khôi phục về mảng full-image
 
 → [matting.py#L315-L322](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L315-L322)
 
@@ -435,7 +480,7 @@ target.reconstruction_extension_mask = extension_full                         # 
 target.reconstruction_support_mask   = modal | extension_full                 # support tổng hợp
 ```
 
-#### 5g — Tạo reconstruction_canvas an toàn
+#### 6g — Tạo reconstruction_canvas an toàn
 
 → [matting.py#L324-L334](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L324-L334)
 
@@ -444,13 +489,13 @@ composed_crop = raw_rgb * extension_alpha + source_rgb * (1.0 - extension_alpha)
 ```
 
 Nếu extension không rỗng, `target.reconstruction_canvas` được đặt thành raw canvas
-RGB (phép blend soft-alpha thực tế được trì hoãn tới group composition ở Bước 6).
+RGB (phép blend soft-alpha thực tế được trì hoãn tới group composition ở Bước 7).
 Nếu extension rỗng, `reconstruction_canvas` đặt là `None` để báo hiệu không có
 khôi phục khả dụng.
 
 ---
 
-## Bước 6 — Gom nhóm & Hợp thành nguồn (Grouping & Source Composition)
+## Bước 7 — Gom nhóm & Hợp thành nguồn (Grouping & Source Composition)
 
 | Thông tin | Chi tiết |
 |-----------|----------|
@@ -459,32 +504,38 @@ khôi phục khả dụng.
 | **Model** | Không |
 | **Điều phối tại** | [orchestrator.py#L602-L613](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L602-L613) |
 
-### Bước 6a — Hình thành nhóm (Group Formation)
+### Bước 7a — Hình thành nhóm (Group Formation)
 
-`group_reconstructed_objects(objects, pair_decisions)` hợp nhất các đối tượng thô
-thành các `GroupedObject` bằng **union-find**:
+`group_reconstructed_objects(objects, pair_decisions, merge_edges=...)` chỉ
+materialize các merge edge đã được planner validate thành `GroupedObject` bằng
+**union-find**:
 → [grouping.py#L33-L138](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/grouping.py#L33-L138)
 
-- Hai đối tượng được gộp nếu cùng **`semantic_class`** VÀ **bounding box modal gốc
-  chồng lấn nhau**.
-- Đối tượng khác class không bao giờ được gộp (chúng chỉ được ghép cặp cho phân
-  tích sâu).
+- Same-class edge vẫn dùng đúng quy tắc `semantic_class` giống nhau và original
+  modal bbox overlap.
+- Cross-class edge chỉ tồn tại khi đã vượt qua containment, area dominance,
+  per-axis dominance và large-object veto ở Bước 2.
+- Connected component bắc cầu được tạo từ raw edges, không từ union bbox.
+- Primary của group same-class vẫn giữ thứ tự segmentation hiện hữu; primary
+  của group multi-class là member có modal-mask area lớn nhất.
 
 Mỗi `GroupedObject` lưu:
 - `members`: tuple có thứ tự các `DetectedObject` thành viên
+- `semantic_classes`: provenance class có thứ tự của toàn bộ members
+- `merge_edges`: raw validated edges tạo nên group
 - `modal_mask`: hợp tất cả modal mask thành viên (uint8 × 255)
 - `amodal_mask`: hợp tất cả amodal mask thành viên
 - `effective_support_mask`: property trả về `modal | reconstruction_support` mỗi thành viên
   → [types.py#L126-L139](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/types.py#L126-L139)
 
-### Bước 6b — Sắp xếp nhóm theo độ sâu (Depth-Aware Group Ordering)
+### Bước 7b — Sắp xếp nhóm theo độ sâu (Depth-Aware Group Ordering)
 
 Khi có `pair_decisions`, các nhóm được sắp topo từ sau ra trước (back-to-front)
-dùng thứ tự sâu từ Bước 3. Chu trình được xử lý bằng fallback thứ tự segmentation
+dùng thứ tự sâu từ Bước 4. Chu trình được xử lý bằng fallback thứ tự segmentation
 ổn định.
 → [grouping.py#L138-L190](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/grouping.py#L138-L190)
 
-### Bước 6c — Hợp thành nguồn (Source Composition)
+### Bước 7c — Hợp thành nguồn (Source Composition)
 
 `compose_group_sources(image, groups)` tạo canvas RGB đã giải quyết xung đột cho
 mỗi nhóm:
@@ -519,21 +570,21 @@ Kết quả:
 
 ---
 
-## Bước 7 — Matting nhóm cuối cùng (BiRefNet lần 2)
+## Bước 8 — Matting nhóm cuối cùng (BiRefNet lần 2)
 
 | Thông tin | Chi tiết |
 |-----------|----------|
 | **Module** | [matting.py](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py) |
 | **Hàm chính** | [refine_objects](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L475-L584) |
-| **Model** | BiRefNet (cùng instance với Bước 5) |
-| **GPU giải phóng** | Có — [orchestrator.py#L626-L629](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L626-L629) sau cả Bước 5 và 7 |
+| **Model** | BiRefNet (cùng instance với Bước 6) |
+| **GPU giải phóng** | Có — [orchestrator.py#L626-L629](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L626-L629) sau cả Bước 6 và 8 |
 | **Điều phối tại** | [orchestrator.py#L615-L625](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L615-L625) |
 
 ### Mục đích
 
 Lần chạy BiRefNet thứ hai tạo ra alpha RGBA mềm chất lượng cao cuối cùng cho mỗi
 nhóm, hoạt động trên **RGB đã hợp thành** (bao gồm cả pixel gốc nhìn thấy và
-phần extension đã khôi phục từ Bước 6).
+phần extension đã khôi phục từ Bước 7).
 
 ### Luồng xử lý
 
@@ -542,7 +593,7 @@ Với mỗi `GroupedObject`:
 1. **Chọn nguồn:**
    → [matting.py#L493-L519](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L493-L519)
    - **Nhóm đã khôi phục**: Dùng `_expand_composed_source` lấy `composed_source`
-     từ Bước 6, nhúng nó vào matting ROI lớn hơn, và bổ sung ngữ cảnh xung quanh
+     từ Bước 7, nhúng nó vào matting ROI lớn hơn, và bổ sung ngữ cảnh xung quanh
      từ ảnh gốc.
      → [matting.py#L412-L444](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/matting.py#L412-L444)
    - **Nhóm không khôi phục**: Dùng crop ảnh source gốc trực tiếp.
@@ -571,7 +622,7 @@ Với mỗi `GroupedObject`:
 
 ---
 
-## Bước 8 — Tách lớp & Inpaint nền
+## Bước 9 — Tách lớp & Inpaint nền
 
 | Thông tin | Chi tiết |
 |-----------|----------|
@@ -581,14 +632,14 @@ Với mỗi `GroupedObject`:
 | **GPU giải phóng** | Có — [orchestrator.py#L654-L657](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L654-L657) |
 | **Điều phối tại** | [orchestrator.py#L631-L657](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/orchestrator.py#L631-L657) |
 
-### Bước 8a — Tách lớp (Layer Extraction)
+### Bước 9a — Tách lớp (Layer Extraction)
 
 `extract_object_layers(objects, kernel_size, background_inpaint)`:
 → [layers.py#L22-L181](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/layers.py#L22-L181)
 
 Với mỗi nhóm có `soft_alpha` hợp lệ:
 
-1. `source_rgb` = `matting_source` từ Bước 7 (chính xác RGB mà BiRefNet đã thấy).
+1. `source_rgb` = `matting_source` từ Bước 8 (chính xác RGB mà BiRefNet đã thấy).
 2. `hard_mask = support_crop | (alpha > THRESHOLD_ALPHA)` — hợp support và vùng alpha.
 3. **Nền tạm per-component**: `build_inpaint_mask` tạo mask, rồi model inpainting
    lấp vùng foreground để tạo `component_background`. `refine_background` sửa màu
@@ -608,7 +659,7 @@ Với mỗi nhóm có `soft_alpha` hợp lệ:
    → [layers.py#L155-L164](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/layers.py#L155-L164)
    → Kiểu dữ liệu: [types.py#L18-L25](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/types.py#L18-L25)
 
-### Bước 8b — Inpaint nền (Background Inpainting)
+### Bước 9b — Inpaint nền (Background Inpainting)
 
 `generate_final_background(image, final_groups, kernel_size, background_inpaint)`:
 → [background.py#L74-L103](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/pipeline/background.py#L74-L103)
@@ -676,6 +727,7 @@ pip install -r backend/requirements.txt
 
 | Section | Các tham số chính |
 |---------|-------------------|
+| `pipeline.cross_class_grouping` | `enabled`, `containment_threshold`, `max_bbox_size_ratio`, `large_mask_ratio`, `large_bbox_ratio`, `dimension_tolerance_ratio` |
 | `pipeline.completion` | `max_area_growth_ratio`, `max_bbox_growth_ratio`, `minimum_hole_area_pixels`, `minimum_hole_area_ratio`, `tie_tolerance_ratio` — [#L7-L12](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/config.yaml#L7-L12) |
 | `pipeline.object_reconstruction` | `context_ratio`, `generation_mask_dilation_pixels`, `generation_mask_closing_pixels`, `composition_margin_pixels`, `blend_allowance_ratio`, `support_alpha_low_threshold`, `support_alpha_high_threshold`, `support_change_threshold`, `prompt_template`, `style_hint`, `diagnostics_directory` — [#L13-L52](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/config.yaml#L13-L52) |
 | `pipeline.matting` | `context_ratio`, `support_dilation_pixels` — [#L53-L55](file:///d:/Documents/Qikify/Magic_Layer_v1/backend/config.yaml#L53-L55) |
