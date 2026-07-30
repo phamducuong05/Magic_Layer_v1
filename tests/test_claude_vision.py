@@ -69,7 +69,8 @@ def test_extract_keywords_sends_image_first_and_parses_structured_output():
         extractor.extract_keywords(Image.new("RGB", (100, 50), "white"))
     )
 
-    assert result == ["person", "hand"]
+    assert result.keywords == ["person", "hand"]
+    assert result.occluders == []
     request = client.messages.last_request
     assert request["model"] == "claude-sonnet-5"
     assert "temperature" not in request
@@ -80,6 +81,7 @@ def test_extract_keywords_sends_image_first_and_parses_structured_output():
         "type": "array",
         "items": {"type": "string"},
     }
+    assert "large, visually important foreground objects" in request["system"]
     content = request["messages"][0]["content"]
     assert [block["type"] for block in content] == ["image", "text"]
     image_source = content[0]["source"]
@@ -89,6 +91,82 @@ def test_extract_keywords_sends_image_first_and_parses_structured_output():
         io.BytesIO(base64.b64decode(image_source["data"]))
     )
     assert encoded_image.size == (32, 16)
+
+
+def test_extract_keywords_uses_occluder_mode_and_simplifies_user_targets():
+    client = FakeClient(
+        response=make_response(
+            '{"keywords": ["car"], "occluders": ["person", "tree"]}'
+        )
+    )
+    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
+
+    result = asyncio.run(
+        extractor.extract_keywords(
+            Image.new("RGB", (100, 50), "white"),
+            target_keywords=["red four-door passenger automobile"],
+        )
+    )
+
+    assert result.keywords == ["car"]
+    assert result.occluders == ["person", "tree"]
+    request = client.messages.last_request
+    schema = request["output_config"]["format"]["schema"]
+    assert schema["required"] == ["keywords", "occluders"]
+    assert (
+        "Return only independent objects that visibly cover"
+        in request["system"]
+    )
+    target_data = request["messages"][0]["content"][1]["text"]
+    assert '"red four-door passenger automobile"' in target_data
+
+
+def test_extract_keywords_allows_no_occluders_for_manual_targets():
+    client = FakeClient(
+        response=make_response('{"keywords": ["car"], "occluders": []}')
+    )
+    extractor = ClaudeVisionKeywordExtractor(make_settings(), client=client)
+
+    result = asyncio.run(
+        extractor.extract_keywords(
+            Image.new("RGB", (8, 8)),
+            target_keywords=["automobile"],
+        )
+    )
+
+    assert result.keywords == ["car"]
+    assert result.occluders == []
+
+
+def test_both_modes_send_the_same_common_strict_rules():
+    cases = [
+        (None, '{"keywords": ["person"]}'),
+        (
+            ["human individual"],
+            '{"keywords": ["person"], "occluders": []}',
+        ),
+    ]
+
+    for target_keywords, response_text in cases:
+        client = FakeClient(response=make_response(response_text))
+        extractor = ClaudeVisionKeywordExtractor(
+            make_settings(),
+            client=client,
+        )
+
+        asyncio.run(
+            extractor.extract_keywords(
+                Image.new("RGB", (8, 8)),
+                target_keywords=target_keywords,
+            )
+        )
+
+        system_prompt = client.messages.last_request["system"]
+        assert "Common strict rules for every returned keyword:" in system_prompt
+        assert "Whole objects only." in system_prompt
+        assert "extremely simple, common English nouns" in system_prompt
+        assert "Foreground only." in system_prompt
+        assert "Exclude clothing, footwear" in system_prompt
 
 
 def test_extract_keywords_rejects_refusal_and_truncated_responses():
@@ -132,7 +210,8 @@ def test_extract_keywords_keeps_only_the_first_configured_keywords():
         extractor.extract_keywords(Image.new("RGB", (8, 8)))
     )
 
-    assert result == keywords[:10]
+    assert result.keywords == keywords[:10]
+    assert result.occluders == []
 
 
 def test_extract_keywords_maps_transient_anthropic_error():

@@ -19,9 +19,11 @@ class FakeExtractor:
         self.result = result
         self.error = error
         self.calls = 0
+        self.target_keywords = None
 
-    async def extract_keywords(self, image):
+    async def extract_keywords(self, image, target_keywords=None):
         self.calls += 1
+        self.target_keywords = target_keywords
         if self.error is not None:
             raise self.error
         return self.result
@@ -54,29 +56,40 @@ def image_upload():
     return ("image.png", buffer.getvalue(), "image/png")
 
 
-def test_resolve_keywords_uses_manual_override_without_calling_vlm(
+def test_resolve_keywords_simplifies_manual_targets_and_adds_occluders(
     monkeypatch,
 ):
     main = load_main(monkeypatch)
-    extractor = FakeExtractor(result=["ignored"])
+    extractor = FakeExtractor(
+        result=SimpleNamespace(
+            keywords=["car"],
+            occluders=["person", "Car"],
+        )
+    )
 
     result = asyncio.run(
         main.resolve_keywords(
             Image.new("RGB", (8, 6)),
-            " Person, dog,person ",
+            " red four-door passenger automobile ",
             extractor=extractor,
         )
     )
 
-    assert result == ["Person", "dog"]
-    assert extractor.calls == 0
+    assert result == ["car", "person"]
+    assert extractor.calls == 1
+    assert extractor.target_keywords == ["red four-door passenger automobile"]
 
 
 def test_resolve_keywords_uses_vlm_when_manual_override_is_omitted(
     monkeypatch,
 ):
     main = load_main(monkeypatch)
-    extractor = FakeExtractor(result=["person", "hand"])
+    extractor = FakeExtractor(
+        result=SimpleNamespace(
+            keywords=["person", "chair"],
+            occluders=[],
+        )
+    )
 
     result = asyncio.run(
         main.resolve_keywords(
@@ -86,8 +99,62 @@ def test_resolve_keywords_uses_vlm_when_manual_override_is_omitted(
         )
     )
 
-    assert result == ["person", "hand"]
+    assert result == ["person", "chair"]
     assert extractor.calls == 1
+    assert extractor.target_keywords is None
+
+
+def test_resolve_keywords_prioritizes_simplified_targets_before_occluders(
+    monkeypatch,
+):
+    main = load_main(monkeypatch)
+    extractor = FakeExtractor(
+        result=SimpleNamespace(
+            keywords=["car", "person"],
+            occluders=[f"object-{index}" for index in range(10)],
+        )
+    )
+
+    result = asyncio.run(
+        main.resolve_keywords(
+            Image.new("RGB", (8, 6)),
+            "automobile, human being",
+            extractor=extractor,
+        )
+    )
+
+    assert result == [
+        "car",
+        "person",
+        "object-0",
+        "object-1",
+        "object-2",
+        "object-3",
+        "object-4",
+        "object-5",
+        "object-6",
+        "object-7",
+    ]
+
+
+def test_resolve_keywords_treats_blank_manual_prompt_as_auto_mode(
+    monkeypatch,
+):
+    main = load_main(monkeypatch)
+    extractor = FakeExtractor(
+        result=SimpleNamespace(keywords=["person"], occluders=[])
+    )
+
+    result = asyncio.run(
+        main.resolve_keywords(
+            Image.new("RGB", (8, 6)),
+            "   ",
+            extractor=extractor,
+        )
+    )
+
+    assert result == ["person"]
+    assert extractor.target_keywords is None
 
 
 def test_process_image_returns_503_when_vlm_is_unavailable(monkeypatch):
@@ -124,3 +191,45 @@ def test_process_image_returns_502_for_unusable_vlm_output(monkeypatch):
     assert response.json() == {
         "detail": "Dịch vụ phân tích ảnh không trả về từ khóa hợp lệ."
     }
+
+
+def test_process_image_returns_502_for_unusable_vlm_output_in_manual_mode(
+    monkeypatch,
+):
+    main = load_main(monkeypatch)
+    extractor = FakeExtractor(
+        error=InvalidKeywordExtraction("bad structured output")
+    )
+    monkeypatch.setattr(main, "get_keyword_extractor", lambda: extractor)
+
+    response = TestClient(main.app).post(
+        "/api/process-image",
+        files={"file": image_upload()},
+        data={"keywords": "red four-door passenger automobile"},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Dịch vụ phân tích ảnh không trả về từ khóa hợp lệ."
+    }
+
+
+def test_process_image_returns_400_for_too_many_user_keywords(monkeypatch):
+    main = load_main(monkeypatch)
+    extractor = FakeExtractor(
+        result=SimpleNamespace(keywords=["car"], occluders=[])
+    )
+    monkeypatch.setattr(main, "get_keyword_extractor", lambda: extractor)
+    supplied = ",".join(f"target-{index}" for index in range(11))
+
+    response = TestClient(main.app).post(
+        "/api/process-image",
+        files={"file": image_upload()},
+        data={"keywords": supplied},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Danh sách từ khóa người dùng không hợp lệ."
+    }
+    assert extractor.calls == 0

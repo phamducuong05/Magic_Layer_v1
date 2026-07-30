@@ -150,9 +150,9 @@ models:
       dtype: "float16"
       prompt: "Remove the instance of"
       negative_prompt: "objects, text, decorations, artifacts"
-      generation_mask_expansion: 1
-      composition_mask_expansion: 1
-      feather_radius: 5.0
+      generation_mask_expansion: 11
+      composition_mask_expansion: 7
+      feather_radius: 2,0
     sdxl:
       model_id: "runwayml/stable-diffusion-inpainting"
       use_xformers: false

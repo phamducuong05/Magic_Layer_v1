@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Protocol
+from dataclasses import dataclass, field
+from typing import Iterable, Protocol, Sequence
 
 from PIL import Image
 
@@ -19,9 +20,25 @@ class InvalidKeywordExtraction(KeywordExtractionError):
     """The extractor returned no usable SAM3 keywords."""
 
 
+class InvalidSuppliedKeywords(KeywordExtractionError):
+    """The user supplied an invalid keyword list."""
+
+
+@dataclass(frozen=True)
+class KeywordExtractionResult:
+    """Structured SAM3 targets and the objects that occlude them."""
+
+    keywords: list[str]
+    occluders: list[str] = field(default_factory=list)
+
+
 class KeywordExtractor(Protocol):
-    async def extract_keywords(self, image: Image.Image) -> list[str]:
-        """Return normalized English text prompts for SAM3."""
+    async def extract_keywords(
+        self,
+        image: Image.Image,
+        target_keywords: Sequence[str] | None = None,
+    ) -> KeywordExtractionResult:
+        """Return normalized English SAM3 prompts and related occluders."""
 
 
 def normalize_keywords(

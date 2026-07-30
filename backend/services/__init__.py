@@ -3,7 +3,9 @@
 from .claude_vision import ClaudeVisionKeywordExtractor
 from .keyword_extractor import (
     InvalidKeywordExtraction,
+    InvalidSuppliedKeywords,
     KeywordExtractionError,
+    KeywordExtractionResult,
     KeywordExtractor,
     KeywordExtractorUnavailable,
     normalize_keywords,
@@ -12,7 +14,9 @@ from .keyword_extractor import (
 __all__ = [
     "ClaudeVisionKeywordExtractor",
     "InvalidKeywordExtraction",
+    "InvalidSuppliedKeywords",
     "KeywordExtractionError",
+    "KeywordExtractionResult",
     "KeywordExtractor",
     "KeywordExtractorUnavailable",
     "normalize_keywords",

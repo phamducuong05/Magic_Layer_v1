@@ -25,6 +25,7 @@ try:
     from .services import (
         ClaudeVisionKeywordExtractor,
         InvalidKeywordExtraction,
+        InvalidSuppliedKeywords,
         KeywordExtractor,
         KeywordExtractorUnavailable,
         normalize_keywords,
@@ -37,6 +38,7 @@ except ImportError:  # Legacy: run uvicorn from inside backend/.
     from services import (
         ClaudeVisionKeywordExtractor,
         InvalidKeywordExtraction,
+        InvalidSuppliedKeywords,
         KeywordExtractor,
         KeywordExtractorUnavailable,
         normalize_keywords,
@@ -137,25 +139,34 @@ async def resolve_keywords(
     *,
     extractor: Optional[KeywordExtractor] = None,
 ) -> List[str]:
-    """Resolve a transitional manual override or invoke the configured VLM."""
+    """Generate simple SAM3 targets and their foreground occluders."""
     settings = config.get_vlm_config()
     max_keywords = int(settings.get("max_keywords", 10))
     max_length = int(settings.get("max_keyword_length", 80))
 
-    if supplied_keywords is not None:
-        return normalize_keywords(
-            supplied_keywords.split(","),
-            max_keywords=max_keywords,
-            max_length=max_length,
-        )
+    target_keywords = None
+    if supplied_keywords is not None and supplied_keywords.strip():
+        try:
+            target_keywords = normalize_keywords(
+                supplied_keywords.split(","),
+                max_keywords=max_keywords,
+                max_length=max_length,
+            )
+        except InvalidKeywordExtraction as exc:
+            raise InvalidSuppliedKeywords(str(exc)) from exc
 
     active_extractor = extractor or get_keyword_extractor()
-    extracted = await active_extractor.extract_keywords(image)
-    return normalize_keywords(
-        extracted,
-        max_keywords=max_keywords,
+    extracted = await active_extractor.extract_keywords(
+        image,
+        target_keywords=target_keywords,
+    )
+    combined = [*extracted.keywords, *extracted.occluders]
+    normalized = normalize_keywords(
+        combined,
+        max_keywords=max(max_keywords, len(combined)),
         max_length=max_length,
     )
+    return normalized[:max_keywords]
 
 
 @app.post("/api/process-image", response_model=ProcessResponse)
@@ -212,12 +223,12 @@ async def api_process_image(
             status_code=503,
             detail="Dịch vụ phân tích ảnh tạm thời không khả dụng.",
         )
+    except InvalidSuppliedKeywords:
+        raise HTTPException(
+            status_code=400,
+            detail="Danh sách từ khóa người dùng không hợp lệ.",
+        )
     except InvalidKeywordExtraction:
-        if keywords is not None:
-            raise HTTPException(
-                status_code=400,
-                detail="Danh sách từ khóa thủ công không hợp lệ.",
-            )
         logger.exception("VLM returned unusable keyword output")
         raise HTTPException(
             status_code=502,
