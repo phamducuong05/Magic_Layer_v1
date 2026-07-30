@@ -8,6 +8,7 @@ from .keyword_extractor import (
     KeywordExtractionResult,
     KeywordExtractor,
     KeywordExtractorUnavailable,
+    TargetKeywordExtraction,
     normalize_keywords,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "KeywordExtractionResult",
     "KeywordExtractor",
     "KeywordExtractorUnavailable",
+    "TargetKeywordExtraction",
     "normalize_keywords",
 ]

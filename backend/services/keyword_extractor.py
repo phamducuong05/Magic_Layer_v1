@@ -25,11 +25,23 @@ class InvalidSuppliedKeywords(KeywordExtractionError):
 
 
 @dataclass(frozen=True)
+class TargetKeywordExtraction:
+    """Validated target refinement and its ranked raw occluder keywords."""
+
+    input_index: int
+    source_keyword: str
+    keyword: str
+    occluders: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class KeywordExtractionResult:
     """Structured SAM3 targets and the objects that occlude them."""
 
     keywords: list[str]
     occluders: list[str] = field(default_factory=list)
+    target_results: tuple[TargetKeywordExtraction, ...] = ()
+    visible_person_count: int | None = None
 
 
 class KeywordExtractor(Protocol):
