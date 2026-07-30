@@ -25,23 +25,33 @@ logger = get_logger(__name__)
 
 def link_overlap_partners(
     objects: Sequence[DetectedObject],
+    pairs: Sequence[OverlapPair] | None = None,
 ) -> list[OverlapPair]:
-    """Record positive-area cross-class box overlaps on both objects."""
+    """Link prefiltered external pairs, or discover legacy overlaps."""
     for detected in objects:
         detected.overlap_partner_ids.clear()
 
-    pairs = find_cross_class_overlaps(
-        [
-            ObjectBounds(
-                object_id=detected.object_id,
-                semantic_class=detected.semantic_class,
-                bbox=detected.original_modal_bbox,
-            )
-            for detected in objects
-        ]
+    linked_pairs = (
+        list(pairs)
+        if pairs is not None
+        else find_cross_class_overlaps(
+            [
+                ObjectBounds(
+                    object_id=detected.object_id,
+                    semantic_class=detected.semantic_class,
+                    bbox=detected.original_modal_bbox,
+                )
+                for detected in objects
+            ]
+        )
     )
     objects_by_id = {detected.object_id: detected for detected in objects}
-    for first_id, second_id in pairs:
+    for first_id, second_id in linked_pairs:
+        if first_id not in objects_by_id or second_id not in objects_by_id:
+            raise ValueError(
+                "overlap pair references unknown objects: "
+                f"{first_id!r}, {second_id!r}"
+            )
         objects_by_id[first_id].overlap_partner_ids.add(second_id)
         objects_by_id[second_id].overlap_partner_ids.add(first_id)
         log_event(
@@ -51,10 +61,10 @@ def link_overlap_partners(
             first_id=first_id,
             second_id=second_id,
             decision="completion_candidate",
-            reason="cross_class_bbox_overlap",
+            reason="external_cross_class_bbox_overlap",
         )
 
-    return pairs
+    return linked_pairs
 
 
 def get_completion_candidates(

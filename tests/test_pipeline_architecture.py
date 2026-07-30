@@ -93,6 +93,39 @@ def test_completion_candidates_and_model_are_explicit_and_ordered():
     assert second.completion_hole_area == 0
 
 
+def test_completion_linking_uses_explicit_external_pairs_only():
+    from backend.pipeline.completion import (
+        get_completion_candidates,
+        link_overlap_partners,
+    )
+    from backend.pipeline.types import DetectedObject
+
+    mask = np.ones((4, 5), dtype=np.uint8)
+    first = DetectedObject(
+        "a", "class-a", "class-a", mask.copy(), (0, 0, 5, 4)
+    )
+    second = DetectedObject(
+        "b", "class-b", "class-b", mask.copy(), (0, 0, 5, 4)
+    )
+    third = DetectedObject(
+        "c", "class-c", "class-c", mask.copy(), (0, 0, 5, 4)
+    )
+
+    pairs = link_overlap_partners(
+        [first, second, third],
+        pairs=[("b", "c")],
+    )
+
+    assert pairs == [("b", "c")]
+    assert first.overlap_partner_ids == set()
+    assert second.overlap_partner_ids == {"c"}
+    assert third.overlap_partner_ids == {"b"}
+    assert [
+        item.object_id
+        for item in get_completion_candidates([first, second, third])
+    ] == ["b", "c"]
+
+
 def test_detected_object_keeps_raw_and_effective_hole_areas_separate():
     from backend.pipeline.types import DetectedObject
 
