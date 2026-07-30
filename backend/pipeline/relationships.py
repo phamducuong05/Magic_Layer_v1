@@ -1,6 +1,6 @@
 """Classify raw-object relationships before heavy pipeline stages."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from itertools import combinations
 from types import MappingProxyType
@@ -237,10 +237,16 @@ def plan_object_relationships(
         elif containment.bbox_size_ratio > max_bbox_size_ratio:
             failure_reason = "bbox_size_ratio_not_dominant"
         elif (
-            object_metrics[first.object_id].cross_class_merge_veto
-            or object_metrics[second.object_id].cross_class_merge_veto
+            object_metrics[first.object_id].large_mask_veto
+            or object_metrics[second.object_id].large_mask_veto
         ):
-            failure_reason = "large_object_veto"
+            # Mask coverage is the primary signal when both vetoes apply.
+            failure_reason = "large_mask_ratio_veto"
+        elif (
+            object_metrics[first.object_id].large_bbox_veto
+            or object_metrics[second.object_id].large_bbox_veto
+        ):
+            failure_reason = "large_bbox_ratio_veto"
         else:
             boxes = (first_bbox, second_bbox)
             small_bbox = boxes[containment.smaller_index]
@@ -317,6 +323,17 @@ def plan_object_relationships(
         for pair in regular_pairs
         if component_by_object_id[pair[0]] != component_by_object_id[pair[1]]
     )
+    external_pair_keys = {frozenset(pair) for pair in external_pairs}
+    decisions = [
+        replace(decision, reason="internal_pair_suppressed")
+        if (
+            decision.relation is PairRelation.REGULAR_CROSS_CLASS_OVERLAP
+            and frozenset((decision.first_id, decision.second_id))
+            not in external_pair_keys
+        )
+        else decision
+        for decision in decisions
+    ]
     return RelationshipPlan(
         merge_edges=tuple(merge_edges),
         regular_overlap_pairs=tuple(regular_pairs),

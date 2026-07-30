@@ -26,6 +26,31 @@ def test_pipeline_types_preserve_contract_and_add_per_object_alpha():
     assert ProcessResult("background", 4, 3).layers == []
 
 
+def test_grouped_object_preserves_legacy_optional_positional_arguments():
+    from backend.pipeline.types import DetectedObject, GroupedObject
+
+    mask = np.ones((3, 4), dtype=np.uint8)
+    member = DetectedObject(
+        "object-0", "person", "person", mask, (0, 0, 4, 3)
+    )
+    composed_source = Image.new("RGB", (4, 3), "white")
+
+    grouped = GroupedObject(
+        "group-0",
+        "person",
+        "person",
+        ("object-0",),
+        (member,),
+        mask,
+        mask,
+        (0, 0, 4, 3),
+        0,
+        composed_source,
+    )
+
+    assert grouped.composed_source is composed_source
+
+
 def test_segmentation_uses_the_supplied_processor():
     from backend.pipeline.segmentation import extract_raw_objects
 

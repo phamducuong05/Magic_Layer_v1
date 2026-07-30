@@ -123,6 +123,12 @@ def test_mask_ratio_veto_blocks_only_cross_class_containment():
         for edge in plan.merge_edges
     )
     assert ("large", "small") in plan.regular_overlap_pairs
+    large_small = next(
+        decision
+        for decision in plan.pair_decisions
+        if {decision.first_id, decision.second_id} == {"large", "small"}
+    )
+    assert large_small.reason == "large_mask_ratio_veto"
 
 
 def test_bbox_ratio_veto_catches_sparse_large_extent():
@@ -146,6 +152,22 @@ def test_bbox_ratio_veto_catches_sparse_large_extent():
     assert metrics.large_bbox_veto is True
     assert plan.merge_edges == ()
     assert plan.external_overlap_pairs == (("sparse", "small"),)
+    assert plan.pair_decisions[0].reason == "large_bbox_ratio_veto"
+
+
+def test_mask_veto_takes_precedence_when_both_large_vetoes_apply():
+    large = _object("large", "frame", (0, 0, 90, 90))
+    small = _object("small", "product", (10, 10, 20, 20))
+
+    plan = plan_object_relationships(
+        [large, small],
+        image_size=(100, 100),
+        **SETTINGS,
+    )
+
+    assert plan.object_metrics["large"].large_mask_veto is True
+    assert plan.object_metrics["large"].large_bbox_veto is True
+    assert plan.pair_decisions[0].reason == "large_mask_ratio_veto"
 
 
 def test_transitive_merge_suppresses_regular_internal_edge():
@@ -164,6 +186,12 @@ def test_transitive_merge_suppresses_regular_internal_edge():
     } == {("a", "b"), ("b", "c")}
     assert len(set(plan.component_by_object_id.values())) == 1
     assert plan.external_overlap_pairs == ()
+    suppressed = next(
+        decision
+        for decision in plan.pair_decisions
+        if {decision.first_id, decision.second_id} == {"a", "c"}
+    )
+    assert suppressed.reason == "internal_pair_suppressed"
 
 
 def test_disabled_feature_reproduces_existing_cross_class_overlap():

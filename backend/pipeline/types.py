@@ -120,14 +120,14 @@ class GroupedObject:
     amodal_mask: np.ndarray
     bbox: tuple[int, int, int, int]
     segmentation_index: int
-    semantic_classes: tuple[str, ...] = ()
-    merge_edges: tuple[MergeEdge, ...] = ()
     composed_source: Optional[Image.Image] = None
     composed_roi: Optional[SquareROI] = None
     matting_source: Optional[Image.Image] = None
     matting_roi: Optional[SquareROI] = None
     soft_alpha: Optional[np.ndarray] = None
     reconstruction_conflicts: tuple[tuple[str, str], ...] = ()
+    semantic_classes: tuple[str, ...] = ()
+    merge_edges: tuple[MergeEdge, ...] = ()
 
     @property
     def object_id(self) -> str:
