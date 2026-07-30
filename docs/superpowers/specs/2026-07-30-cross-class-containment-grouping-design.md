@@ -360,9 +360,14 @@ semantic_classes
 merge_edges
 ```
 
-The primary member is selected by largest modal-mask area, with segmentation order as the deterministic tie-breaker. Its class and display label remain the backward-compatible primary `semantic_class` and `display_label` exposed downstream.
+For a multi-class group, the primary member is selected by largest modal-mask
+area, with segmentation order as the deterministic tie-breaker. Its class and
+display label remain the backward-compatible primary `semantic_class` and
+`display_label` exposed downstream.
 
-Same-class groups retain their existing effective label because all members share the same class.
+Same-class groups preserve the existing primary-member behavior: the first
+member in stable segmentation order supplies `group_id`, `semantic_class`,
+`display_label`, and `segmentation_index`.
 
 ## 14. `process_masks` Contract
 
