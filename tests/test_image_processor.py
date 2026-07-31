@@ -273,6 +273,124 @@ def test_extract_raw_objects_keeps_nonoverlapping_same_keyword(
     ]
 
 
+def _processor_with_keyword_masks(mask_by_keyword):
+    processor = Mock()
+    state = {}
+    processor.set_image.return_value = state
+
+    def set_text_prompt(state, prompt):
+        mask = np.asarray(mask_by_keyword[prompt], dtype=np.float32)
+        state["masks"] = [torch.from_numpy(mask[None])]
+        state["scores"] = torch.tensor([0.9])
+        return state
+
+    processor.set_text_prompt.side_effect = set_text_prompt
+    return processor
+
+
+def _binary_rect(shape, x, y, width, height):
+    mask = np.zeros(shape, dtype=np.uint8)
+    mask[y : y + height, x : x + width] = 1
+    return mask
+
+
+def test_extract_raw_objects_prefers_earlier_target_for_duplicate_masks():
+    image = Image.new("RGB", (8, 6))
+    mask = _binary_rect((6, 8), 2, 1, 4, 4)
+    processor = _processor_with_keyword_masks(
+        {"man": mask, "person": mask.copy()}
+    )
+
+    objects = segmentation_stage.extract_raw_objects(
+        image, ["man", "person"], processor
+    )
+
+    assert len(objects) == 1
+    assert objects[0].semantic_class == "man"
+    assert objects[0].object_id == "object-0"
+
+
+def test_extract_raw_objects_suppresses_duplicate_at_ninety_percent():
+    shape = (6, 8)
+    image = Image.new("RGB", (shape[1], shape[0]))
+    first = _binary_rect(shape, 0, 0, 5, 2)  # 10 pixels.
+    second = first.copy()
+    second[1, 4] = 0  # 9/10 overlap, exactly 0.90.
+    processor = _processor_with_keyword_masks(
+        {"first": first, "second": second}
+    )
+
+    objects = segmentation_stage.extract_raw_objects(
+        image, ["first", "second"], processor
+    )
+
+    assert len(objects) == 1
+    assert objects[0].semantic_class == "first"
+
+
+def test_extract_raw_objects_keeps_nested_smaller_object():
+    shape = (8, 10)
+    image = Image.new("RGB", (shape[1], shape[0]))
+    large = _binary_rect(shape, 1, 1, 6, 6)
+    small = _binary_rect(shape, 3, 3, 2, 2)
+    processor = _processor_with_keyword_masks(
+        {"large": large, "small": small}
+    )
+
+    objects = segmentation_stage.extract_raw_objects(
+        image, ["large", "small"], processor
+    )
+
+    assert len(objects) == 2
+
+
+def test_extract_raw_objects_keeps_overlap_below_threshold():
+    shape = (6, 8)
+    image = Image.new("RGB", (shape[1], shape[0]))
+    first = _binary_rect(shape, 0, 0, 5, 2)  # 10 pixels.
+    second = first.copy()
+    second[1, 3:] = 0  # 7/10 overlap, below 0.90.
+    processor = _processor_with_keyword_masks(
+        {"first": first, "second": second}
+    )
+
+    objects = segmentation_stage.extract_raw_objects(
+        image, ["first", "second"], processor
+    )
+
+    assert len(objects) == 2
+
+
+def test_extract_raw_objects_suppression_is_not_transitive():
+    shape = (10, 20)
+    image = Image.new("RGB", (shape[1], shape[0]))
+    first = _binary_rect(shape, 0, 0, 10, 10)  # 100 pixels.
+    second = _binary_rect(shape, 0, 0, 10, 9)  # 90/100 with first.
+    third = _binary_rect(shape, 0, 0, 9, 9)  # 81/100 with first.
+    processor = _processor_with_keyword_masks(
+        {"a": first, "b": second, "c": third}
+    )
+
+    objects = segmentation_stage.extract_raw_objects(
+        image, ["a", "b", "c"], processor
+    )
+
+    assert [obj.semantic_class for obj in objects] == ["a", "c"]
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.1])
+def test_extract_raw_objects_rejects_invalid_duplicate_threshold(threshold):
+    processor = FakeSamProcessor()
+
+    with pytest.raises(ValueError, match="duplicate mask overlap"):
+        segmentation_stage.extract_raw_objects(
+            Image.new("RGB", (8, 6)),
+            [],
+            processor,
+            duplicate_mask_overlap_threshold=threshold,
+        )
+
+
 def test_link_overlap_partners_records_cross_class_relationship():
     person = _detected_object("person-1", "person", (0, 0, 10, 10))
     chair = _detected_object("chair-1", "chair", (5, 5, 10, 10))
@@ -1375,6 +1493,8 @@ def test_process_image_coordinates_all_pipeline_stages(monkeypatch, rgb_image):
         assert kwargs == {
             "context_ratio": 0.025,
             "support_dilation_pixels": 2,
+            "alpha_presence_threshold": 0.05,
+            "min_member_alpha_coverage_ratio": 0.95,
         }
         objects[0].soft_alpha = alpha
 

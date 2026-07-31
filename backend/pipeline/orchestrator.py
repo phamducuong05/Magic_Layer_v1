@@ -109,6 +109,7 @@ def _get_segmentation_config() -> dict[str, Any]:
     """Return defaults for segmentation diagnostics."""
     defaults: dict[str, Any] = {
         "diagnostics_directory": None,
+        "duplicate_mask_overlap_threshold": 0.90,
     }
     try:
         defaults.update(config.get_pipeline_config("segmentation"))
@@ -180,10 +181,15 @@ def _segment(
     keywords: Sequence[str],
     manager: Any,
     diagnostics_directory: str | None = None,
+    duplicate_mask_overlap_threshold: float = 0.90,
 ):
     processor = manager.get_segmentation_model().get_processor()
     return extract_raw_objects(
-        image, keywords, processor, diagnostics_directory=diagnostics_directory
+        image,
+        keywords,
+        processor,
+        diagnostics_directory=diagnostics_directory,
+        duplicate_mask_overlap_threshold=duplicate_mask_overlap_threshold,
     )
 
 
@@ -234,6 +240,11 @@ def process_masks(
                 keywords,
                 manager,
                 diagnostics_directory=segmentation_diagnostics_directory,
+                duplicate_mask_overlap_threshold=float(
+                    segmentation_config.get(
+                        "duplicate_mask_overlap_threshold", 0.90
+                    )
+                ),
             )
             log_event(
                 logger,
@@ -314,6 +325,11 @@ def process_image(
                 keywords,
                 manager,
                 diagnostics_directory=segmentation_diagnostics_directory,
+                duplicate_mask_overlap_threshold=float(
+                    segmentation_config.get(
+                        "duplicate_mask_overlap_threshold", 0.90
+                    )
+                ),
             )
             log_event(
                 logger,

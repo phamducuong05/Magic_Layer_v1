@@ -77,6 +77,7 @@ def test_segmentation_does_not_group_during_raw_extraction():
     source = inspect.getsource(segmentation.extract_raw_objects)
 
     assert "_merge_overlapping_masks" not in source
+    assert "duplicate_mask_overlap" in source
 
 
 def test_completion_candidates_and_model_are_explicit_and_ordered():

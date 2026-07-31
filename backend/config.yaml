@@ -19,6 +19,7 @@ vlm:
 pipeline:
   segmentation:
     diagnostics_directory: outputs/object_masks
+    duplicate_mask_overlap_threshold: 0.90
   cross_class_grouping:
     enabled: true
     containment_threshold: 0.70
