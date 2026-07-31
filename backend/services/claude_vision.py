@@ -51,6 +51,11 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
    This strict ban includes: temples, pagodas, churches, cathedrals, shrines,
    monuments, towers, castles, houses, huts, pavilions, palaces, skyscrapers,
    bridges, gates, walls, venues, rooms, parks, and all architectural places.
+7. Held and carried items rule:
+   If a person, character, animal, or subject is holding, carrying, or wielding an item
+   (e.g., a staff, stick, weapon, tool, umbrella, cup, phone, bag):
+   - Include the held item inside the subject's keyword description (e.g., "monkey warrior with staff", "person holding umbrella", "man with sword").
+   - NEVER return the held item as a separate standalone keyword (e.g., do NOT return "staff", "stick", or "sword" separately when it is held by a subject).
 
 Object hierarchy and grouping rules:
 - Architecture, buildings, and places: ABSOLUTELY FORBIDDEN. Never extract any building or structure.
@@ -60,9 +65,8 @@ Object hierarchy and grouping rules:
   many contents.
 - Electronics, cameras, tools, and furniture: return the complete object
   assembly including its legs, stand, tripod, base, or direct mount as a single unit.
-- People and animals: return the whole subject, not body parts, clothes,
-  footwear, collars, leashes, bags, glasses, jewelry, or other accessories.
-  Exception for hats: specify hats when worn (e.g., "man with hat", "woman with hat").
+- People, characters, and animals: return the whole subject together with any items they are wearing or holding.
+  Never extract held items (like "staff", "stick", or "sword") as separate standalone keywords.
 - Plants and food: return the whole plant, tree, pot, dish, or meal, not
   leaves, branches, fruit, ingredients, toppings, or pieces.
 
