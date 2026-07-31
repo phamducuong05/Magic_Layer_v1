@@ -41,15 +41,19 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
    them as part of their person, animal, or parent object.
    Special rule for hats/headwear: If a person is wearing a hat, return the
    person keyword with the hat explicitly specified (e.g., "man with hat",
-   "woman with hat", "person with hat", "boy with hat", "girl with hat"). If a hat
-   is an independent standalone foreground object (not worn by a person or an object), return "hat".
-6. Never return buildings, landmarks, venues, or places. Treat all
-   architecture and locations as background, even when they are large,
-   visually prominent, close to the camera, supplied as a user target, or
-   appear to occlude another object. This includes temples, pagodas, churches,
-   monuments, towers, and houses.
+   "woman with hat", "person with hat", "boy with hat", "girl with hat").
+6. ABSOLUTE PROHIBITION ON BUILDINGS, LANDMARKS, AND PLACES:
+   NEVER, under any circumstances, return any building, architectural structure,
+   venue, landmark, location, or place as a keyword or occluder.
+   Treat ALL architecture, structures, and locations strictly as background environment,
+   even when they are exceptionally large, visually dominant, close to the camera,
+   user-requested, or physically behind/in front of another object.
+   This strict ban includes: temples, pagodas, churches, cathedrals, shrines,
+   monuments, towers, castles, houses, huts, pavilions, palaces, skyscrapers,
+   bridges, gates, walls, venues, rooms, parks, and all architectural places.
 
 Object hierarchy and grouping rules:
+- Architecture, buildings, and places: ABSOLUTELY FORBIDDEN. Never extract any building or structure.
 - Vehicles: return the whole vehicle, including wheels, mirrors, and mounts.
 - Containers and collections: return the bag, basket, cart, suitcase, box,
   shelf, tray, pile, rack, or display when important; do not enumerate its

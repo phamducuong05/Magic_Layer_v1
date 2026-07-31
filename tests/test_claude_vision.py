@@ -212,11 +212,11 @@ def test_both_modes_send_the_same_common_strict_rules():
         assert "regardless of how tiny" in normalized_prompt
         assert "one to three visible people" in normalized_prompt
         assert (
-            "Never return buildings, landmarks, venues, or places"
+            "ABSOLUTE PROHIBITION ON BUILDINGS, LANDMARKS, AND PLACES"
             in normalized_prompt
         )
         assert (
-            "temples, pagodas, churches, monuments, towers, and houses"
+            "temples, pagodas, churches, cathedrals, shrines"
             in normalized_prompt
         )
 

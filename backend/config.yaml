@@ -54,8 +54,8 @@ pipeline:
     # BiRefNet reconstruction-support refinement. The low threshold creates
     # candidate foreground; accepted components must also contain strong alpha,
     # changed HD-Painter RGB, and connect to the visible target.
-    support_alpha_low_threshold: 0.45
-    support_alpha_high_threshold: 0.7
+    support_alpha_low_threshold: 0.5
+    support_alpha_high_threshold: 0.8
     support_change_threshold: 8.0
     support_connection_margin_pixels: 4
     support_max_extension_area_ratio: 2.0
@@ -144,8 +144,8 @@ models:
       generator_weights_path: "backend/models/background_inpainting/original_lama/checkpoints/generator_state.pt"
       legacy_checkpoint_path: "backend/models/background_inpainting/original_lama/checkpoints/best.ckpt"
       pad_out_to_modulo: 8
-      generation_mask_expansion: 11
-      composition_mask_expansion: 7
+      generation_mask_expansion: 21
+      composition_mask_expansion: 15
       feather_radius: 2.0
     smarteraser:
       checkpoint_dir: "SmartEraser/Model_framework/ckpts/smarteraser-weights"
