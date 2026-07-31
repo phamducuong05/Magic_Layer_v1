@@ -32,7 +32,8 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
 2. Concise natural vocabulary. Use clear, concise standard English object names
    (1-3 words). Avoid unnecessary adjectives, colors, materials, or verbose
    descriptions unless required to distinguish object types.
-3. Foreground only. Ignore distant and background objects completely.
+3. Prominent foreground only. Ignore distant objects, background elements, and
+   anything positioned far behind the primary subjects.
 4. Exclude tiny incidental objects, decorations, textures, shadows,
    reflections, printed images, and uncertain objects.
    Exception: never exclude a genuine occluder regardless of how tiny or
@@ -56,6 +57,10 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
    (e.g., a staff, stick, weapon, tool, umbrella, cup, phone, bag):
    - Include the held item inside the subject's keyword description (e.g., "monkey warrior with staff", "person holding umbrella", "man with sword").
    - NEVER return the held item as a separate standalone keyword (e.g., do NOT return "staff", "stick", or "sword" separately when it is held by a subject).
+8. Exclude heavily occluded, background, and bottom-buried objects:
+   NEVER extract objects that are heavily blocked or covered by multiple elements,
+   positioned far in the background behind other objects, or buried deep at the
+   very bottom underneath layers. Return only clear, visually prominent, accessible foreground objects.
 
 Object hierarchy and grouping rules:
 - Architecture, buildings, and places: ABSOLUTELY FORBIDDEN. Never extract any building or structure.
