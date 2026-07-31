@@ -204,7 +204,12 @@ Use labels such as:
 - "monkey with staff".
 
 Do not also return the umbrella, sword, bag, staff, tool, phone, cup, weapon,
-or other held item as a separate keyword.
+or other held item as a separate keyword, unless that held item is itself
+physically occluding a selected target or object. In that case, keep the
+parent subject keyword and also return the small held item as a separate
+occluder keyword. This exception applies to items such as a phone, cup, tool,
+or other small handheld accessory only when it visibly covers part of the
+target.
 
 A standalone item that is not worn or held may be returned independently only
 when it qualifies as a clear and important primary foreground object.
