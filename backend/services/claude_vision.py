@@ -58,7 +58,7 @@ COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
    - Include the held item inside the subject's keyword description (e.g., "monkey warrior with staff", "person holding umbrella", "man with sword").
    - NEVER return the held item as a separate standalone keyword (e.g., do NOT return "staff", "stick", or "sword" separately when it is held by a subject).
 8. Exclude heavily occluded, background, and bottom-buried objects:
-   NEVER extract objects that are heavily blocked or covered by multiple elements,
+   NEVER extract objects that are heavily blocked or covered by multiple elements, and never extract the object which is occluded by more than many other objects
    positioned far in the background behind other objects, or buried deep at the
    very bottom underneath layers. Return only clear, visually prominent, accessible foreground objects.
 
