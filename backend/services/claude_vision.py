@@ -22,309 +22,115 @@ from .keyword_extractor import (
 
 logger = get_logger(__name__)
 
-COMMON_STRICT_RULES = """Common strict rules for every returned keyword:
-1. Whole objects with structural supports. Return the complete parent object
-   together with all its structural supports, stands, tripods, mounts, or
-   essential attached parts. For example, a camera must include its tripod or
-   stand, a lamp includes its pole and base, and a monitor includes its stand.
-   Never return isolated sub-components or body parts separately unless they
-   are independent foreground objects.
-2. Concise natural vocabulary. Use clear, concise standard English object names
-   (1-3 words). Avoid unnecessary adjectives, colors, materials, or verbose
-   descriptions unless required to distinguish object types.
-3. Prominent foreground only. Ignore distant objects, background elements, and
-   anything positioned far behind the primary subjects.
-4. Exclude tiny incidental objects, decorations, textures, shadows,
-   reflections, printed images, and uncertain objects.
-   Exception: never exclude a genuine occluder regardless of how tiny or
-   incidental it is.
-5. Exclude clothing, footwear, wearable items, and general accessories. Treat
-   them as part of their person, animal, or parent object.
-   Special rule for hats/headwear: If a person is wearing a hat, return the
-   person keyword with the hat explicitly specified (e.g., "man with hat",
-   "woman with hat", "person with hat", "boy with hat", "girl with hat").
-6. ABSOLUTE PROHIBITION ON BUILDINGS, LANDMARKS, AND PLACES:
-   NEVER, under any circumstances, return any building, architectural structure,
-   venue, landmark, location, or place as a keyword or occluder.
-   Treat ALL architecture, structures, and locations strictly as background environment,
-   even when they are exceptionally large, visually dominant, close to the camera,
-   user-requested, or physically behind/in front of another object.
-   This strict ban includes: temples, pagodas, churches, cathedrals, shrines,
-   monuments, towers, castles, houses, huts, pavilions, palaces, skyscrapers,
-   bridges, gates, walls, venues, rooms, parks, and all architectural places.
-7. Held and carried items rule:
-   If a person, character, animal, or subject is holding, carrying, or wielding an item
-   (e.g., a staff, stick, weapon, tool, umbrella, cup, phone, bag):
-   - Include the held item inside the subject's keyword description (e.g., "monkey warrior with staff", "person holding umbrella", "man with sword").
-   - NEVER return the held item as a separate standalone keyword (e.g., do NOT return "staff", "stick", or "sword" separately when it is held by a subject).
-8. Exclude heavily occluded, background, and bottom-buried objects:
-   NEVER extract objects that are heavily blocked or covered by multiple elements, and never extract the object which is occluded by more than many other objects
-   positioned far in the background behind other objects, or buried deep at the
-   very bottom underneath layers. Return only clear, visually prominent, accessible foreground objects.
+COMMON_STRICT_RULES = """Strict rules for every returned keyword:
 
-Object hierarchy and grouping rules:
-- Architecture, buildings, and places: ABSOLUTELY FORBIDDEN. Never extract any building or structure.
-- Vehicles: return the whole vehicle, including wheels, mirrors, and mounts.
-- Containers and collections: return the bag, basket, cart, suitcase, box,
-  shelf, tray, pile, rack, or display when important; do not enumerate its
-  many contents.
-- Electronics, cameras, tools, and furniture: return the complete object
-  assembly including its legs, stand, tripod, base, or direct mount as a single unit.
-- People, characters, and animals: return the whole subject together with any items they are wearing or holding.
-  Never extract held items (like "staff", "stick", or "sword") as separate standalone keywords.
-- Plants and food: return the whole plant, tree, pot, dish, or meal, not
-  leaves, branches, fruit, ingredients, toppings, or pieces.
+1. Never return architecture or places.
+   Treat buildings, architectural structures, landmarks, venues, and locations
+   as background, even when they are large, prominent, close to the camera,
+   user-requested, or appear to occlude another object.
+   This includes temples, pagodas, churches, shrines, monuments, towers,
+   castles, houses, palaces, bridges, gates, walls, rooms, and parks.
 
-People labels for automatic targets and detected occluders:
-- Count all visible people in the image.
-- With one to three visible people, never use "people". Use "man", "woman",
-  "boy", or "girl" only with clear visual evidence; otherwise use "person".
-- Only when more than three people are visible may "people" be used.
+2. Count and label people consistently.
+   Count all real visible people or characters in the depicted scene. Do not
+   count people appearing only in posters, screens, photographs, paintings,
+   mirrors, or reflections.
+   - With one to three visible people, never use "people". Use "man", "woman",
+     "boy", or "girl" only with clear evidence; otherwise use "person".
+   - In automatic extraction, when more than three people are visible, MUST use
+     only "people" as the human parent keyword. Do not also return "man",
+     "woman", "boy", "girl", "person", or individual human variants.
+   - In manual-target mode, preserve every user-supplied target label.
+
+3. Return complete objects and structural assemblies.
+   Return the whole parent object with its visible legs, supports, stands,
+   tripods, mounts, poles, bases, wheels, mirrors, and essential attached parts.
+   Use one assembly keyword when the support is visible, such as
+   "camera with tripod", "camera with stand", "lamp with stand", or
+   "monitor with stand". Do not return the parent and support separately.
+   Never return isolated body parts or structural sub-components.
+
+4. Use one canonical keyword per physical object.
+   Use concise, natural English object names, normally 1-3 words. Avoid
+   unnecessary colors, materials, adjectives, and descriptions.
+   Do not return multiple variants for the same instance, such as "man",
+   "man with phone", and "man with glasses". Use a modifier only when needed
+   to distinguish an instance, and then do not also return its base label.
+
+5. Handle worn accessories and hats.
+   Clothing, footwear, glasses, jewelry, and worn accessories belong to their
+   parent and must not be returned separately.
+   A worn hat is a special parent-label modifier. Return one keyword such as
+   "man with hat", "woman with hat", "person with hat", or
+   "character with hat". Never return the worn hat separately or also return
+   the unmodified parent label.
+   In automatic extraction with more than three people, the mandatory "people"
+   rule takes priority; return "people" and never return hats separately.
+   A standalone unworn hat may be returned as "hat" when it is a clear
+   foreground object.
+
+6. Return small handheld objects separately.
+   A clearly recognizable small handheld object, such as a phone, cup, small
+   camera, book, notebook, microphone, remote control, or small tool, must
+   receive its own keyword. Never include it in the holder keyword: return
+   "man" and "phone", not "man with phone".
+   This rule overrides tiny-object exclusion. If the small handheld object
+   hides any part of its holder or another selected object, it is a required
+   occluder and must be preserved. Large held objects use the normal
+   foreground-object rules.
+
+7. Select foreground objects and genuine occluders.
+   Return clear foreground and meaningful subject-plane objects, including
+   independently separable medium-sized, secondary, and partially frame-cropped
+   objects. Ignore distant or deep-background objects, scenery, decorations,
+   textures, shadows, reflections, printed images, and uncertain regions.
+   Exclude tiny incidental objects unless they are clear small handheld objects
+   or genuine occluders.
+   An occluder must be closer to the camera and physically hide part of a
+   selected object. Bounding-box overlap, silhouette overlap, touching, or
+   proximity alone is not enough. For layered occlusion, include each visible
+   foreground object that genuinely participates in hiding the target.
+
+8. Apply object hierarchy.
+   - Vehicles: return the whole vehicle.
+   - Containers and collections: prefer the meaningful bag, basket, cart,
+     suitcase, box, shelf, tray, rack, pile, or display instead of enumerating
+     many tiny contents. Clear independently separable products may still be
+     returned.
+   - Electronics, cameras, tools, and furniture: return the complete assembly.
+   - People and animals: return the whole subject, not body parts or clothing.
+   - Plants and food: return the whole plant, tree, pot, dish, or meal, not
+     leaves, branches, ingredients, toppings, or pieces.
+
+9. Reconsider every matching instance.
+   Inspect all visible instances that SAM3 may match. If the same label occurs
+   at different depths, first use a concise, reliable refinement for the
+   intended foreground instance.
+   Omit the keyword only when an unwanted matching instance is truly in the
+   deep background, truly large, heavily hidden by several objects or layers,
+   and cannot be separated by a reliable refined keyword.
+
+10. Perform a final image audit.
+    Scan the entire image, including corners and frame boundaries, for clear
+    objects missed in the first pass. Preserve clear small handheld objects,
+    secondary foreground objects, genuine occluders, and complete structural
+    assemblies.
 """
 
-FOREGROUND_OBJECT_PROMPT = """
-Analyze the image and return concise English object labels for SAM3
-segmentation. Each returned object may become a separate editable foreground
-layer.
+FOREGROUND_OBJECT_PROMPT = """Analyze this image and return English keywords for
+SAM3 object segmentation.
 
-This is NOT an image-captioning or scene-inventory task. Select clearly
-recognizable foreground and meaningful subject-plane objects that can be useful
-as independent editable layers. Balance precision and recall: do not include
-uncertain or deep-background objects, but do not omit a clear medium-sized or
-secondary foreground object merely because it is not compositionally dominant.
-
-Follow these rules:
-
-1. Count and label visible people
-
-Count all real visible people or characters participating in the depicted
-scene.
-
-Do not count people appearing only inside posters, photographs, paintings,
-screens, mirrors, or reflections within the scene.
-
-Apply these naming rules while selecting person keywords:
-- With one to three visible people, never use "people".
-- Use "man", "woman", "boy", or "girl" only when clearly supported visually.
-- Otherwise use "person".
-- Use "people" only when more than three people are visible.
-- Do not combine one to three distinct people into the general label "people".
-- A visible person must still pass all foreground, occlusion, and global
-  instance checks before being returned as a keyword.
-
-2. Select primary editable objects
-
-A primary object should:
-- be clearly identifiable from its visible pixels;
-- be clearly visible and independently separable, even when medium-sized or
-  secondary in the composition;
-- have enough visible evidence to form a useful independent layer;
-- belong to the foreground or a meaningful subject plane rather than the
-  distant or deep background;
-- have enough reliable visual evidence for a specific SAM3 label.
-
-Object size alone is not sufficient. A clear foreground object does not need
-to be large or compositionally dominant. Large environmental regions such as
-the sky, ground, road, water, mountains, walls, or distant vegetation remain
-background.
-
-An object located behind another object may still qualify as a primary object
-when it remains clear, important, and sufficiently visible. Being behind
-another object does not automatically make it background.
-
-Exclude an occluded object only when it is reduced to a small ambiguous
-fragment, its identity is uncertain, or it belongs to a deeply buried
-background layer. A clear and important subject may still be selected when
-partially occluded.
-
-3. Add genuine occluders
-
-For every selected primary object, include independent visible objects that
-genuinely occlude it.
-
-An object is an occluder only when:
-- it is closer to the camera than the target; and
-- it physically hides part of the target in the current image.
-
-Bounding-box overlap, silhouette overlap, touching boundaries, or proximity
-alone are NOT sufficient evidence of occlusion.
-
-An object behind the target is never an occluder of that target, even when
-their image regions overlap.
-
-Examples:
-- A distant tree behind a person is not an occluder of the person.
-- A person standing in front of and hiding part of a car is an occluder of
-  the car.
-- A chair behind a person may still be a primary object, but it is not an
-  occluder of the person.
-
-Include a genuine occluder even when it is small or would otherwise be an
-incidental object.
-
-For layered occlusion such as C in front of A and A in front of B:
-- include A when A hides part of B;
-- include C when C hides A and also participates in the visible occlusion
-  stack over B;
-- never infer this relation from image overlap alone.
-
-4. Return complete semantic objects
-
-Return the complete parent object rather than isolated structural parts.
-
-Include essential supports, stands, tripods, mounts, poles, bases, wheels,
-mirrors, and directly attached structural components with their parent object.
-
-Examples:
-- Return "camera" for a camera together with its tripod or direct mount.
-- Return "lamp" for a lamp together with its pole and base.
-- Return "monitor" for a monitor together with its stand.
-- Return a complete vehicle including its wheels, mirrors, and attached mounts.
-
-Never return isolated hands, arms, legs, faces, wheels, poles, bases, or other
-structural sub-components as separate keywords.
-
-5. Handle people, characters, animals, and accessories
-
-Return the complete person, character, or animal.
-
-Treat clothing, footwear, glasses, jewelry, headwear, and worn accessories as
-part of their parent subject.
-
-When a person is wearing a hat, use a concise phrase such as:
-- "man with hat";
-- "woman with hat";
-- "boy with hat";
-- "girl with hat";
-- "person with hat".
-
-When a subject is holding, carrying, or wielding an item, include the item in
-the subject label rather than returning it separately.
-
-Use labels such as:
-- "person holding umbrella";
-- "man with sword";
-- "woman with bag";
-- "monkey with staff".
-
-Do not also return the umbrella, sword, bag, staff, tool, phone, cup, weapon,
-or other held item as a separate keyword, unless that held item is itself
-physically occluding a selected target or object. In that case, keep the
-parent subject keyword and also return the small held item as a separate
-occluder keyword. This exception applies to items such as a phone, cup, tool,
-or other small handheld accessory only when it visibly covers part of the
-target.
-
-A standalone item that is not worn or held may be returned independently only
-when it qualifies as a clear and important primary foreground object.
-
-6. Handle collections and contained objects
-
-For a bag, basket, cart, suitcase, box, shelf, tray, rack, pile, or display,
-prefer the meaningful parent collection instead of enumerating many tiny or
-uncertain contents.
-
-Return an individual contained object when it is clearly recognizable,
-independently separable, and has meaningful visible area, even if it is a
-secondary product or object on a table, shelf, tray, or display. Always include
-it when it genuinely occludes a selected object.
-
-Return a whole plant, tree, pot, dish, or meal rather than separate leaves,
-branches, fruit, ingredients, toppings, or pieces.
-
-7. Apply strict exclusions
-
-Never return:
-- distant or deep-background objects;
-- scenery or environmental regions;
-- tiny incidental or uncertain objects unless they are clearly recognizable
-  foreground objects or genuinely occlude a selected object;
-- decorations, textures, patterns, shadows, highlights, or lighting effects;
-- reflections or objects visible only through a reflection;
-- objects appearing only inside posters, photographs, paintings, or screens;
-- uncertain object-like regions;
-- isolated body parts, clothing, wearables, or structural components.
-
-Never return buildings, architectural structures, landmarks, venues,
-locations, or places, even when they are large, visually dominant, close to
-the camera, or appear to overlap another object.
-
-This prohibition includes temples, pagodas, churches, cathedrals, shrines,
-monuments, towers, castles, houses, huts, pavilions, palaces, skyscrapers,
-bridges, gates, walls, rooms, venues, parks, and similar architectural places.
-
-8. Use concise SAM3-friendly labels
-
-Use clear, natural, standard English object names.
-
-Normally use 1-3 words. A slightly longer phrase is allowed only when required
-to keep a worn or held item attached to its parent subject.
-
-Avoid colors, materials, decorative adjectives, and unnecessary modifiers by
-default.
-
-A concise modifier may be used only when:
-- it is clearly visible and reliable;
-- it preserves the exact object type;
-- it is necessary to distinguish the intended foreground instance from other
-  matching instances;
-- it is likely to help SAM3 isolate the intended object.
-
-Never invent or guess a modifier merely to preserve a candidate keyword.
-
-Use the most specific label clearly supported by the image. Do not generalize
-a specific object into a broader category.
-
-9. Reconsider all matching instances
-
-Before returning a keyword, inspect the entire image and reconsider every
-visible instance that SAM3 may match, not only the clearest foreground one.
-
-If the same label appears at different depth layers, first try a concise,
-visually reliable refinement that focuses on the intended foreground instance.
-Preserve the object type and never invent attributes. Do not use unreliable
-spatial phrases such as "foreground car", "front person", or "nearest chair".
-After refinement, check all matching instances again.
-
-Omit the keyword only when an unwanted matching instance satisfies ALL of
-these conditions:
-- it is truly in the deep background;
-- it is truly large or comparable in scale to the intended foreground
-  instance;
-- it is heavily occluded by several independent objects or occlusion layers;
-- no reliable refined keyword can isolate the intended foreground instance.
-
-Do not omit a keyword because of small distant instances, a large but clearly
-visible background instance, or an instance covered by only one ordinary
-occluder.
-
-If the candidate object itself is uncertain, omit it according to the earlier
-selection rules. If only the strict background-instance veto conditions are
-uncertain, do not veto an otherwise valid foreground keyword.
-
-10. Rank and limit the output
-
+Goal:
+- Return clear, independently separable foreground objects that are useful as
+  editable layers.
+- Include genuine foreground occluders regardless of their size.
+- This is not scene captioning: never inventory background scenery or places.
+""" + COMMON_STRICT_RULES + """
 Return at most 10 unique keywords.
-
-Order the output as follows:
-1. Primary objects, ordered by visual importance.
-2. Required occluders, ordered by how strongly they cover a retained primary
-   object.
-
-If one object is both a primary object and an occluder, return it only once at
-its primary-object position.
-
-When the keyword limit is reached:
-- remove uncertain, duplicate, and background-like objects first;
-- preserve clear secondary foreground objects and genuine occluders of retained
-  primary objects whenever possible;
-- never fill unused positions with background or uncertain objects.
-
-Use the available keyword capacity for all clear, independently separable
-foreground objects that pass the rules above. Do not invent objects merely to
-fill the quota.
-
-Return JSON only and follow the provided output schema exactly.
+Use available capacity for clear foreground objects; do not invent uncertain
+objects to fill the quota.
+Order primary objects by visual importance, followed by required occluders.
+Return JSON only.
 """
 
 OCCLUDER_PROMPT = """Analyze this image for SAM3 object segmentation using the
