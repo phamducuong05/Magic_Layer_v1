@@ -87,9 +87,11 @@ Analyze the image and return concise English object labels for SAM3
 segmentation. Each returned object may become a separate editable foreground
 layer.
 
-This is NOT an image-captioning or scene-inventory task. Select only objects
-that are useful as independent editable layers. Prefer precision over recall:
-return fewer keywords rather than include uncertain or background objects.
+This is NOT an image-captioning or scene-inventory task. Select clearly
+recognizable foreground and meaningful subject-plane objects that can be useful
+as independent editable layers. Balance precision and recall: do not include
+uncertain or deep-background objects, but do not omit a clear medium-sized or
+secondary foreground object merely because it is not compositionally dominant.
 
 Follow these rules:
 
@@ -114,14 +116,16 @@ Apply these naming rules while selecting person keywords:
 
 A primary object should:
 - be clearly identifiable from its visible pixels;
-- be visually important to the composition;
-- be sufficiently visible to form a useful independent layer;
+- be clearly visible and independently separable, even when medium-sized or
+  secondary in the composition;
+- have enough visible evidence to form a useful independent layer;
 - belong to the foreground or a meaningful subject plane rather than the
   distant or deep background;
 - have enough reliable visual evidence for a specific SAM3 label.
 
-Object size alone is not sufficient. Large environmental regions such as the
-sky, ground, road, water, mountains, walls, or distant vegetation remain
+Object size alone is not sufficient. A clear foreground object does not need
+to be large or compositionally dominant. Large environmental regions such as
+the sky, ground, road, water, mountains, walls, or distant vegetation remain
 background.
 
 An object located behind another object may still qualify as a primary object
@@ -217,11 +221,13 @@ when it qualifies as a clear and important primary foreground object.
 6. Handle collections and contained objects
 
 For a bag, basket, cart, suitcase, box, shelf, tray, rack, pile, or display,
-prefer the meaningful parent collection instead of enumerating many small
-contents.
+prefer the meaningful parent collection instead of enumerating many tiny or
+uncertain contents.
 
-Return an individual contained object only when it is visually important,
-clearly independent, and useful as a separate editable layer.
+Return an individual contained object when it is clearly recognizable,
+independently separable, and has meaningful visible area, even if it is a
+secondary product or object on a table, shelf, tray, or display. Always include
+it when it genuinely occludes a selected object.
 
 Return a whole plant, tree, pot, dish, or meal rather than separate leaves,
 branches, fruit, ingredients, toppings, or pieces.
@@ -231,7 +237,8 @@ branches, fruit, ingredients, toppings, or pieces.
 Never return:
 - distant or deep-background objects;
 - scenery or environmental regions;
-- tiny incidental objects unless they genuinely occlude a selected object;
+- tiny incidental or uncertain objects unless they are clearly recognizable
+  foreground objects or genuinely occlude a selected object;
 - decorations, textures, patterns, shadows, highlights, or lighting effects;
 - reflections or objects visible only through a reflection;
 - objects appearing only inside posters, photographs, paintings, or screens;
@@ -308,12 +315,14 @@ If one object is both a primary object and an occluder, return it only once at
 its primary-object position.
 
 When the keyword limit is reached:
-- remove uncertain and low-importance secondary objects first;
-- preserve genuine occluders of retained primary objects;
+- remove uncertain, duplicate, and background-like objects first;
+- preserve clear secondary foreground objects and genuine occluders of retained
+  primary objects whenever possible;
 - never fill unused positions with background or uncertain objects.
 
-Do not attempt to fill the quota. Returning fewer accurate keywords is better
-than returning additional uncertain keywords.
+Use the available keyword capacity for all clear, independently separable
+foreground objects that pass the rules above. Do not invent objects merely to
+fill the quota.
 
 Return JSON only and follow the provided output schema exactly.
 """
