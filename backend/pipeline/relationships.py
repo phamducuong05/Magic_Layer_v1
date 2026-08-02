@@ -85,6 +85,7 @@ def _validate_inputs(
     large_mask_ratio: float,
     large_bbox_ratio: float,
     dimension_tolerance_ratio: float,
+    mutual_containment_threshold: float | None = None,
 ) -> None:
     _validate_ratio(
         "containment_threshold",
@@ -98,6 +99,12 @@ def _validate_inputs(
     )
     _validate_ratio("large_mask_ratio", large_mask_ratio, allow_zero=True)
     _validate_ratio("large_bbox_ratio", large_bbox_ratio, allow_zero=True)
+    if mutual_containment_threshold is not None:
+        _validate_ratio(
+            "mutual_containment_threshold",
+            mutual_containment_threshold,
+            allow_zero=True,
+        )
     if not 0.0 <= dimension_tolerance_ratio < 1.0:
         raise ValueError(
             "dimension_tolerance_ratio must satisfy 0.0 <= value < 1.0"
@@ -156,6 +163,8 @@ def plan_object_relationships(
     large_mask_ratio: float,
     large_bbox_ratio: float,
     dimension_tolerance_ratio: float,
+    mutual_containment_threshold: float | None = None,
+    enable_bidirectional_merge: bool = True,
 ) -> RelationshipPlan:
     """Plan merge intent and external overlaps from immutable raw geometry."""
     _validate_inputs(
@@ -166,6 +175,7 @@ def plan_object_relationships(
         large_mask_ratio=large_mask_ratio,
         large_bbox_ratio=large_bbox_ratio,
         dimension_tolerance_ratio=dimension_tolerance_ratio,
+        mutual_containment_threshold=mutual_containment_threshold,
     )
     object_metrics = _build_object_metrics(
         objects,
@@ -232,10 +242,6 @@ def plan_object_relationships(
             failure_reason = "cross_class_grouping_disabled"
         elif containment is None:
             failure_reason = "invalid_bbox"
-        elif containment.containment_ratio < containment_threshold:
-            failure_reason = "containment_ratio_below_threshold"
-        elif containment.bbox_size_ratio > max_bbox_size_ratio:
-            failure_reason = "bbox_size_ratio_not_dominant"
         elif (
             object_metrics[first.object_id].large_mask_veto
             or object_metrics[second.object_id].large_mask_veto
@@ -248,21 +254,76 @@ def plan_object_relationships(
         ):
             failure_reason = "large_bbox_ratio_veto"
         else:
-            boxes = (first_bbox, second_bbox)
-            small_bbox = boxes[containment.smaller_index]
-            large_bbox = boxes[containment.larger_index]
-            _, _, small_width, small_height = small_bbox
-            _, _, large_width, large_height = large_bbox
-            minimum_scale = 1.0 - dimension_tolerance_ratio
-            dimensions_dominant = (
-                large_width >= small_width * minimum_scale
-                and large_height >= small_height * minimum_scale
+            # Check Strategy 1: Bidirectional Occlusion (Pixel-level)
+            first_hole = (
+                first.completion_hole_mask > 0
+                if first.completion_hole_mask is not None
+                else (first.amodal_mask > 0) & ~(first.modal_mask > 0)
+                if first.amodal_mask is not None
+                else None
             )
-            if not dimensions_dominant:
-                failure_reason = "bbox_dimensions_not_dominant"
-            else:
-                merge_reason = "cross_class_bbox_containment"
+            second_hole = (
+                second.completion_hole_mask > 0
+                if second.completion_hole_mask is not None
+                else (second.amodal_mask > 0) & ~(second.modal_mask > 0)
+                if second.amodal_mask is not None
+                else None
+            )
+            is_bidirectional = False
+            if (
+                enable_bidirectional_merge
+                and first_hole is not None
+                and second_hole is not None
+            ):
+                first_on_second = np.count_nonzero(
+                    first_hole & (second.modal_mask > 0)
+                )
+                second_on_first = np.count_nonzero(
+                    second_hole & (first.modal_mask > 0)
+                )
+                is_bidirectional = first_on_second > 0 and second_on_first > 0
+
+            # Check Strategy 2: Mutual BBox Containment (BBox-level)
+            first_area = bbox_area(first_bbox)
+            second_area = bbox_area(second_bbox)
+            containment_first_in_second = (
+                intersection_area / first_area if first_area > 0 else 0.0
+            )
+            containment_second_in_first = (
+                intersection_area / second_area if second_area > 0 else 0.0
+            )
+            is_mutual_containment = (
+                mutual_containment_threshold is not None
+                and containment_first_in_second >= mutual_containment_threshold
+                and containment_second_in_first >= mutual_containment_threshold
+            )
+
+            if is_bidirectional:
+                merge_reason = "cross_class_bidirectional_intertwined"
                 failure_reason = ""
+            elif is_mutual_containment:
+                merge_reason = "cross_class_mutual_bbox_containment"
+                failure_reason = ""
+            elif containment.containment_ratio < containment_threshold:
+                failure_reason = "containment_ratio_below_threshold"
+            elif containment.bbox_size_ratio > max_bbox_size_ratio:
+                failure_reason = "bbox_size_ratio_not_dominant"
+            else:
+                boxes = (first_bbox, second_bbox)
+                small_bbox = boxes[containment.smaller_index]
+                large_bbox = boxes[containment.larger_index]
+                _, _, small_width, small_height = small_bbox
+                _, _, large_width, large_height = large_bbox
+                minimum_scale = 1.0 - dimension_tolerance_ratio
+                dimensions_dominant = (
+                    large_width >= small_width * minimum_scale
+                    and large_height >= small_height * minimum_scale
+                )
+                if not dimensions_dominant:
+                    failure_reason = "bbox_dimensions_not_dominant"
+                else:
+                    merge_reason = "cross_class_bbox_containment"
+                    failure_reason = ""
 
         if merge_reason is not None:
             merge_edges.append(

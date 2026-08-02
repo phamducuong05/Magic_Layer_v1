@@ -243,3 +243,43 @@ def test_relationship_plan_validates_threshold_ranges():
             image_size=(100, 100),
             **{**SETTINGS, "containment_threshold": 1.1},
         )
+
+
+def test_cross_class_bidirectional_intertwined_merge():
+    man = _object("man", "man", (10, 10, 50, 80))
+    woman = _object("woman", "woman", (20, 10, 50, 80))
+    man.amodal_mask = man.modal_mask.copy()
+    woman.amodal_mask = woman.modal_mask.copy()
+    man.completion_hole_mask = np.zeros((100, 100), dtype=bool)
+    man.completion_hole_mask[20:30, 25:35] = True
+    woman.completion_hole_mask = np.zeros((100, 100), dtype=bool)
+    woman.completion_hole_mask[40:50, 20:30] = True
+
+    plan = plan_object_relationships(
+        [man, woman],
+        image_size=(100, 100),
+        **SETTINGS,
+    )
+
+    assert len(plan.merge_edges) == 1
+    assert plan.merge_edges[0].reason == "cross_class_bidirectional_intertwined"
+    assert plan.pair_decisions[0].relation is (
+        PairRelation.CROSS_CLASS_CONTAINMENT_MERGE
+    )
+
+
+def test_cross_class_mutual_bbox_containment_merge():
+    man = _object("man", "man", (10, 10, 50, 80))
+    woman = _object("woman", "woman", (20, 10, 50, 80))
+
+    plan = plan_object_relationships(
+        [man, woman],
+        image_size=(100, 100),
+        **{**SETTINGS, "mutual_containment_threshold": 0.40},
+    )
+
+    assert len(plan.merge_edges) == 1
+    assert plan.merge_edges[0].reason == "cross_class_mutual_bbox_containment"
+    assert plan.pair_decisions[0].relation is (
+        PairRelation.CROSS_CLASS_CONTAINMENT_MERGE
+    )

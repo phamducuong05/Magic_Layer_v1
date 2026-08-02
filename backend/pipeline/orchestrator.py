@@ -127,6 +127,8 @@ def _get_cross_class_grouping_config() -> dict[str, Any]:
         "large_mask_ratio": 0.45,
         "large_bbox_ratio": 0.75,
         "dimension_tolerance_ratio": 0.05,
+        "mutual_containment_threshold": 0.40,
+        "enable_bidirectional_merge": True,
     }
     try:
         defaults.update(config.get_pipeline_config("cross_class_grouping"))
@@ -151,6 +153,12 @@ def _plan_relationships(
         large_bbox_ratio=float(settings["large_bbox_ratio"]),
         dimension_tolerance_ratio=float(
             settings["dimension_tolerance_ratio"]
+        ),
+        mutual_containment_threshold=float(
+            settings.get("mutual_containment_threshold", 0.40)
+        ),
+        enable_bidirectional_merge=bool(
+            settings.get("enable_bidirectional_merge", True)
         ),
     )
 
