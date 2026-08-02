@@ -52,6 +52,17 @@ describe('Workspace', () => {
       'src',
       'data:image/png;base64,ZG9n',
     )
+    expect(within(dialog).getByRole('img', { name: 'Dog preview' })).toHaveClass(
+      'preview-object',
+    )
+    expect(within(dialog).getByRole('img', { name: 'Dog preview' })).toHaveAttribute(
+      'width',
+      '300',
+    )
+    expect(within(dialog).getByRole('img', { name: 'Dog preview' })).toHaveAttribute(
+      'height',
+      '240',
+    )
     expect(within(dialog).getByRole('button', { name: 'Download' })).toBeInTheDocument()
     expect(within(dialog).queryByRole('button', { name: 'Download Dog' })).not.toBeInTheDocument()
   })

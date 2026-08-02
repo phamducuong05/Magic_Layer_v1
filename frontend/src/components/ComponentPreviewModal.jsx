@@ -28,7 +28,13 @@ export default function ComponentPreviewModal({ item, onClose }) {
         </header>
 
         <div className={`preview-image ${item.kind === 'layer' ? 'checkerboard' : ''}`}>
-          <img src={toImageDataUrl(item.image)} alt={`${item.name} preview`} />
+          <img
+            className="preview-object"
+            src={toImageDataUrl(item.image)}
+            alt={`${item.name} preview`}
+            width={item.width}
+            height={item.height}
+          />
         </div>
 
         <button
