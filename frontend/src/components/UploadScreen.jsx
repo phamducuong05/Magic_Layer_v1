@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { processImage } from '../api'
 import { validateManualKeywords } from '../lib/keywords'
 import ExtractionModeSelector from './ExtractionModeSelector'
+import ProcessingProgress from './ProcessingProgress'
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp']
@@ -17,6 +18,7 @@ export default function UploadScreen({
   const [keywordText, setKeywordText] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [progress, setProgress] = useState(null)
   const inputRef = useRef(null)
 
   useEffect(() => () => {
@@ -56,11 +58,17 @@ export default function UploadScreen({
     }
 
     setLoading(true)
+    setProgress({
+      stage: 'keywords',
+      progress: 0,
+      message: 'Preparing extraction',
+    })
     setError('')
     try {
-      onProcessed(await processRequest(file, keywords))
+      onProcessed(await processRequest(file, keywords, setProgress))
     } catch (requestError) {
       setError(requestError.message || 'Layer extraction failed. Please try again.')
+      setProgress(null)
     } finally {
       setLoading(false)
     }
@@ -141,6 +149,8 @@ export default function UploadScreen({
             </div>
           </div>
         )}
+
+        {loading && <ProcessingProgress progress={progress} />}
 
         <div className="submit-row">
           <div aria-live="polite">

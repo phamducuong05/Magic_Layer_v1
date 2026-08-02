@@ -3,14 +3,13 @@
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 import logging as stdlib_logging
+import os
 from time import perf_counter
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 
-DEFAULT_LOG_FORMAT = (
-    "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
-)
-CLI_LOG_FORMAT = "%(levelname)s %(name)s: %(message)s"
+DEFAULT_LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
+CLI_LOG_FORMAT = "%(levelname)s | %(message)s"
 LogLevel = Union[int, str]
 THIRD_PARTY_LOGGERS = (
     "diffusers",
@@ -22,6 +21,48 @@ THIRD_PARTY_LOGGERS = (
 )
 
 
+class ColorFormatter(stdlib_logging.Formatter):
+    """Add readable terminal colors without changing the log record."""
+
+    COLORS = {
+        stdlib_logging.DEBUG: "\033[90m",
+        stdlib_logging.INFO: "\033[96m",
+        stdlib_logging.WARNING: "\033[93m",
+        stdlib_logging.ERROR: "\033[91m",
+        stdlib_logging.CRITICAL: "\033[95m",
+    }
+    RESET = "\033[0m"
+
+    def __init__(
+        self,
+        fmt: str,
+        *,
+        use_colors: Optional[bool] = None,
+    ) -> None:
+        super().__init__(fmt)
+        self.use_colors = (
+            not bool(os.environ.get("NO_COLOR"))
+            if use_colors is None
+            else use_colors
+        )
+
+    def format(self, record: stdlib_logging.LogRecord) -> str:
+        rendered = super().format(record)
+        if not self.use_colors:
+            return rendered
+        color = self.COLORS.get(record.levelno, "")
+        return f"{color}{rendered}{self.RESET}" if color else rendered
+
+
+class CompactWorkflowFilter(stdlib_logging.Filter):
+    """Hide noisy application INFO records while keeping warnings and milestones."""
+
+    def filter(self, record: stdlib_logging.LogRecord) -> bool:
+        if record.levelno != stdlib_logging.INFO:
+            return True
+        return bool(getattr(record, "workflow", False))
+
+
 def configure_logging(
     *,
     level: LogLevel = stdlib_logging.INFO,
@@ -30,9 +71,12 @@ def configure_logging(
     third_party_level: LogLevel = stdlib_logging.WARNING,
 ) -> None:
     """Configure root logging for one application entry point."""
+    handler = stdlib_logging.StreamHandler()
+    handler.setFormatter(ColorFormatter(log_format))
+    handler.addFilter(CompactWorkflowFilter())
     stdlib_logging.basicConfig(
         level=level,
-        format=log_format,
+        handlers=[handler],
         force=force,
     )
     for logger_name in THIRD_PARTY_LOGGERS:
@@ -63,6 +107,23 @@ def log_event(
     )
 
 
+def workflow_event(
+    logger: stdlib_logging.Logger,
+    stage: str,
+    message: str,
+    **metadata: Any,
+) -> None:
+    """Emit one concise INFO milestone intended for the server console."""
+    suffix = _format_metadata(metadata)
+    logger.info(
+        "[%s] %s%s",
+        stage.upper(),
+        message,
+        f" | {suffix}" if suffix else "",
+        extra={"workflow": True},
+    )
+
+
 def _coerce_level(level: LogLevel) -> int:
     if isinstance(level, int):
         return level
@@ -88,6 +149,8 @@ def _format_value(value: Any) -> str:
     ):
         return ",".join(_format_value(item) for item in value)
     rendered = str(value)
+    if len(rendered) > 160:
+        rendered = f"{rendered[:157]}..."
     return repr(rendered) if any(char.isspace() for char in rendered) else rendered
 
 
@@ -105,7 +168,7 @@ def trace_stage(
 ) -> Iterator[None]:
     """Log the start, duration, and failure of one pipeline stage."""
     started_at = perf_counter()
-    log_event(logger, stage, "start", level=stdlib_logging.INFO, **metadata)
+    log_event(logger, stage, "start", level=stdlib_logging.DEBUG, **metadata)
     try:
         yield
     except Exception as exc:
@@ -124,6 +187,6 @@ def trace_stage(
             logger,
             stage,
             "complete",
-            level=stdlib_logging.INFO,
+            level=stdlib_logging.DEBUG,
             duration_ms=round((perf_counter() - started_at) * 1000.0, 3),
         )

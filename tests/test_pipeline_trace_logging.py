@@ -7,7 +7,9 @@ import numpy as np
 from PIL import Image
 
 
-def test_simple_request_logs_every_pipeline_stage(monkeypatch, caplog):
+def test_simple_request_reports_only_key_workflow_stages_at_info(
+    monkeypatch, caplog
+):
     from backend.pipeline import orchestrator
     from backend.pipeline.types import DetectedObject
 
@@ -39,28 +41,30 @@ def test_simple_request_logs_every_pipeline_stage(monkeypatch, caplog):
         Mock(return_value=image),
     )
 
+    updates = []
     with caplog.at_level(logging.INFO, logger=orchestrator.__name__):
-        orchestrator.process_image(image, ["person"], manager=manager)
+        orchestrator.process_image(
+            image,
+            ["person"],
+            manager=manager,
+            progress_callback=lambda stage, progress, message: updates.append(
+                (stage, progress, message)
+            ),
+        )
 
     expected_markers = [
-        "[PIPELINE] START",
-        "[SEGMENTATION] START",
-        "[SEGMENTATION] COMPLETE",
-        "[OVERLAP_DETECTION] START",
-        "[OVERLAP_DETECTION] COMPLETE",
-        "[COMPLETION] SKIP",
-        "[AMODAL_OVERLAP_VALIDATION] SKIP",
-        "[DEPTH_ORDERING] SKIP",
-        "[OBJECT_RECONSTRUCTION] SKIP",
-        "[GROUPING] START",
-        "[GROUPING] COMPLETE",
-        "[MATTING] START",
-        "[MATTING] COMPLETE",
-        "[LAYER_EXTRACTION] START",
-        "[LAYER_EXTRACTION] COMPLETE",
-        "[BACKGROUND_INPAINTING] START",
-        "[BACKGROUND_INPAINTING] COMPLETE",
-        "[PIPELINE] COMPLETE",
+        "[SEGMENTATION] Finding image components",
+        "[OVERLAP] Checking component overlaps",
+        "[RECONSTRUCTION] No component reconstruction needed",
+        "[GROUPING] Grouping related components",
+        "[LAYERS] Extracting transparent layers",
+        "[BACKGROUND] Cleaning the background",
+        "[COMPLETE] Layer extraction complete",
     ]
     for marker in expected_markers:
         assert marker in caplog.text
+    assert "[SEGMENTATION] START" not in caplog.text
+    assert [progress for _, progress, _ in updates] == sorted(
+        progress for _, progress, _ in updates
+    )
+    assert updates[-1][1] == 100

@@ -32,11 +32,13 @@ class FakeExtractor:
 def load_main(monkeypatch):
     fake_image_processor = types.ModuleType("backend.image_processor")
     fake_image_processor.ProcessResult = object
-    fake_image_processor.process_image = lambda image, keywords: SimpleNamespace(
-        background_base64="background",
-        original_width=image.width,
-        original_height=image.height,
-        layers=[],
+    fake_image_processor.process_image = (
+        lambda image, keywords, progress_callback=None: SimpleNamespace(
+            background_base64="background",
+            original_width=image.width,
+            original_height=image.height,
+            layers=[],
+        )
     )
     fake_models = types.ModuleType("backend.models")
     fake_models.model_manager = SimpleNamespace(

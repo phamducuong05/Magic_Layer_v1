@@ -44,10 +44,13 @@ def test_configure_logging_owns_the_application_format(monkeypatch):
 
     logging_config.configure_logging(level="DEBUG", force=True)
 
-    basic_config.assert_called_once_with(
-        level="DEBUG",
-        format=logging_config.DEFAULT_LOG_FORMAT,
-        force=True,
+    call = basic_config.call_args
+    assert call.kwargs["level"] == "DEBUG"
+    assert call.kwargs["force"] is True
+    assert len(call.kwargs["handlers"]) == 1
+    assert isinstance(
+        call.kwargs["handlers"][0].formatter,
+        logging_config.ColorFormatter,
     )
 
 
@@ -124,7 +127,7 @@ def test_trace_stage_logs_start_complete_and_failure(caplog):
     logging_config = _logging_module()
     logger = logging_config.get_logger("test.pipeline.stage")
 
-    with caplog.at_level(logging.INFO, logger="test.pipeline.stage"):
+    with caplog.at_level(logging.DEBUG, logger="test.pipeline.stage"):
         with logging_config.trace_stage(logger, "matting", groups=2):
             pass
         with pytest.raises(RuntimeError, match="synthetic"):
@@ -136,3 +139,78 @@ def test_trace_stage_logs_start_complete_and_failure(caplog):
     assert "duration_ms=" in caplog.text
     assert "[RECONSTRUCTION] FAILED" in caplog.text
     assert "error_type=RuntimeError" in caplog.text
+
+
+def test_color_formatter_adds_ansi_without_mutating_log_message():
+    logging_config = _logging_module()
+    formatter = logging_config.ColorFormatter(
+        "%(levelname)s %(message)s", use_colors=True
+    )
+    record = logging.LogRecord(
+        "test",
+        logging.INFO,
+        __file__,
+        1,
+        "Finding components",
+        (),
+        None,
+    )
+
+    rendered = formatter.format(record)
+
+    assert "\x1b[" in rendered
+    assert "Finding components" in rendered
+    assert record.msg == "Finding components"
+
+
+def test_workflow_event_is_info_and_human_readable(caplog):
+    logging_config = _logging_module()
+    logger = logging_config.get_logger("test.workflow")
+
+    with caplog.at_level(logging.INFO, logger="test.workflow"):
+        logging_config.workflow_event(
+            logger,
+            "keywords",
+            "Extracted keywords",
+            keywords=["dog", "wooden chair"],
+        )
+
+    assert "[KEYWORDS] Extracted keywords" in caplog.text
+    assert "keywords=dog,'wooden chair'" in caplog.text
+
+
+def test_compact_filter_keeps_workflow_info_and_all_errors():
+    logging_config = _logging_module()
+    compact_filter = logging_config.CompactWorkflowFilter()
+    ordinary = logging.LogRecord(
+        "pipeline", logging.INFO, __file__, 1, "model detail", (), None
+    )
+    milestone = logging.LogRecord(
+        "pipeline", logging.INFO, __file__, 1, "workflow", (), None
+    )
+    milestone.workflow = True
+    failure = logging.LogRecord(
+        "pipeline", logging.ERROR, __file__, 1, "failed", (), None
+    )
+
+    assert compact_filter.filter(ordinary) is False
+    assert compact_filter.filter(milestone) is True
+    assert compact_filter.filter(failure) is True
+
+
+def test_log_metadata_truncates_very_long_values(caplog):
+    logging_config = _logging_module()
+    logger = logging_config.get_logger("test.workflow.error")
+
+    with caplog.at_level(logging.ERROR, logger="test.workflow.error"):
+        logging_config.log_event(
+            logger,
+            "pipeline",
+            "failed",
+            level=logging.ERROR,
+            error="x" * 400,
+        )
+
+    assert "x" * 150 in caplog.text
+    assert "x" * 200 not in caplog.text
+    assert "..." in caplog.text

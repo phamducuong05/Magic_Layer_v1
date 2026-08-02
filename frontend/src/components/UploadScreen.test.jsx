@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -39,7 +39,9 @@ describe('UploadScreen', () => {
     await user.upload(screen.getByLabelText('Choose image'), imageFile())
     await user.click(screen.getByRole('button', { name: 'Extract layers' }))
 
-    expect(request).toHaveBeenCalledWith(expect.any(File), null)
+    expect(request).toHaveBeenCalledWith(
+      expect.any(File), null, expect.any(Function),
+    )
     expect(onProcessed).toHaveBeenCalledWith(result)
   })
 
@@ -56,11 +58,11 @@ describe('UploadScreen', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Extract layers' }))
 
-    expect(request).toHaveBeenCalledWith(expect.any(File), [
-      'dog',
-      'wooden chair',
-      'plant',
-    ])
+    expect(request).toHaveBeenCalledWith(
+      expect.any(File),
+      ['dog', 'wooden chair', 'plant'],
+      expect.any(Function),
+    )
   })
 
   it('prevents manual submission with more than ten keywords', async () => {
@@ -78,5 +80,30 @@ describe('UploadScreen', () => {
 
     expect(screen.getByText('Use no more than 10 keywords.')).toBeInTheDocument()
     expect(request).not.toHaveBeenCalled()
+  })
+
+  it('shows live backend progress while extraction is running', async () => {
+    const user = userEvent.setup()
+    let finishRequest
+    const request = vi.fn((file, keywords, onProgress) => {
+      onProgress({
+        stage: 'overlap',
+        progress: 35,
+        message: 'Checking component overlaps',
+      })
+      return new Promise((resolve) => { finishRequest = resolve })
+    })
+    const onProcessed = vi.fn()
+    render(<UploadScreen onProcessed={onProcessed} processRequest={request} />)
+
+    await user.upload(screen.getByLabelText('Choose image'), imageFile())
+    await user.click(screen.getByRole('button', { name: 'Extract layers' }))
+
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '35')
+    expect(screen.getByText('Checking component overlaps')).toBeInTheDocument()
+    expect(screen.getByText('35%')).toBeInTheDocument()
+
+    finishRequest(result)
+    await waitFor(() => expect(onProcessed).toHaveBeenCalledWith(result))
   })
 })

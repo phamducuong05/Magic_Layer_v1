@@ -334,7 +334,7 @@ def test_hd_painter_logs_generation_and_super_resolution_stages(
         runtime=runtime,
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         model.reconstruct(
             Image.new("RGB", (32, 32), "white"),
             Image.new("L", (32, 32), 255),

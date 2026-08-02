@@ -2,14 +2,14 @@
 
 import threading
 from functools import wraps
-from typing import Any, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 from PIL import Image
 
 from ..config import config
 from ..core.helpers import _calc_kernel_size, _image_to_base64
-from ..core.logging import get_logger, log_event, trace_stage
+from ..core.logging import get_logger, log_event, trace_stage, workflow_event
 from .background import generate_final_background
 from .completion import (
     complete_objects,
@@ -37,6 +37,46 @@ from .types import ProcessResult
 
 logger = get_logger(__name__)
 _PIPELINE_LOCK = threading.RLock()
+ProgressCallback = Callable[[str, int, str], None]
+
+
+def _report_progress(
+    callback: Optional[ProgressCallback],
+    stage: str,
+    progress: int,
+    message: str,
+    **metadata: Any,
+) -> None:
+    """Publish one real pipeline checkpoint to logs and the active job."""
+    workflow_event(logger, stage, message, **metadata)
+    if callback is not None:
+        callback(stage, progress, message)
+
+
+def _reconstruction_pair_labels(
+    objects: Sequence[Any],
+    pair_decisions: Sequence[Any],
+) -> list[tuple[str, str]]:
+    """Return readable hidden/occluder names for reconstruction logs."""
+    objects_by_id = {detected.object_id: detected for detected in objects}
+    return sorted(
+        {
+            (
+                objects_by_id[occluded_id].display_label,
+                objects_by_id[occluder_id].display_label,
+            )
+            for decision in pair_decisions
+            for occluded_id, occluder_id in (
+                decision.reconstruction_directions
+                or (
+                    ((decision.occluded_id, decision.occluder_id),)
+                    if decision.occluded_id and decision.occluder_id
+                    else ()
+                )
+            )
+            if occluded_id in objects_by_id and occluder_id in objects_by_id
+        }
+    )
 
 
 def _serialized_pipeline(function):
@@ -322,6 +362,7 @@ def process_image(
     image: Image.Image,
     keywords: Sequence[str],
     manager: Any = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> ProcessResult:
     """Coordinate segmentation, matting, layer extraction, and inpainting."""
     manager = _resolve_manager(manager)
@@ -340,6 +381,12 @@ def process_image(
         "diagnostics_directory"
     )
 
+    _report_progress(
+        progress_callback,
+        "segmentation",
+        15,
+        "Finding image components",
+    )
     try:
         with trace_stage(logger, "segmentation"):
             objects = _segment(
@@ -395,6 +442,13 @@ def process_image(
         )
         if diagnostics_enabled and diagnostics_config["log_summary"]:
             log_pipeline_diagnostics(diagnostics)
+        _report_progress(
+            progress_callback,
+            "complete",
+            100,
+            "Layer extraction complete",
+            group_count=0,
+        )
         return ProcessResult(
             background_base64=_image_to_base64(image),
             original_width=width,
@@ -412,6 +466,12 @@ def process_image(
         "diagnostics_directory"
     )
     relationship_plan = _plan_relationships(objects, image.size)
+    _report_progress(
+        progress_callback,
+        "overlap",
+        35,
+        "Checking component overlaps",
+    )
     with trace_stage(logger, "overlap_detection"):
         potential_overlap_pairs = link_overlap_partners(
             objects,
@@ -565,7 +625,28 @@ def process_image(
             and np.any(detected.reconstruction_mask)
             for detected in objects
         )
+        reconstruction_pairs = _reconstruction_pair_labels(
+            objects,
+            pair_decisions,
+        )
+        if reconstruction_pairs:
+            workflow_event(
+                logger,
+                "overlap",
+                "Components requiring reconstruction",
+                pairs=[
+                    f"{hidden} <- {front}"
+                    for hidden, front in reconstruction_pairs
+                ],
+            )
         if needs_reconstruction:
+            _report_progress(
+                progress_callback,
+                "reconstruction",
+                55,
+                "Reconstructing "
+                f"{len(reconstruction_pairs)} overlapping component pair(s)",
+            )
             if manager.has_object_reconstruction_model():
                 reconstruction_model = None
                 retain_reconstruction_weights = False
@@ -644,6 +725,12 @@ def process_image(
                     reason="model_not_configured",
                 )
         else:
+            _report_progress(
+                progress_callback,
+                "reconstruction",
+                55,
+                "No component reconstruction needed",
+            )
             log_event(
                 logger,
                 "object_reconstruction",
@@ -652,6 +739,12 @@ def process_image(
                 reason="no_reconstruction_masks",
             )
     else:
+        _report_progress(
+            progress_callback,
+            "reconstruction",
+            55,
+            "No component reconstruction needed",
+        )
         log_event(
             logger,
             "depth_ordering",
@@ -753,6 +846,12 @@ def process_image(
                         ),
                     )
 
+        _report_progress(
+            progress_callback,
+            "grouping",
+            70,
+            "Grouping related components",
+        )
         with trace_stage(logger, "grouping", object_count=len(objects)):
             with timings.measure("group_composition"):
                 final_groups = group_reconstructed_objects(
@@ -765,6 +864,12 @@ def process_image(
                 logger,
                 "grouping",
                 "result",
+                group_count=len(final_groups),
+            )
+            workflow_event(
+                logger,
+                "grouping",
+                "Final component groups",
                 group_count=len(final_groups),
             )
 
@@ -801,6 +906,12 @@ def process_image(
         background_inpaint = timings.wrap(
             "background_inpainting", background_model.process
         )
+        _report_progress(
+            progress_callback,
+            "layers",
+            84,
+            "Extracting transparent layers",
+        )
         with trace_stage(
             logger, "layer_extraction", group_count=len(final_groups)
         ):
@@ -833,6 +944,12 @@ def process_image(
                 "result",
                 layer_count=len(layers),
             )
+        _report_progress(
+            progress_callback,
+            "background",
+            92,
+            "Cleaning the background",
+        )
         with trace_stage(logger, "background_inpainting"):
             if background_diagnostics_directory is None:
                 background = generate_final_background(
@@ -869,6 +986,14 @@ def process_image(
     )
     if diagnostics_enabled and diagnostics_config["log_summary"]:
         log_pipeline_diagnostics(diagnostics)
+
+    _report_progress(
+        progress_callback,
+        "complete",
+        100,
+        "Layer extraction complete",
+        group_count=len(final_groups),
+    )
 
     return ProcessResult(
         background_base64=_image_to_base64(background),

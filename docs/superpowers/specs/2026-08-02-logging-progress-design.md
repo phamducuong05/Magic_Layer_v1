@@ -15,6 +15,8 @@ The backend adds an in-memory, thread-safe job store and two endpoints:
 
 Each job runs keyword extraction asynchronously and the blocking model pipeline in a worker thread. The existing synchronous endpoint remains unchanged for compatibility. The in-memory store is intentionally scoped to the current single-process model server; a multi-worker deployment must replace it with a shared store such as Redis.
 
+The store retains at most 20 jobs under normal operation and evicts the oldest terminal jobs first. Active jobs are never evicted, even when the temporary limit is exceeded.
+
 ## Progress Contract
 
 Job status contains `job_id`, `status`, `stage`, `progress`, and `message`. `status` is one of `queued`, `processing`, `completed`, or `failed`; `progress` is an integer from 0 through 100. Completed jobs include `result`; failed jobs include a stable English `error`.

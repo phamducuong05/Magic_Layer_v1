@@ -3,15 +3,25 @@ main.py — FastAPI application cho AI Magic Canvas.
 
 Endpoints:
   POST /api/process-image  — nhận ảnh + keywords, trả layers + background
+  POST /api/process-image/jobs — tạo background processing job
+  GET  /api/process-image/jobs/{job_id} — đọc tiến độ hoặc kết quả job
   GET  /health             — health check
 """
 
+import asyncio
+from dataclasses import asdict
 import io
 from typing import List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from PIL import Image
 from pydantic import BaseModel
 
@@ -19,30 +29,40 @@ import numpy as np
 
 try:
     from .config import config
-    from .core.logging import configure_logging, get_logger
+    from .core.logging import (
+        configure_logging,
+        get_logger,
+        log_event,
+        workflow_event,
+    )
     from .image_processor import ProcessResult, process_image
     from .models import model_manager
     from .services import (
-        ClaudeVisionKeywordExtractor,
         InvalidKeywordExtraction,
         InvalidSuppliedKeywords,
         KeywordExtractor,
         KeywordExtractorUnavailable,
         normalize_keywords,
     )
+    from .services.process_jobs import ProcessJobSnapshot, ProcessJobStore
 except ImportError:  # Legacy: run uvicorn from inside backend/.
     from config import config
-    from core.logging import configure_logging, get_logger
+    from core.logging import (
+        configure_logging,
+        get_logger,
+        log_event,
+        workflow_event,
+    )
     from image_processor import ProcessResult, process_image
     from models import model_manager
     from services import (
-        ClaudeVisionKeywordExtractor,
         InvalidKeywordExtraction,
         InvalidSuppliedKeywords,
         KeywordExtractor,
         KeywordExtractorUnavailable,
         normalize_keywords,
     )
+    from services.process_jobs import ProcessJobSnapshot, ProcessJobStore
 
 # ──────────────────────────────────────────────
 # Logging
@@ -59,6 +79,7 @@ configure_logging(
 )
 logger = get_logger(__name__)
 _keyword_extractor: Optional[KeywordExtractor] = None
+process_job_store = ProcessJobStore()
 
 
 # ──────────────────────────────────────────────
@@ -85,9 +106,9 @@ app.add_middleware(
 # ──────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Server starting — loading AI models...")
+    workflow_event(logger, "server", "Loading AI models")
     model_manager.warmup_first_stage()
-    logger.info("Server ready.")
+    workflow_event(logger, "server", "Ready")
 
 
 # ──────────────────────────────────────────────
@@ -109,6 +130,132 @@ class ProcessResponse(BaseModel):
     layers: List[LayerResponse]
 
 
+class ProcessJobResponse(BaseModel):
+    job_id: str
+    status: str
+    stage: str
+    progress: int
+    message: str
+    result: Optional[ProcessResponse] = None
+    error: Optional[str] = None
+
+
+def _build_process_response(result: ProcessResult) -> ProcessResponse:
+    return ProcessResponse(
+        background_base64=result.background_base64,
+        original_width=result.original_width,
+        original_height=result.original_height,
+        layers=[
+            LayerResponse(
+                keyword=layer.keyword,
+                png_base64=layer.png_base64,
+                x=layer.x,
+                y=layer.y,
+                width=layer.width,
+                height=layer.height,
+            )
+            for layer in result.layers
+        ],
+    )
+
+
+def _build_job_response(snapshot: ProcessJobSnapshot) -> ProcessJobResponse:
+    return ProcessJobResponse(**asdict(snapshot))
+
+
+async def _read_uploaded_image(file: UploadFile) -> Image.Image:
+    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Định dạng file không hỗ trợ: {file.content_type}. "
+                "Chỉ chấp nhận JPEG/PNG/WEBP."
+            ),
+        )
+    try:
+        raw = await file.read()
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+        image = Image.fromarray(np.array(image, dtype=np.uint8))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Không đọc được ảnh: {str(exc)}",
+        ) from exc
+
+    max_dimension = 2048
+    width, height = image.size
+    if max(width, height) > max_dimension:
+        scale = max_dimension / max(width, height)
+        image = image.resize(
+            (int(width * scale), int(height * scale)),
+            Image.LANCZOS,
+        )
+        log_event(
+            logger,
+            "upload",
+            "resized",
+            original_size=f"{width}x{height}",
+            resized_size=f"{image.width}x{image.height}",
+        )
+    return image
+
+
+def _job_error_message(exc: Exception) -> str:
+    if isinstance(exc, KeywordExtractorUnavailable):
+        return "The image analysis service is temporarily unavailable."
+    if isinstance(exc, InvalidSuppliedKeywords):
+        return "The supplied keywords are invalid."
+    if isinstance(exc, InvalidKeywordExtraction):
+        return "The image analysis service returned invalid keywords."
+    return "Layer extraction failed. Please try again."
+
+
+async def _run_process_job(
+    job_id: str,
+    image: Image.Image,
+    supplied_keywords: Optional[str],
+) -> None:
+    try:
+        process_job_store.update(
+            job_id,
+            "keywords",
+            5,
+            "Analyzing image keywords",
+        )
+        keywords = await resolve_keywords(image, supplied_keywords)
+        workflow_event(
+            logger,
+            "keywords",
+            "Extracted keywords",
+            keywords=keywords,
+        )
+        process_job_store.update(job_id, "keywords", 10, "Keywords ready")
+
+        def on_progress(stage: str, progress: int, message: str) -> None:
+            process_job_store.update(
+                job_id,
+                stage,
+                progress,
+                message,
+            )
+
+        result = await asyncio.to_thread(
+            process_image,
+            image,
+            keywords,
+            progress_callback=on_progress,
+        )
+        response = _build_process_response(result)
+        process_job_store.complete(job_id, response.model_dump())
+    except Exception as exc:
+        logger.error(
+            "[FAILED] Processing job: %s",
+            str(exc) or type(exc).__name__,
+        )
+        logger.debug("Processing job traceback", exc_info=True)
+        process_job_store.fail(job_id, _job_error_message(exc))
+
+
 # ──────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────
@@ -116,6 +263,42 @@ class ProcessResponse(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post(
+    "/api/process-image/jobs",
+    response_model=ProcessJobResponse,
+    status_code=202,
+)
+async def create_process_job(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    keywords: Optional[str] = Form(None),
+):
+    image = await _read_uploaded_image(file)
+    snapshot = process_job_store.create()
+    background_tasks.add_task(
+        _run_process_job,
+        snapshot.job_id,
+        image,
+        keywords,
+    )
+    return _build_job_response(snapshot)
+
+
+@app.get(
+    "/api/process-image/jobs/{job_id}",
+    response_model=ProcessJobResponse,
+)
+async def get_process_job(job_id: str):
+    try:
+        snapshot = process_job_store.get(job_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Processing job not found.",
+        ) from None
+    return _build_job_response(snapshot)
 
 
 def get_keyword_extractor() -> KeywordExtractor:
@@ -129,6 +312,11 @@ def get_keyword_extractor() -> KeywordExtractor:
         raise KeywordExtractorUnavailable(
             f"Unsupported VLM provider: {settings['name']!r}"
         )
+    try:
+        from .services.claude_vision import ClaudeVisionKeywordExtractor
+    except ImportError:  # Legacy: run uvicorn from inside backend/.
+        from services.claude_vision import ClaudeVisionKeywordExtractor
+
     _keyword_extractor = ClaudeVisionKeywordExtractor(settings)
     return _keyword_extractor
 
@@ -186,10 +374,12 @@ async def resolve_keywords(
         for keyword in normalized_occluders
         if keyword.casefold() not in target_keys
     ][:max_occluders]
-    logger.info(
-        "Resolved %d target keywords and %d occluder keywords",
-        len(resolved_targets),
-        len(resolved_occluders),
+    log_event(
+        logger,
+        "keywords",
+        "resolved",
+        target_count=len(resolved_targets),
+        occluder_count=len(resolved_occluders),
     )
     return [*resolved_targets, *resolved_occluders]
 
@@ -213,31 +403,7 @@ async def api_process_image(
     4. Merge masks → LaMa inpaint → ảnh nền sạch
     5. Trả về JSON với background + danh sách layers
     """
-    # ── Validate file ──
-    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Định dạng file không hỗ trợ: {file.content_type}. "
-                "Chỉ chấp nhận JPEG/PNG/WEBP."
-            ),
-        )
-
-    # ── Đọc ảnh ──
-    try:
-        raw = await file.read()
-        image = Image.open(io.BytesIO(raw)).convert("RGB")
-        image = Image.fromarray(np.array(image, dtype=np.uint8))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Không đọc được ảnh: {str(e)}")
-
-    # Giới hạn kích thước để tránh OOM
-    MAX_DIM = 2048
-    w, h = image.size
-    if max(w, h) > MAX_DIM:
-        scale = MAX_DIM / max(w, h)
-        image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        logger.info(f"Image resized from {w}x{h} to {image.size}")
+    image = await _read_uploaded_image(file)
 
     # ── Resolve keywords ──
     try:
@@ -260,29 +426,20 @@ async def api_process_image(
             detail="Dịch vụ phân tích ảnh không trả về từ khóa hợp lệ.",
         )
 
-    logger.info(f"Processing image {image.size} with keywords: {kw_list}")
+    workflow_event(
+        logger,
+        "keywords",
+        "Extracted keywords",
+        keywords=kw_list,
+    )
 
     # ── Chạy pipeline ──
     try:
         result: ProcessResult = process_image(image, kw_list)
     except Exception as e:
-        logger.exception("Pipeline error")
+        logger.error("[FAILED] Pipeline: %s", str(e) or type(e).__name__)
+        logger.debug("Pipeline traceback", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Lỗi xử lý: {str(e)}")
 
     # ── Build response ──
-    return ProcessResponse(
-        background_base64=result.background_base64,
-        original_width=result.original_width,
-        original_height=result.original_height,
-        layers=[
-            LayerResponse(
-                keyword=layer.keyword,
-                png_base64=layer.png_base64,
-                x=layer.x,
-                y=layer.y,
-                width=layer.width,
-                height=layer.height,
-            )
-            for layer in result.layers
-        ],
-    )
+    return _build_process_response(result)
