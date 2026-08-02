@@ -20,6 +20,8 @@ pipeline:
   segmentation:
     diagnostics_directory: outputs/object_masks
     duplicate_mask_overlap_threshold: 0.90
+    mask_min_component_area_pixels: 50
+    mask_fill_holes: true
   cross_class_grouping:
     enabled: true
     containment_threshold: 0.70

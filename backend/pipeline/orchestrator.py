@@ -110,6 +110,8 @@ def _get_segmentation_config() -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "diagnostics_directory": None,
         "duplicate_mask_overlap_threshold": 0.90,
+        "mask_min_component_area_pixels": 0,
+        "mask_fill_holes": False,
     }
     try:
         defaults.update(config.get_pipeline_config("segmentation"))
@@ -190,6 +192,8 @@ def _segment(
     manager: Any,
     diagnostics_directory: str | None = None,
     duplicate_mask_overlap_threshold: float = 0.90,
+    min_component_area_pixels: int = 0,
+    fill_holes: bool = False,
 ):
     processor = manager.get_segmentation_model().get_processor()
     return extract_raw_objects(
@@ -198,6 +202,8 @@ def _segment(
         processor,
         diagnostics_directory=diagnostics_directory,
         duplicate_mask_overlap_threshold=duplicate_mask_overlap_threshold,
+        min_component_area_pixels=min_component_area_pixels,
+        fill_holes=fill_holes,
     )
 
 
@@ -252,6 +258,14 @@ def process_masks(
                     segmentation_config.get(
                         "duplicate_mask_overlap_threshold", 0.90
                     )
+                ),
+                min_component_area_pixels=int(
+                    segmentation_config.get(
+                        "mask_min_component_area_pixels", 0
+                    )
+                ),
+                fill_holes=bool(
+                    segmentation_config.get("mask_fill_holes", False)
                 ),
             )
             log_event(
@@ -337,6 +351,14 @@ def process_image(
                     segmentation_config.get(
                         "duplicate_mask_overlap_threshold", 0.90
                     )
+                ),
+                min_component_area_pixels=int(
+                    segmentation_config.get(
+                        "mask_min_component_area_pixels", 0
+                    )
+                ),
+                fill_holes=bool(
+                    segmentation_config.get("mask_fill_holes", False)
                 ),
             )
             log_event(

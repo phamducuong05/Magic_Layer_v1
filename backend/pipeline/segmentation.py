@@ -2,9 +2,11 @@ import math
 from pathlib import Path
 from typing import Any, Sequence
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
+from scipy.ndimage import binary_fill_holes
 
 from ..core.helpers import (
     _bbox_from_mask,
@@ -66,12 +68,40 @@ def save_object_masks(
         mask_image.save(directory / filename)
 
 
+def _clean_segmentation_mask(
+    mask: np.ndarray,
+    *,
+    min_component_area_pixels: int,
+    fill_holes: bool,
+) -> np.ndarray:
+    """Remove tiny components and fill enclosed holes in a raw SAM3 mask."""
+    result = (mask > 0).astype(bool)
+
+    # Step 1: remove small connected components
+    if min_component_area_pixels > 0 and np.any(result):
+        component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            result.astype(np.uint8), connectivity=8
+        )
+        for label in range(1, component_count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < min_component_area_pixels:
+                result[labels == label] = False
+
+    # Step 2: fill enclosed holes
+    if fill_holes and np.any(result):
+        result = binary_fill_holes(result)
+
+    return result.astype(np.uint8) * 255
+
+
 def extract_raw_objects(
     image: Image.Image,
     keywords: Sequence[str],
     processor: Any,
     diagnostics_directory: str | Path | None = None,
     duplicate_mask_overlap_threshold: float = 0.90,
+    min_component_area_pixels: int = 0,
+    fill_holes: bool = False,
 ) -> list[DetectedObject]:
     """Return one stable object record per non-empty raw SAM3 mask."""
     if not math.isfinite(duplicate_mask_overlap_threshold) or not (
@@ -124,6 +154,16 @@ def extract_raw_objects(
             keyword_masks = [
                 _normalise_mask(mask, image.size) for mask in masks
             ]
+
+            if min_component_area_pixels > 0 or fill_holes:
+                keyword_masks = [
+                    _clean_segmentation_mask(
+                        m,
+                        min_component_area_pixels=min_component_area_pixels,
+                        fill_holes=fill_holes,
+                    )
+                    for m in keyword_masks
+                ]
 
             for index, mask in enumerate(keyword_masks):
                 bbox = _bbox_from_mask(mask)
