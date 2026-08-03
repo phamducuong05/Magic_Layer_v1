@@ -145,10 +145,19 @@ def test_extract_keywords_uses_indexed_occluder_mode_for_each_target():
         "refined_keyword",
         "occluders",
     ]
+    manual_prompt = " ".join(request["system"].split())
     assert (
-        "exhaustively return independent objects that visibly"
-        in request["system"]
+        "Exhaustively return independent objects that visibly occlude"
+        in manual_prompt
     )
+    assert "identify every visible instance matched by that target" in manual_prompt
+    assert (
+        "evaluate occlusion separately for every matched instance"
+        in manual_prompt
+    )
+    assert "union of independent objects" in manual_prompt
+    assert "closer to the camera and physically hide" in manual_prompt
+    assert "Bounding-box overlap, silhouette overlap" in manual_prompt
     target_data = request["messages"][0]["content"][1]["text"]
     assert '"red four-door passenger automobile"' in target_data
 
@@ -376,7 +385,7 @@ def test_automatic_mode_allows_people_above_three_visible_people():
     assert result.keywords == ["people"]
 
 
-def test_manual_prompt_requires_exhaustive_parent_level_occluders():
+def test_manual_prompt_uses_common_parent_rules_without_duplicates():
     client = FakeClient(
         response=make_response(
             '{"visible_person_count": 1, "target_results": ['
@@ -395,8 +404,13 @@ def test_manual_prompt_requires_exhaustive_parent_level_occluders():
 
     prompt = " ".join(client.messages.last_request["system"].split())
     assert "Inspect every user target independently" in prompt
-    assert "hand, glasses, hat, or clothing" in prompt
-    assert "return the person parent" in prompt
+    assert "Never return isolated body parts" in prompt
+    assert "A worn hat is a special parent-label modifier" in prompt
+    assert "Propose a simpler target label" not in prompt
+    assert "hand, glasses, hat, or clothing" not in prompt
+    assert "return the person parent" not in prompt
+    assert "Exclude objects that are merely nearby" not in prompt
+    assert "Preserve distinct user target types" not in prompt
 
 
 def test_extract_keywords_maps_transient_anthropic_error():
