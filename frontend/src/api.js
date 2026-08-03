@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8009'
+const API_BASE = import.meta.env.VITE_API_URL || 'http://192.168.1.20:8009'
 
 const STATUS_MESSAGES = {
   400: 'Check the selected image and keywords, then try again.',

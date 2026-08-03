@@ -34,7 +34,9 @@ describe('processImage', () => {
     )
 
     const [url, request] = fetchImpl.mock.calls[0]
-    expect(url).toMatch(/\/api\/process-image\/jobs$/)
+    expect(url).toBe(
+      'http://192.168.1.20:8009/api/process-image/jobs',
+    )
     expect(request.body.get('file')).toBeInstanceOf(File)
     expect(request.body.has('keywords')).toBe(false)
     expect(fetchImpl.mock.calls[1][0]).toMatch(/\/jobs\/job-1$/)
